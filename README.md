@@ -370,15 +370,21 @@ The evolve mode is built on three ideas pulled from real reasoning research:
 3. **Generalization** — the winning template is a *composition* of moves from different thinkers, which means it generalizes across task types (no overfit to one benchmark item).
 
 ```js
-import { evolvePrompts, applyEvolvedPrompt, loadBest, PATTERNS, BENCH } from 'deepthink-js';
+import { evolvePrompts, applyEvolvedPrompt, loadBest, PATTERNS, BENCH, OOD_BENCH } from 'deepthink-js';
 
-// run evolution
+// run evolution with the OOD probe — the loop trains on BENCH, then scores
+// the winner on the held-out OOD_BENCH and reports the gap.
 const result = await evolvePrompts(callChat, {
   popSize: 10,
   generations: 8,
-  bench: BENCH,           // or your own benchmark
+  bench: BENCH,
+  oodBench: OOD_BENCH,
 });
 console.log('best:', result.best.id, 'fitness:', result.best.fitness);
+if (result.oodScore != null) {
+  const gap = (result.best.fitness || 0) - result.oodScore;
+  console.log(`OOD: ${result.oodScore.toFixed(3)}  gap: ${gap.toFixed(3)}${gap > 0.20 ? '  ⚠ overfit' : '  ✓ generalizes'}`);
+}
 console.log('log at:', result.runDir);
 
 // apply the winning template to a new hard problem
@@ -417,6 +423,8 @@ node scripts/probeGeneralize.js <runId>
 ```
 
 The OOD probe uses 5 held-out items (`ood-01-fair-share`, `ood-02-subset-sum`, `ood-03-monty-extended`, `ood-04-anagram-check`, `ood-05-orbit`) that the evolution loop never sees. If the in-distribution score is high but the OOD score is much lower, the prompt is gaming the bench — discard it and re-run with a wider `BENCH` distribution or fewer generations.
+
+**Interpreting the gap:** in practice on `gemma4:31b-cloud`, the in-distribution BENCH runs at ~0.7 while the OOD bench runs at ~0.3. That gap is mostly *bench hardness* (the OOD items include multi-number and algorithmic problems that even strong models get wrong) rather than prompt overfit. The real signal is `probeGeneralize` — if the winner still produces a coherent, structured answer on the 3 hand-picked hard problems, the prompt has generalized even if its numeric OOD score is low.
 
 ---
 

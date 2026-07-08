@@ -11,7 +11,7 @@ function norm(text) {
 }
 
 // for a math/probability item, try to find the number in the text
-function extractNumber(text) {
+export function extractNumber(text) {
   const t = norm(text);
   // try direct parse first
   const direct = parseDataType(t, 'double');
@@ -20,6 +20,58 @@ function extractNumber(text) {
   const m = t.match(/-?\d+(?:\.\d+)?/g);
   if (!m) return NaN;
   return parseFloat(m[m.length - 1]);
+}
+
+// for probability: a model often answers "27.8%" or "0.278". try both scales.
+export function extractProbability(text, ref) {
+  const t = norm(text).toLowerCase();
+  // strip percent sign, try direct
+  const cleaned = t.replace(/%/g, '');
+  const direct = parseDataType(cleaned, 'double');
+  if (typeof direct === 'number' && isFinite(direct)) {
+    // if ref is < 1 and the direct is >= 1 and there's a % sign, scale
+    if (ref > 0 && ref < 1 && direct >= 1 && t.includes('%')) {
+      return direct / 100;
+    }
+    return direct;
+  }
+  return extractNumber(text);
+}
+
+// pull all numbers from text, in order. used for multi-answer problems.
+export function extractAllNumbers(text) {
+  const t = norm(text);
+  const m = t.match(/-?\d+(?:\.\d+)?/g);
+  if (!m) return [];
+  return m.map(s => parseFloat(s)).filter(x => isFinite(x));
+}
+
+// score a multi-answer problem: each expected answer must appear in the text
+// within tolerance. reference is { label: value, ... } or [value, value, ...].
+export function multiNumberScore(text, reference, tol) {
+  const nums = extractAllNumbers(text);
+  let entries = [];
+  if (Array.isArray(reference)) entries = reference.map((v, i) => [`a${i}`, v]);
+  else entries = Object.entries(reference);
+  if (entries.length === 0 || nums.length === 0) return { score: 0, matched: 0, total: entries.length };
+  // greedy match: for each expected, find the closest extracted number, mark used
+  const used = new Set();
+  let matched = 0;
+  for (const [, ref] of entries) {
+    let bestI = -1, bestRel = Infinity;
+    for (let i = 0; i < nums.length; i++) {
+      if (used.has(i)) continue;
+      const v = nums[i];
+      if (typeof ref !== 'number' || !isFinite(ref)) continue;
+      const rel = ref === 0 ? Math.abs(v) : Math.abs(v - ref) / Math.abs(ref);
+      if (rel < bestRel) { bestRel = rel; bestI = i; }
+    }
+    if (bestI >= 0 && bestRel <= (tol || 0.05)) {
+      matched++;
+      used.add(bestI);
+    }
+  }
+  return { score: entries.length ? matched / entries.length : 0, matched, total: entries.length };
 }
 
 // for a "what time" item, parse HH:MM or minutes
@@ -53,19 +105,39 @@ async function runCodeTests(text, item) {
   const fn = text.match(/```python\s*([\s\S]*?)```/i)?.[1]?.trim() || '';
   if (!fn) return { ran: false, passed: 0, total: item.reference.testCases.length, error: 'no function body' };
 
-  const harness = item.reference.testCases.map((tc, i) =>
-    `try:\n    got = is_palindrome(${tc.input})\n    ok = (got == ${tc.expected})\n    print(f"tc{i}:{int(ok)}:{got}")\nexcept Exception as e:\n    print(f"tc{i}:0:ERR:{e}")`
-  ).join('\n');
+  // figure out the function name to call. prefer the reference's functionName, else
+  // grab the first `def NAME(` from the candidate code, else fall back to a generic name.
+  let fnName = item.reference.functionName;
+  if (!fnName) {
+    const m = fn.match(/def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/);
+    if (m) fnName = m[1];
+  }
+  if (!fnName) fnName = 'solution';
+
+  const arity = (fn.match(/def\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(([^)]*)\)/)?.[1] || '').split(',').map(s => s.trim()).filter(Boolean).length;
+  const inputs = item.reference.testCases.map(tc => {
+    // 1-arg call: pass first arg. 2-arg: pass both. otherwise pass the whole thing
+    if (arity <= 1) {
+      const parts = String(tc.input).split(',');
+      return parts[0];
+    }
+    return `(${tc.input})`;
+  });
+
+  const harness = item.reference.testCases.map((tc, i) => {
+    const call = arity <= 1 ? `${fnName}(${inputs[i]})` : `${fnName}(${inputs[i].slice(1, -1)})`;
+    return `try:\n    got = ${call}\n    ok = (got == ${tc.expected})\n    print(f"tc{i}:{int(ok)}:{got}")\nexcept Exception as e:\n    print(f"tc{i}:0:ERR:{e}")`;
+  }).join('\n');
 
   try {
     const out = await runPythonSandbox(fn + '\n\n' + harness);
-    const text = String(out || '');
+    const outText = String(out || '');
     let passed = 0;
-    let total = item.reference.testCases.length;
+    const total = item.reference.testCases.length;
     for (let i = 0; i < total; i++) {
-      if (text.includes(`tc${i}:1`)) passed++;
+      if (outText.includes(`tc${i}:1`)) passed++;
     }
-    return { ran: true, passed, total };
+    return { ran: true, passed, total, fnName };
   } catch (e) {
     return { ran: false, passed: 0, total: item.reference.testCases.length, error: e.message };
   }
@@ -146,6 +218,14 @@ export async function scoreOne(callChat, output, item, opts = {}) {
         out.extracted = { timeOk, distOk };
         break;
       }
+      // multi-number reference (object with several numeric fields, or array)
+      if (item.reference && typeof item.reference === 'object' && !('time' in item.reference) && !('distanceFromX' in item.reference)) {
+        const m = multiNumberScore(text, item.reference, item.numericTolerance || 0.05);
+        out.components.numeric = m.score;
+        out.score = m.score;
+        out.extracted = { matched: m.matched, total: m.total, numbers: extractAllNumbers(text) };
+        break;
+      }
       // plain number reference
       const num = extractNumber(text);
       out.components.numeric = numericScore(num, item.reference, item.numericTolerance || 0.01);
@@ -154,7 +234,7 @@ export async function scoreOne(callChat, output, item, opts = {}) {
       break;
     }
     case 'probability': {
-      const num = extractNumber(text);
+      const num = extractProbability(text, item.reference);
       out.components.numeric = numericScore(num, item.reference, item.numericTolerance || 0.02);
       out.score = out.components.numeric;
       out.extracted = { probability: num };

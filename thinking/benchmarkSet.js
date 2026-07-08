@@ -121,3 +121,47 @@ export function includesAnyCaseInsensitive(text, words) {
   const l = text.toLowerCase();
   return words.some(w => l.includes(w.toLowerCase()));
 }
+
+// out-of-distribution benchmark: held-out problems used to check whether an evolved
+// prompt has overfit the BENCH above. the evolution loop never sees these.
+export const OOD_BENCH = [
+  {
+    id: 'ood-01-fair-share',
+    kind: 'math',
+    prompt: 'Three friends order a pizza cut into 8 equal slices. Friend A eats 1 slice, friend B eats 2, friend C eats 3. They split the bill ($40) and a $5 tip evenly. How much does each person owe?',
+    reference: { A: 11.5625, B: 16.5625, C: 16.875 },
+    numericTolerance: 0.05
+  },
+  {
+    id: 'ood-02-subset-sum',
+    kind: 'probability',
+    prompt: 'You roll a fair 6-sided die three times. What is the probability that the three rolls can be arranged to form an increasing sequence?',
+    reference: 0.278,
+    numericTolerance: 0.05
+  },
+  {
+    id: 'ood-03-monty-extended',
+    kind: 'logic',
+    prompt: 'You are on a game show. There are 4 doors. One has a car, three have goats. You pick door 1. The host, who knows where the car is, opens doors 3 and 4 (both goats). Should you switch to door 2? Answer YES, NO, or INDETERMINATE, give a one-sentence reason, and (if INDETERMINATE) a one-sentence counterexample.',
+    reference: { answer: 'YES' },
+    weight: 1.0
+  },
+  {
+    id: 'ood-04-anagram-check',
+    kind: 'code',
+    prompt: 'Write a Python function `is_anagram(a, b)` that returns True iff a and b are anagrams of each other (ignoring case, spaces, and punctuation). Output ONLY the function.',
+    reference: { lang: 'python', functionName: 'is_anagram', testCases: [
+      { input: '"listen", "silent"', expected: true },
+      { input: '"hello", "world"', expected: false },
+      { input: '"Triangle", "integral"', expected: true },
+      { input: '"apple", "pale"', expected: false }
+    ]}
+  },
+  {
+    id: 'ood-05-orbit',
+    kind: 'science',
+    prompt: 'A satellite orbits Earth at 4 times the radius of a low-Earth orbit. Using Kepler\'s third law, how does its orbital period compare to the LEO period?',
+    reference: 8.0,
+    numericTolerance: 0.05
+  }
+];

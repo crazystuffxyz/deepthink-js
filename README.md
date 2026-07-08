@@ -401,6 +401,23 @@ The seed population includes a `fableMetaPrompt` variant that forces a visible `
 
 All new modes respect the existing `type`, `depth`, `checks`, `onChunk`, and `model` options. They short-circuit before the main flow and never call the legacy paths unless you set the option to `false`.
 
+### OOD Probe (generalization check)
+
+Once an evolution run finishes, run two probes to make sure the winning template actually generalizes instead of having overfit the in-distribution benchmark:
+
+```bash
+# 1. score the winner on a held-out OOD benchmark (5 fresh problems, never seen by the loop)
+node scripts/probeOOD.js <runId>
+# writes data/evolved/<runId>/ood-score.json with {idFitness, oodFitness, gap}
+# gap > 0.20 means the winner overfit — re-evolve with a wider benchmark
+
+# 2. apply the winner to 3 hand-picked "hard hard problems" (consensus protocol, dedupe, hypothesis)
+node scripts/probeGeneralize.js <runId>
+# prints the winner's full <thinking>...</thinking> + answer trace
+```
+
+The OOD probe uses 5 held-out items (`ood-01-fair-share`, `ood-02-subset-sum`, `ood-03-monty-extended`, `ood-04-anagram-check`, `ood-05-orbit`) that the evolution loop never sees. If the in-distribution score is high but the OOD score is much lower, the prompt is gaming the bench — discard it and re-run with a wider `BENCH` distribution or fewer generations.
+
 ---
 
 ### `generateAndRunProject()` (via codeGenerator)

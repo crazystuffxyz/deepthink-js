@@ -190,6 +190,7 @@ export async function evolvePrompts(callChat, opts = {}) {
   const popSize = opts.popSize || 10;
   const generations = opts.generations || 8;
   const bench = opts.bench || BENCH;
+  const oodBench = opts.oodBench || null;
   const dataDir = opts.dataDir || path.join(process.cwd(), 'data', 'evolved');
   fs.mkdirSync(dataDir, { recursive: true });
   const runId = opts.runId || new Date().toISOString().replace(/[:.]/g, '-');
@@ -218,18 +219,35 @@ export async function evolvePrompts(callChat, opts = {}) {
   }
 
   // final summary
-  const best = population[0];
+  let best = population[0];
+  let oodScore = null;
+  // if an OOD bench is provided, score the winner on it and report the gap.
+  // a large gap means the prompt overfit BENCH and should be discarded.
+  if (oodBench && oodBench.length) {
+    try {
+      const r = await evalCandidate(callChat, best, oodBench, opts);
+      oodScore = r.score.aggregate;
+      const gap = (best.fitness || 0) - oodScore;
+      console.log(`[evolve] OOD fitness: ${oodScore.toFixed(3)}  gap: ${gap.toFixed(3)}${gap > 0.20 ? '  ⚠ overfit' : '  ✓ generalizes'}`);
+      fs.writeFileSync(path.join(runDir, 'ood-score.json'),
+        JSON.stringify({ idFitness: best.fitness, oodFitness: oodScore, gap, detail: r.score.detail }, null, 2), 'utf-8');
+    } catch (e) {
+      console.log(`[evolve] OOD probe failed: ${e.message}`);
+    }
+  }
   const finalSummary = {
     runId,
     popSize,
     generations,
     bench: bench.map(b => b.id),
+    oodBench: oodBench ? oodBench.map(b => b.id) : null,
     best,
     bestPerGen: log.history.map(h => ({ gen: h.gen, bestId: h.bestId, bestFitness: h.bestFitness, median: h.median })),
-    operatorUsage: countOps(log.history.flatMap(h => h.population))
+    operatorUsage: countOps(log.history.flatMap(h => h.population)),
+    oodScore
   };
   fs.writeFileSync(path.join(runDir, 'summary.json'), JSON.stringify(finalSummary, null, 2), 'utf-8');
-  return { best, population, runDir, summary: finalSummary };
+  return { best, population, runDir, summary: finalSummary, oodScore };
 }
 
 function countOps(pop) {
@@ -257,10 +275,36 @@ export async function applyEvolvedPrompt(callChat, systemPrompt, input, opts = {
   return r.content || '';
 }
 
+// apply with explicit trace extraction: splits the response into {think, answer}.
+// if the response has a <thinking>...</thinking> block, that becomes the trace;
+// otherwise the whole response is the answer and trace is empty.
+export async function applyEvolvedPromptWithTrace(callChat, systemPrompt, input, opts = {}) {
+  const content = await applyEvolvedPrompt(callChat, systemPrompt, input, opts);
+  return splitTrace(content);
+}
+
+// split a response into the visible think-block and the final answer.
+export function splitTrace(content) {
+  const text = String(content || '');
+  const m = text.match(/<thinking>([\s\S]*?)<\/thinking>/i);
+  if (!m) return { think: '', answer: text.trim(), hadThinkBlock: false };
+  const think = m[1].trim();
+  const answer = text.replace(m[0], '').trim();
+  return { think, answer, hadThinkBlock: true };
+}
+
 // load the best prompt from a previous run
 export function loadBest(runDir) {
   const summary = JSON.parse(fs.readFileSync(path.join(runDir, 'summary.json'), 'utf-8'));
   return summary.best;
 }
 
-export { seedPopulation, evalCandidate, OPERATORS, fingerprint };
+// score a candidate's fitness on a held-out OOD benchmark. if the gap between
+// in-distribution (BENCH) fitness and OOD fitness is large, the candidate
+// overfit the training bench and should be discarded or down-weighted.
+export async function scoreOOD(callChat, candidate, oodBench, opts = {}) {
+  const { outputs } = await evalCandidate(callChat, candidate, oodBench, opts);
+  return outputs;
+}
+
+export { seedPopulation, evalCandidate, OPERATORS, fingerprint, fableMetaPrompt, fableFingerprint };

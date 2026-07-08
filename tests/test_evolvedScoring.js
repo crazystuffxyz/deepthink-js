@@ -2,7 +2,7 @@
 'use strict';
 
 import { BENCH, numericScore } from '../thinking/benchmarkSet.js';
-import { scoreOne, scoreAgainstBench } from '../thinking/evolvedScoring.js';
+import { scoreOne, scoreAgainstBench, extractAllNumbers, extractProbability, multiNumberScore } from '../thinking/evolvedScoring.js';
 
 let pass = 0, fail = 0;
 async function test(label, fn) {
@@ -100,6 +100,38 @@ await test('math with time+distance reference scores both', async () => {
   const partial = await scoreOne(fakeCallChat, 'The trains meet at 16:12.', item, {});
   if (partial.components.timeOk !== 1) throw new Error('partial timeOk');
   if (partial.score > 0.6) throw new Error(`partial too high: ${partial.score}`);
+});
+await test('extractAllNumbers pulls every number in order', () => {
+  const nums = extractAllNumbers('A owes 11.5625, B owes 16.5625, C owes 16.875');
+  if (nums.length !== 3) throw new Error(`got ${nums.length}: ${nums}`);
+  if (nums[0] !== 11.5625) throw new Error(`first: ${nums[0]}`);
+  if (nums[2] !== 16.875) throw new Error(`last: ${nums[2]}`);
+});
+await test('extractProbability handles percent and decimal', () => {
+  if (extractProbability('about 27.8%', 0.278) !== 0.278) throw new Error('percent');
+  if (extractProbability('0.278', 0.278) !== 0.278) throw new Error('decimal');
+  if (extractProbability('27.8', 0.278) !== 27.8) throw new Error('bare number');
+});
+await test('multiNumberScore matches all expected answers', () => {
+  const ref = { A: 11.5625, B: 16.5625, C: 16.875 };
+  const text = 'A pays $11.5625, B pays $16.5625, C pays $16.875.';
+  const m = multiNumberScore(text, ref, 0.05);
+  if (m.matched !== 3) throw new Error(`matched: ${m.matched}/3`);
+  if (m.score !== 1) throw new Error(`score: ${m.score}`);
+});
+await test('multiNumberScore partial match returns fractional score', () => {
+  const ref = { A: 11.5625, B: 16.5625, C: 16.875 };
+  const text = 'A pays $11.5625 and B pays $16.5625, but C is different.';
+  const m = multiNumberScore(text, ref, 0.05);
+  if (m.matched !== 2) throw new Error(`matched: ${m.matched}/3`);
+  if (Math.abs(m.score - 2/3) > 0.01) throw new Error(`score: ${m.score}`);
+});
+await test('OOD math item (fair-share) now scores multi-number ref', async () => {
+  const { OOD_BENCH } = await import('../thinking/benchmarkSet.js');
+  const item = OOD_BENCH.find(b => b.id === 'ood-01-fair-share');
+  if (!item.reference.A) throw new Error('test setup: ref not flat');
+  const r = await scoreOne(fakeCallChat, 'A: 11.5625, B: 16.5625, C: 16.875', item, {});
+  if (r.score < 0.9) throw new Error(`score: ${r.score}`);
 });
 
 console.log(`\n  ${pass} pass, ${fail} fail`);

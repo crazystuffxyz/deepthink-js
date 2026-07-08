@@ -12,9 +12,9 @@ import { toolLoop, DEFAULT_TOOLS } from './thinking/toolUse.js';
 import { runMoA } from './thinking/mixtureOfAgents.js';
 import { makeCalibrator } from './thinking/confidence.js';
 import { makeStore, makeEphemeralStore } from './thinking/memory.js';
-import { evolvePrompts, applyEvolvedPrompt, loadBest } from './thinking/evolvedThinking.js';
+import { evolvePrompts, applyEvolvedPrompt, applyEvolvedPromptWithTrace, splitTrace, loadBest } from './thinking/evolvedThinking.js';
 import { PATTERNS, composePrompt, fingerprint, fableMetaPrompt, fableFingerprint } from './thinking/thinkingPatterns.js';
-import { BENCH } from './thinking/benchmarkSet.js';
+import { BENCH, OOD_BENCH } from './thinking/benchmarkSet.js';
 
 export {
   Deepthink,
@@ -38,12 +38,15 @@ export {
   makeEphemeralStore,
   evolvePrompts,
   applyEvolvedPrompt,
+  applyEvolvedPromptWithTrace,
+  splitTrace,
   loadBest,
   PATTERNS,
   composePrompt,
   fingerprint,
   fableMetaPrompt,
   fableFingerprint,
-  BENCH
+  BENCH,
+  OOD_BENCH
 };
 export default Deepthink;

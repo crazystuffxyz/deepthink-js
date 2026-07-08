@@ -1,8 +1,8 @@
 // test_evolvedThinking.js — pure unit tests for the evolution loop (no LLM calls)
 'use strict';
 
-import { seedPopulation, evalCandidate, evolvePrompts, applyEvolvedPrompt, loadBest } from '../thinking/evolvedThinking.js';
-import { BENCH } from '../thinking/benchmarkSet.js';
+import { seedPopulation, evalCandidate, evolvePrompts, applyEvolvedPrompt, applyEvolvedPromptWithTrace, splitTrace, loadBest } from '../thinking/evolvedThinking.js';
+import { BENCH, OOD_BENCH } from '../thinking/benchmarkSet.js';
 import { PATTERNS, composePrompt, fingerprint } from '../thinking/thinkingPatterns.js';
 
 let pass = 0, fail = 0;
@@ -47,6 +47,33 @@ await test('loadBest throws on bad path', () => {
   let threw = false;
   try { loadBest('/nonexistent/dir'); } catch { threw = true; }
   if (!threw) throw new Error('expected throw');
+});
+await test('splitTrace extracts think block from response', () => {
+  const t = splitTrace('<thinking>\nlet me think. actually...\n</thinking>\n\nThe answer is 42.');
+  if (t.hadThinkBlock !== true) throw new Error('no flag');
+  if (!t.think.includes('let me think')) throw new Error('think missing');
+  if (!t.answer.includes('42')) throw new Error('answer missing');
+});
+await test('splitTrace handles no think block', () => {
+  const t = splitTrace('Just a plain answer.');
+  if (t.hadThinkBlock !== false) throw new Error('flag wrong');
+  if (t.think !== '') throw new Error('think should be empty');
+  if (!t.answer.includes('plain')) throw new Error('answer missing');
+});
+await test('applyEvolvedPromptWithTrace returns split', async () => {
+  const fakeChat = async () => ({ content: '<thinking>x</thinking>\n\nresult' });
+  const r = await applyEvolvedPromptWithTrace(fakeChat, 's', 'q');
+  if (r.think !== 'x' || r.answer !== 'result') throw new Error(`bad split: ${JSON.stringify(r)}`);
+});
+await test('OOD_BENCH exists with 5+ held-out items', () => {
+  if (!OOD_BENCH || OOD_BENCH.length < 5) throw new Error(`got ${OOD_BENCH?.length}`);
+  for (const o of OOD_BENCH) {
+    if (!o.id || !o.prompt || !o.kind) throw new Error('missing field on ood item');
+  }
+});
+await test('OOD items do not overlap with BENCH ids', () => {
+  const ids = new Set(BENCH.map(b => b.id));
+  for (const o of OOD_BENCH) if (ids.has(o.id)) throw new Error(`overlap: ${o.id}`);
 });
 
 console.log(`\n  ${pass} pass, ${fail} fail`);

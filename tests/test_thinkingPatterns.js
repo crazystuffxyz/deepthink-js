@@ -115,5 +115,24 @@ test('explicit-uncertainty pattern exists in PATTERNS', () => {
   if (!/CONFIDENCE/.test(p.template)) throw new Error('no confidence');
 });
 
+await test('PATTERN_BY_NAME has all PATTERNS', () => {
+  for (const p of PATTERNS) {
+    if (PATTERN_BY_NAME[p.name] !== p) throw new Error(`missing ${p.name}`);
+  }
+});
+await test('4 new puzzle/IQ patterns are present', () => {
+  const names = PATTERNS.map(p => p.name);
+  for (const want of ['eliminate-systematically', 'sequence-mine', 'extract-constraints', 'commit-and-defend']) {
+    if (!names.includes(want)) throw new Error(`missing: ${want}`);
+  }
+});
+await test('fable puzzle profile includes the new IQ moves', () => {
+  const sys = fableMetaPrompt({ profile: 'puzzle', intensity: 'medium' });
+  for (const want of ['eliminate-systematically', 'sequence-mine', 'extract-constraints', 'commit-and-defend']) {
+    if (!sys.includes(want)) throw new Error(`puzzle profile missing: ${want}`);
+  }
+  if (!/<thinking>/.test(sys)) throw new Error('puzzle profile should keep fable think block');
+});
+
 console.log(`\n  ${pass} pass, ${fail} fail`);
 process.exit(fail === 0 ? 0 : 1);

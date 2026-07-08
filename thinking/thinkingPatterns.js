@@ -235,6 +235,38 @@ export const PATTERNS = [
     when: 'your answer has more than 3 claims, or any claim feels too smooth',
     template: 'For each load-bearing claim, write: CLAIM: [statement]  CONFIDENCE: [0-100%]  GROUNDS: [why not lower, why not higher].\nIf a claim is below 70%, either find grounds to raise it or flag it as a known weak link in the final answer.',
     exemplar: 'Forced calibration catches the "looks certain, actually a guess" failure mode. Most confident-sounding expert errors are uncalibrated 60% claims that have been dressed as 95% claims.'
+  },
+  {
+    name: 'eliminate-systematically',
+    thinker: 'Standard test-taking technique (no single namesake)',
+    move: 'For multiple choice, kill the wrong answers one at a time before guessing.',
+    when: 'multiple-choice question where more than one choice is plausible and only one is right',
+    template: 'For each option, write one sentence on why it could be wrong. If the option survives the test, keep it; if not, eliminate it. The last option standing is your answer. If two survive, the question is ambiguous — pick the one with the most direct reading of the question stem. Never pick the option that requires you to assume the question is "tricky".',
+    exemplar: 'Powers of 2, 3, 5, 7, 11 — the next is 13, not 15 or 20. The "feels right" trap is 15 (next multiple of 5). The mechanical check kills it: every prior term is prime, only 13 continues that.'
+  },
+  {
+    name: 'sequence-mine',
+    thinker: 'Working mathematicians (sequence analysis is a craft)',
+    move: 'For a number sequence, mine it for structure before guessing.',
+    when: 'given a sequence of numbers and asked for the next term(s)',
+    template: 'Compute in order: (1) first differences, (2) second differences, (3) ratios of consecutive terms, (4) alternate subsequences, (5) sums of pairs, (6) digit sums, (7) polynomial fit on indices 1, 2, 3. If any operation makes the result constant, that is the rule. If multiple rules fit, prefer the simplest (smallest polynomial, smallest number of operations). Never commit to a rule until you have computed the next term with it and seen whether it lands on one of the given choices.',
+    exemplar: '1, 8, 27 are 1 cubed, 2 cubed, 3 cubed — the next is 64 (4 cubed). The constant-first-difference heuristic fails here; the polynomial-in-index heuristic wins. Always test against the choices before locking in.'
+  },
+  {
+    name: 'extract-constraints',
+    thinker: 'Polya + algebra tradition',
+    move: 'For a word problem, lift every quantitative claim into an equation before solving.',
+    when: 'the problem is stated in natural language with numbers, rates, prices, distances, or times',
+    template: 'List every quantitative fact the problem gives you as a separate equation or relation. Introduce a symbol for every unknown. THEN solve the system. Do not start solving until you have at least as many equations as unknowns. If you are short, you missed a fact — reread the problem, slowly.',
+    exemplar: '"Pen + notebook = $1.10, notebook $1.00 more than pen" — the trap is to assume the pen costs $0.10. It costs $0.05. The two equations are p + n = 1.10, n = p + 1.00. Substitute: p + (p+1.00) = 1.10, so 2p = 0.10, p = 0.05.'
+  },
+  {
+    name: 'commit-and-defend',
+    thinker: 'Game-show strategy (final-answer lock-in)',
+    move: 'Make the model commit to a single answer, with the reasoning summarized. No "it depends" or "could be".',
+    when: 'final-answer questions: multiple choice, true/false, a single number, a single name',
+    template: 'Restate your top pick in one sentence. State the 1-2 facts that most strongly support it. Then state the strongest reason it might be wrong. If the supporting facts are stronger than the objection, lock it in. Output the final answer on its own line in the form ANSWER: <number/word/letter>.',
+    exemplar: 'Forces a clean output. The prose can be elaborate; the ANSWER line is what gets graded. This pattern is what makes the answer parseable.'
   }
 ];
 
@@ -304,14 +336,16 @@ export function fableMetaPrompt(opts = {}) {
 
   // pick the secondary patterns by profile
   const secondary = profile === 'math'
-    ? ['ramanujan-intuition', 'erdos-counterexample', 'feynman-decompose']
+    ? ['ramanujan-intuition', 'erdos-counterexample', 'feynman-decompose', 'sequence-mine', 'extract-constraints']
     : profile === 'code'
     ? ['knuth-worst-case', 'ttao-lemma-decompose', 'dijkstra-structured-program']
     : profile === 'logic'
     ? ['sagan-baloney-detect', 'mcclintock-anomaly', 'kahneman-system2']
     : profile === 'planning'
     ? ['feynman-decompose', 'knuth-worst-case', 'mcclintock-anomaly']
-    : ['feynman-decompose', 'erdos-counterexample', 'kahneman-system2', 'fable-think-format'];
+    : profile === 'puzzle'
+    ? ['eliminate-systematically', 'sequence-mine', 'extract-constraints', 'commit-and-defend', 'fable-think-format']
+    : ['feynman-decompose', 'erdos-counterexample', 'kahneman-system2', 'fable-think-format', 'commit-and-defend'];
 
   const stageWord = intensity === 'high' ? 'FIVE' : intensity === 'low' ? 'TWO' : 'FOUR';
 

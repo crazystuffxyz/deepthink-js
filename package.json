@@ -1,11 +1,12 @@
 {
   "name": "deepthink-js",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "SOTA NPM module for agentic processes using local or cloud LLMs.",
   "main": "index.js",
   "scripts": {
     "test": "node tests/runAll.js",
-    "test:fast": "node tests/test_dataTypes.js && node tests/test_memory.js && node tests/test_compression.js && node tests/test_consistency.js && node tests/test_toolUse.js && node tests/test_providers.js && node tests/test_sandbox.js"
+    "test:fast": "node tests/test_dataTypes.js && node tests/test_memory.js && node tests/test_compression.js && node tests/test_consistency.js && node tests/test_toolUse.js && node tests/test_providers.js && node tests/test_sandbox.js && node tests/test_thinkingPatterns.js && node tests/test_evolvedScoring.js && node tests/test_evolvedMutate.js && node tests/test_evolvedThinking.js",
+    "evolve": "node scripts/evolve.js"
   },
   "dependencies": {
     "@babel/parser": "^7.29.2",

@@ -16,6 +16,7 @@ import { compress, truncateMiddle } from './smartCompression.js';
 import { toolLoop, DEFAULT_TOOLS } from './toolUse.js';
 import { runMoA } from './mixtureOfAgents.js';
 import { makeCalibrator } from './confidence.js';
+import { evolvePrompts, applyEvolvedPrompt, loadBest } from './evolvedThinking.js';
 
 const sandbox = '\x00SANDBOX_GT\x00';
 const qwen = {
@@ -522,6 +523,32 @@ class Deepthink {
       const judge = mergedOpts.mixtureJudge || this.callChat.bind(this);
       const r = await runMoA(bound, judge, input, mergedOpts);
       return parseDataType(r.answer, type !== 'string' ? type : 'string');
+    }
+
+    // Evolve-then-apply: run a synthetic-RL prompt evolution pass against the benchmark, then
+    // apply the winning prompt template to the actual user input. The evolution log is written
+    // to data/evolved/<runId>/ for inspection.
+    if (mergedOpts.evolve) {
+      const evoOpts = {
+        ...mergedOpts,
+        popSize: mergedOpts.evolvePop || 10,
+        generations: mergedOpts.evolveGenerations || 6,
+        runId: mergedOpts.evolveRunId || undefined
+      };
+      const evo = await evolvePrompts(this.callChat.bind(this), evoOpts);
+      // if user only wanted to evolve (evolveOnly), return the summary
+      if (mergedOpts.evolveOnly) return evo;
+      // otherwise apply the best prompt to the real input
+      const sys = evo.best.systemPrompt;
+      const r = await applyEvolvedPrompt(this.callChat.bind(this), sys, input, mergedOpts);
+      return parseDataType(r, type !== 'string' ? type : 'string');
+    }
+
+    // evolvedApply: user already has a run dir from a prior evolution; just apply its best prompt.
+    if (mergedOpts.evolvedApply) {
+      const best = loadBest(mergedOpts.evolvedApply);
+      const r = await applyEvolvedPrompt(this.callChat.bind(this), best.systemPrompt, input, mergedOpts);
+      return parseDataType(r, type !== 'string' ? type : 'string');
     }
 
     // Tool-use loop: model calls tools, we run them, loop until "finish". additive new flow.

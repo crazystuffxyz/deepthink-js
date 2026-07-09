@@ -1,9 +1,9 @@
 // test_evolvedThinking.js — pure unit tests for the evolution loop (no LLM calls)
 'use strict';
 
-import { seedPopulation, evalCandidate, evolvePrompts, applyEvolvedPrompt, applyEvolvedPromptWithTrace, splitTrace, loadBest } from '../thinking/evolvedThinking.js';
-import { BENCH, OOD_BENCH } from '../thinking/benchmarkSet.js';
-import { PATTERNS, composePrompt, fingerprint } from '../thinking/thinkingPatterns.js';
+import { seedPopulation, evalCandidate, evolvePrompts, applyEvolvedPrompt, applyEvolvedPromptWithTrace, splitTrace, loadBest } from '../dist/thinking/evolvedThinking.js';
+import { BENCH, OOD_BENCH } from '../dist/thinking/benchmarkSet.js';
+import { PATTERNS, composePrompt, fingerprint } from '../dist/thinking/thinkingPatterns.js';
 
 let pass = 0, fail = 0;
 async function test(label, fn) {

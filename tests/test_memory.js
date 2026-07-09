@@ -1,7 +1,7 @@
 // test_memory.js — persistent + ephemeral stores
 'use strict';
 
-import { makeStore, makeEphemeralStore } from '../thinking/memory.js';
+import { makeStore, makeEphemeralStore } from '../dist/thinking/memory.js';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';

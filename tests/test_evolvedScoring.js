@@ -1,8 +1,8 @@
 // test_evolvedScoring.js — pure unit tests for the scorer
 'use strict';
 
-import { BENCH, numericScore } from '../thinking/benchmarkSet.js';
-import { scoreOne, scoreAgainstBench, extractAllNumbers, extractProbability, multiNumberScore } from '../thinking/evolvedScoring.js';
+import { BENCH, numericScore } from '../dist/thinking/benchmarkSet.js';
+import { scoreOne, scoreAgainstBench, extractAllNumbers, extractProbability, multiNumberScore } from '../dist/thinking/evolvedScoring.js';
 
 let pass = 0, fail = 0;
 async function test(label, fn) {
@@ -127,7 +127,7 @@ await test('multiNumberScore partial match returns fractional score', () => {
   if (Math.abs(m.score - 2/3) > 0.01) throw new Error(`score: ${m.score}`);
 });
 await test('OOD math item (fair-share) now scores multi-number ref', async () => {
-  const { OOD_BENCH } = await import('../thinking/benchmarkSet.js');
+  const { OOD_BENCH } = await import('../dist/thinking/benchmarkSet.js');
   const item = OOD_BENCH.find(b => b.id === 'ood-01-fair-share');
   if (!item.reference.A) throw new Error('test setup: ref not flat');
   const r = await scoreOne(fakeCallChat, 'A: 11.5625, B: 16.5625, C: 16.875', item, {});

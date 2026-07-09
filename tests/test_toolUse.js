@@ -1,7 +1,7 @@
 // test_toolUse.js — parseToolCall, describeTools (pure)
 'use strict';
 
-import { parseToolCall, describeTools, DEFAULT_TOOLS } from '../thinking/toolUse.js';
+import { parseToolCall, describeTools, DEFAULT_TOOLS } from '../dist/thinking/toolUse.js';
 
 function ok(c, m) { if (!c) throw new Error('FAIL: ' + m); }
 function eq(a, b, m) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`); }

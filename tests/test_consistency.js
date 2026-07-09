@@ -1,9 +1,9 @@
 // test_consistency.js — vote + sampleOnce
 'use strict';
 
-import { selfConsistency, vote, sampleOnce } from '../thinking/consistency.js';
-import { makeCalibrator } from '../thinking/confidence.js';
-import { keyFor, findRelevant } from '../thinking/reflexion.js';
+import { selfConsistency, vote, sampleOnce } from '../dist/thinking/consistency.js';
+import { makeCalibrator } from '../dist/thinking/confidence.js';
+import { keyFor, findRelevant } from '../dist/thinking/reflexion.js';
 
 function ok(c, m) { if (!c) throw new Error('FAIL: ' + m); }
 function eq(a, b, m) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`); }

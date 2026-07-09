@@ -1,8 +1,8 @@
 // test_evolvedMutate.js — pure unit tests for the mutation operators
 'use strict';
 
-import { mutate, OPERATORS } from '../thinking/evolvedMutate.js';
-import { composePrompt, fingerprint, PATTERNS } from '../thinking/thinkingPatterns.js';
+import { mutate, OPERATORS } from '../dist/thinking/evolvedMutate.js';
+import { composePrompt, fingerprint, PATTERNS } from '../dist/thinking/thinkingPatterns.js';
 
 let pass = 0, fail = 0;
 async function test(label, fn) {

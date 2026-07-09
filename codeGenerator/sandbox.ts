@@ -1,16 +1,14 @@
 // codeGenerator/sandbox.ts
-// isolated-vm for JS, subprocess fallback for python. the python path is
-// best-effort — the import blocklist covers the obvious exfil vectors.
+// isolated-vm for JS, subprocess fallback for python. never pass host
+// modules across the isolation wall — the prototype chain leaks.
 import ivm from 'isolated-vm';
-import { exec, execSync, spawn } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 export const sandbox = 20_000;
 export const tmpSuffix = (): string => `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-const BLOCKED = new Set(['child_process', 'fs', 'net', 'crypto', 'vm', 'inspector']);
 
 function isPythonAvailable(): string | null {
   for (const bin of ['python3', 'python']) {
@@ -29,14 +27,12 @@ export async function runJSSandbox(code: string): Promise<string> {
   const jail = isolate.createContextSync();
   let stdout = '';
   const log = (...args: unknown[]): void => { stdout += args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ') + '\n'; };
-  const ref = jail.global.set('global', jail.global.derefInto({}));
   await jail.global.set('console', { log: new ivm.Callback((...args: unknown[]) => log(...args)) }, { copy: true });
   await jail.global.set('process', { stdout: { write: new ivm.Callback((s: unknown) => { stdout += String(s); }) } }, { copy: true });
+  // require callback was a host-leak vector — block it instead
   await jail.global.set('require', new ivm.Callback((mod: string) => {
-    if (BLOCKED.has(mod)) throw new Error(`"${mod}" blocked in sandbox`);
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    return require(mod);
-  }), { reference: true });
+    throw new Error(`require("${mod}") blocked in sandbox`);
+  }), { copy: true });
   const wrapped = `(async () => {\n${code}\n})();`;
   let script: ivm.Script;
   try {

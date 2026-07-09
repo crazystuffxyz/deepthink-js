@@ -20,6 +20,7 @@ import { toolLoop, DEFAULT_TOOLS } from './toolUse.js';
 import { generateAndRunCode } from '../codeGenerator/index.js';
 import { PYTHON_BIN } from '../codeGenerator/python.js';
 import { compareResults } from '../codeGenerator/run.js';
+import { globalEmitter } from './events.js';
 
 const SAMPLING = {
   creative: { temperature: 0.7, top_p: 0.9, top_k: 40 },
@@ -252,6 +253,7 @@ export class Deepthink extends EventEmitter {
   limiter: PQueue;
   _keyFailures: Map<string, { count: number; quarantineUntil: number }>;
   _keyMutex: Async;
+  _globalLogBridge: (e: LogEvent) => void;
 
   constructor(model?: string, apiKeys: string[] = [], clientOptions: Record<string, unknown> = {}, concurrency: number = Infinity, auditModel: string | null = null) {
     super();
@@ -263,6 +265,9 @@ export class Deepthink extends EventEmitter {
     this.limiter = new PQueue({ concurrency: concurrency === Infinity ? Infinity : concurrency });
     this._keyFailures = new Map();
     this._keyMutex = new Async();
+    // bridge module-level events onto this instance's emitter
+    this._globalLogBridge = (e) => this.emit('log', e);
+    globalEmitter.on('log', this._globalLogBridge);
   }
 
   _log(level: LogLevel, source: string, msg: string): void {

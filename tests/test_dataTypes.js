@@ -5,7 +5,7 @@ import {
   stripThinkBlocks, stripCodeFences, parseDataType, extractJSON,
   isPlainObject, isChatMessage, cloneMessage, messagesToText,
   normalizeInputToMessages, createDefaultSystemPrompt
-} from '../thinking/dataTypes.js';
+} from '../dist/thinking/dataTypes.js';
 
 function eq(actual, expected, label) {
   const a = JSON.stringify(actual), b = JSON.stringify(expected);

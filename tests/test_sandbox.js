@@ -1,7 +1,7 @@
 // test_sandbox.js — runJSSandbox and runPythonSandbox. No LLM needed.
 'use strict';
 
-import { runJSSandbox, runPythonSandbox, PYTHON_BIN, compareResults } from '../codeGenerator/index.js';
+import { runJSSandbox, runPythonSandbox, PYTHON_BIN, compareResults } from '../dist/codeGenerator/index.js';
 
 function ok(c, m) { if (!c) throw new Error('FAIL: ' + m); }
 

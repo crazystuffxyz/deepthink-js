@@ -4,7 +4,7 @@
 import {
   PATTERNS, PATTERN_BY_NAME, samplePatterns, composePrompt, fingerprint, patternsIn,
   fableMetaPrompt, fableFingerprint
-} from '../thinking/thinkingPatterns.js';
+} from '../dist/thinking/thinkingPatterns.js';
 
 let pass = 0, fail = 0;
 function test(label, fn) {

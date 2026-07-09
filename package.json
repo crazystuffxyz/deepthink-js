@@ -2,14 +2,19 @@
   "name": "deepthink-js",
   "version": "1.4.0",
   "description": "SOTA NPM module for agentic processes using local or cloud LLMs.",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./index.js",
-      "types": "./index.d.ts"
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",

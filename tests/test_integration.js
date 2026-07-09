@@ -2,7 +2,7 @@
 // Tests each new public option in Deepthink.generate() with a small Q that has a known answer.
 'use strict';
 
-import Deepthink from '../thinking/deepthink.js';
+import Deepthink from '../dist/thinking/deepthink.js';
 
 const model = process.env.DEEPTHINK_TEST_MODEL || 'gemma4:31b-cloud';
 const apiKeys = [];
@@ -96,7 +96,7 @@ async function test(label, fn) {
 
   // 10. selfConsistency module direct
   await test('selfConsistency module direct', async () => {
-    const { selfConsistency } = await import('../thinking/consistency.js');
+    const { selfConsistency } = await import('../dist/thinking/consistency.js');
     const r = await selfConsistency(callChat, 'What is 8 + 14? Reply with just the number.', {
       samples: 3, samplingProfile: 'verify', autoSystemPrompt: false
     });
@@ -105,7 +105,7 @@ async function test(label, fn) {
 
   // 11. compress module direct — under budget
   await test('compress module direct (under budget)', async () => {
-    const { compress } = await import('../thinking/smartCompression.js');
+    const { compress } = await import('../dist/thinking/smartCompression.js');
     const msgs = [{ role: 'user', content: 'short' }];
     const out = await compress(callChat, msgs, { maxTokens: 10000 });
     if (out.length !== 1) throw new Error('expected passthrough');
@@ -113,21 +113,21 @@ async function test(label, fn) {
 
   // 12. debate module direct
   await test('runDebate module direct', async () => {
-    const { runDebate } = await import('../thinking/personaDebate.js');
+    const { runDebate } = await import('../dist/thinking/personaDebate.js');
     const r = await runDebate(callChat, 'Is 2+2=4? yes/no', { debateRounds: 1 });
     if (typeof r.answer !== 'string') throw new Error('no answer');
   });
 
   // 13. planAndExecute module direct
   await test('runPlanAndExecute module direct', async () => {
-    const { runPlanAndExecute } = await import('../thinking/planAndExecute.js');
+    const { runPlanAndExecute } = await import('../dist/thinking/planAndExecute.js');
     const r = await runPlanAndExecute(callChat, 'What is 12 * 12?', { reflect: false });
     if (!/144/.test(r.answer)) throw new Error('expected 144, got ' + r.answer);
   });
 
   // 14. mixtureOfAgents direct — needs at least 2 entries with possibly-different bound clients
   await test('runMoA module direct', async () => {
-    const { runMoA } = await import('../thinking/mixtureOfAgents.js');
+    const { runMoA } = await import('../dist/thinking/mixtureOfAgents.js');
     // bind two callers that each default to the same model
     const m1 = { name: 'gemma4:31b-cloud', callChat: (msgs, stream, cb, o) => callChat(msgs, stream, cb, { ...o, model: 'gemma4:31b-cloud' }) };
     const m2 = { name: 'gemma4:31b-cloud', callChat: (msgs, stream, cb, o) => callChat(msgs, stream, cb, { ...o, model: 'gemma4:31b-cloud' }) };

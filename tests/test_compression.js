@@ -1,7 +1,7 @@
 // test_compression.js — totalTokens, approxTokens, truncateMiddle
 'use strict';
 
-import { totalTokens, approxTokens, truncateMiddle, compress } from '../thinking/smartCompression.js';
+import { totalTokens, approxTokens, truncateMiddle, compress } from '../dist/thinking/smartCompression.js';
 
 function ok(c, m) { if (!c) throw new Error('FAIL: ' + m); }
 function eq(a, b, m) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`); }

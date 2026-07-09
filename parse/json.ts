@@ -46,16 +46,16 @@ export function extractJsonCandidate(text: string): string | null {
 
 export type ParseResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: ZodError; raw: string };
+  | { ok: false; error: ZodError | Error; raw: string };
 
 export function parseJsonSafe<T>(text: string, schema: ZodType<T>): ParseResult<T> {
   const candidate = extractJsonCandidate(text ?? '');
   if (candidate == null) {
     return {
       ok: false,
-      error: null as unknown as ZodError,
+      error: new Error('no JSON candidate found in input'),
       raw: String(text ?? '')
-    } as ParseResult<T>;
+    };
   }
   let raw: unknown;
   try {
@@ -67,9 +67,9 @@ export function parseJsonSafe<T>(text: string, schema: ZodType<T>): ParseResult<
     } catch (e2) {
       return {
         ok: false,
-        error: null as unknown as ZodError,
+        error: e2 instanceof Error ? e2 : new Error('JSON.parse failed'),
         raw: candidate
-      } as ParseResult<T>;
+      };
     }
   }
   const result = schema.safeParse(raw);

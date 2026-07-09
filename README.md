@@ -60,10 +60,10 @@ Deepthink wraps any LLM provider with a stack of reasoning infrastructure:
 
 ## What's new in v1.4.0
 
-- **TypeScript source** — `.ts` everywhere, `.js` emitted alongside. Build with `npx tsc`, typecheck with `npx tsc --noEmit`. `index.d.ts` exposes the full public surface.
-- **EventEmitter on `Deepthink`** — `dt.on('log', e => …)` and `dt.on('step', e => …)` instead of the old `console.log` with ANSI colors. Default is silent; subscribe to opt in. Module-level events (research pipeline, code generator) use `onLog(fn)` from `thinking/events.js`.
-- **`isolated-vm` JS sandbox** — `runJSSandbox` runs in a 32 MB memory-limit, 5 s hard-timeout, 1 s heap-watch isolate. Blocklist: `child_process`, `fs`, `net`, `crypto`, `vm`, `inspector`. Python stays on the subprocess fallback (best-effort, import blocklist covers the obvious exfil vectors).
-- **Zod for LLM JSON** — `parseJsonSafe(text, schema)` returns `{ ok: true, data } | { ok: false, error, raw }`. `tryParseJsonSafe` is the `T | null` shortcut. Schemas in `parse/llmSchemas.ts`.
+- **TypeScript source** — `.ts` everywhere, build output in `dist/`. Build with `npx tsc`, typecheck with `npx tsc --noEmit`. `index.d.ts` exposes the full public surface.
+- **EventEmitter on `Deepthink`** — `dt.on('log', e => …)` and `dt.on('step', e => …)` instead of the old `console.log` with ANSI colors. Default is silent. The constructor bridges `globalEmitter` (research pipeline + code generator) onto the instance, so one subscriber catches every pipeline event.
+- **`isolated-vm` JS sandbox** — `runJSSandbox` runs in a 32 MB memory-limit, 5 s hard-timeout, 1 s heap-watch isolate. `require` is blocked outright — host modules never cross the isolation wall. Python stays on the subprocess fallback.
+- **Zod for LLM JSON** — `parseJsonSafe(text, schema)` returns `{ ok: true, data } | { ok: false, error, raw }`. Errors are real `Error` / `ZodError` instances, no null cast. `tryParseJsonSafe` is the `T | null` shortcut. Schemas in `parse/llmSchemas.ts`.
 - **`codeGenerator` split** — was 1,974 lines, now `codeGenerator/{index,sandbox,fileBlocks,python,run,project}.ts`. Public API unchanged.
 
 ---
@@ -82,8 +82,9 @@ Building from source (only if you're working on the lib itself):
 git clone https://github.com/crazystuffxyz/deepthink-js
 cd deepthink-js
 npm install
-npx tsc              # emit .js alongside .ts
+npx tsc              # emit .js + .d.ts into dist/
 npx tsc --noEmit     # typecheck only
+npm test             # runs tests/test_*.js against dist/
 ```
 
 For the Electron explorer example only:
@@ -733,7 +734,7 @@ examples/
 └── research.js           Standalone deep research usage
 ```
 
-> All `.ts` files emit a sibling `.js` next to them at build time.
+> All `.ts` files emit to `dist/` at build time. `dist/` is what gets published to npm.
 
 ---
 

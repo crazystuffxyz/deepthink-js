@@ -1,21 +1,21 @@
 // thinking/events.ts
+// module-level emitter for pipeline logs. Deepthink subscribes and
+// re-emits on its own EventEmitter so dt.on('log', …) sees everything.
 import { EventEmitter } from 'node:events';
 import type { LogEvent, LogLevel } from './types.js';
 
 export { EventEmitter };
 
-// module-level emitter so non-class code (researchAgent, codeGenerator) can
-// publish log events without owning an instance. silent by default.
-const _emitter = new EventEmitter();
-_emitter.setMaxListeners(50);
+export const globalEmitter = new EventEmitter();
+globalEmitter.setMaxListeners(100);
 
 export function log(e: LogEvent): void {
-  _emitter.emit('log', e);
+  globalEmitter.emit('log', e);
 }
 
 export function onLog(fn: (e: LogEvent) => void): () => void {
-  _emitter.on('log', fn);
-  return () => _emitter.off('log', fn);
+  globalEmitter.on('log', fn);
+  return () => globalEmitter.off('log', fn);
 }
 
 const COLORS: Record<LogLevel, string> = {

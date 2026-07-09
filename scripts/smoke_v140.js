@@ -39,7 +39,7 @@ import Deepthink, {
   parseFilesFromResponse,
   applyPatchBlocks,
   checkSyntaxAST,
-} from '../index.js';
+} from '../dist/index.js';
 
 const MODEL = 'gemma4:31b-cloud';
 const dt = new Deepthink(MODEL, [], { provider: 'ollama' });

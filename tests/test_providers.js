@@ -1,7 +1,7 @@
 // test_providers.js — build a few clients, test callChat is callable. Pure offline test.
 'use strict';
 
-import { buildProviderClient, buildOllamaClient, buildOpenAICompatClient } from '../providers/index.js';
+import { buildProviderClient, buildOllamaClient, buildOpenAICompatClient } from '../dist/providers/index.js';
 
 function ok(c, m) { if (!c) throw new Error('FAIL: ' + m); }
 

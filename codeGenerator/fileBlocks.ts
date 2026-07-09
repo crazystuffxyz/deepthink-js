@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { tmpSuffix } from './sandbox.js';
-
+import {execSync} from 'child_process';
 export const FILE_BLOCK_PROMPT = `\
 OUTPUT FORMAT — MANDATORY. Your output will be parsed by a machine. Deviate from this format and your code will not run.
 To output a complete file:
@@ -102,7 +102,7 @@ export function checkSyntaxAST(filePath: string): { valid: boolean; error: strin
 
 function execSyncCheck(cmd: string): void {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  require('child_process').execSync(cmd, { stdio: 'pipe' });
+  execSync(cmd, { stdio: 'pipe' });
 }
 
 export function detectExternalImages(files: Record<string, string>): Array<{ file: string; type: string; match: string }> {

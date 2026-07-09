@@ -269,7 +269,14 @@ export class Deepthink extends EventEmitter {
     this._globalLogBridge = (e) => this.emit('log', e);
     globalEmitter.on('log', this._globalLogBridge);
   }
-
+/**
+   * Cleans up global event listeners to prevent memory leaks.
+   * Call this when you are finished with a Deepthink instance in long-running applications.
+   */
+  destroy(): void {
+    globalEmitter.off('log', this._globalLogBridge);
+    this.removeAllListeners();
+  }
   _log(level: LogLevel, source: string, msg: string): void {
     this.emit('log', { level, source, msg, ts: Date.now() } as LogEvent);
   }

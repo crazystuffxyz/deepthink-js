@@ -39,7 +39,7 @@ Deepthink wraps any LLM provider with a stack of reasoning infrastructure:
 - **Multi-depth thinking** — up to 3 staged internal reasoning passes (analysis → planning → sanity check) before the final response
 - **Typed output parsing** — returns `string`, `integer`, `double`, or `boolean` directly from free-form model output
 - **Self-verification loops** — adversarial and numerical checker agents review responses and drive iterative repair
-- **Sandboxed code execution** — generates and runs JavaScript (Node.js) and Python code in isolated subprocesses to verify numeric answers
+- **Sandboxed code execution** — generates and runs JavaScript in an `isolated-vm` isolate (32 MB cap, 5 s timeout) and Python in a guarded subprocess to verify numeric answers
 - **MCTS consensus** — runs multiple algorithmic approaches in parallel and votes on the most consistent result
 - **9-step deep research pipeline** — query planning → crawling → credibility scoring → MMR diversity → fact verification → report writing → critique loops
 - **Universal URL-to-HTML extractor** — fetches and converts HTML, PDF, DOCX, XLSX, PPTX, EPUB, CSV, RTF, ODT, JSON, XML, Markdown, images, and SVG
@@ -58,12 +58,32 @@ Deepthink wraps any LLM provider with a stack of reasoning infrastructure:
 
 ---
 
+## What's new in v1.4.0
+
+- **TypeScript source** — `.ts` everywhere, `.js` emitted alongside. Build with `npx tsc`, typecheck with `npx tsc --noEmit`. `index.d.ts` exposes the full public surface.
+- **EventEmitter on `Deepthink`** — `dt.on('log', e => …)` and `dt.on('step', e => …)` instead of the old `console.log` with ANSI colors. Default is silent; subscribe to opt in. Module-level events (research pipeline, code generator) use `onLog(fn)` from `thinking/events.js`.
+- **`isolated-vm` JS sandbox** — `runJSSandbox` runs in a 32 MB memory-limit, 5 s hard-timeout, 1 s heap-watch isolate. Blocklist: `child_process`, `fs`, `net`, `crypto`, `vm`, `inspector`. Python stays on the subprocess fallback (best-effort, import blocklist covers the obvious exfil vectors).
+- **Zod for LLM JSON** — `parseJsonSafe(text, schema)` returns `{ ok: true, data } | { ok: false, error, raw }`. `tryParseJsonSafe` is the `T | null` shortcut. Schemas in `parse/llmSchemas.ts`.
+- **`codeGenerator` split** — was 1,974 lines, now `codeGenerator/{index,sandbox,fileBlocks,python,run,project}.ts`. Public API unchanged.
+
+---
+
 ## Installation
 
 Install `deepthink-js` from npm — all dependencies are bundled automatically:
 
 ```bash
 npm install deepthink-js
+```
+
+Building from source (only if you're working on the lib itself):
+
+```bash
+git clone https://github.com/crazystuffxyz/deepthink-js
+cd deepthink-js
+npm install
+npx tsc              # emit .js alongside .ts
+npx tsc --noEmit     # typecheck only
 ```
 
 For the Electron explorer example only:
@@ -661,37 +681,59 @@ runDeepResearch()
 
 ```
 thinking/
-├── deepthink.js          Main Deepthink class (generate, callChat, verification)
-├── researchAgent.js      9-step deep research pipeline
-├── codeGenerator.js      Project generation, MCTS, sandboxes, test oracle
-├── analytical.js         Multi-agent analytical decomposition mode
-├── think.js              Multi-stage pre-thinking passes
-├── dataTypes.js          Type parsing, message normalisation utilities
-├── cognitive.js          7-phase cognitive flow
-├── consistency.js        Self-consistency: sample N, vote
-├── personaDebate.js      Two-agent debate + judge
-├── planAndExecute.js     Explicit plan, run steps, reflect, synthesize
-├── reflexion.js          Lesson store + writeLesson + recall
-├── smartCompression.js   Compress when token budget overflows
-├── toolUse.js            Tool-call loop (js_eval, py_eval, finish, custom)
-├── mixtureOfAgents.js    Fan out to N providers, judge merges
-├── confidence.js         Per-type win/loss calibration
-└── memory.js             JSON-file-backed persistent store
+├── deepthink.ts          Deepthink class (EventEmitter, generate, callChat, verification)
+├── researchAgent.ts      9-step deep research pipeline (Zod-validated JSON)
+├── analytical.ts         Multi-agent analytical decomposition mode
+├── think.ts              Multi-stage pre-thinking passes
+├── dataTypes.ts          Type parsing, message normalisation
+├── cognitive.ts          7-phase cognitive flow
+├── consistency.ts        Self-consistency: sample N, vote
+├── personaDebate.ts      Two-agent debate + judge
+├── planAndExecute.ts     Explicit plan, run steps, reflect, synthesize
+├── reflexion.ts          Lesson store + writeLesson + recall
+├── smartCompression.ts   Compress when token budget overflows
+├── toolUse.ts            Tool-call loop (js_eval, py_eval, finish, custom)
+├── mixtureOfAgents.ts    Fan out to N providers, judge merges
+├── confidence.ts         Per-type win/loss calibration
+├── memory.ts             JSON-file-backed persistent store
+├── thinkingPatterns.ts   33 cognitive patterns + fable profiles
+├── benchmarkSet.ts       BENCH (10) + OOD_BENCH (5) for prompt scoring
+├── evolvedThinking.ts    Prompt-evolution loop
+├── evolvedMutate.ts      17 mutation operators
+├── evolvedScoring.ts     Multi-number scoring
+├── events.ts             module-level emitter, makeConsoleLogger
+└── types.ts              shared TS types (LogEvent, StepEvent)
+
+codeGenerator/
+├── index.ts              public surface
+├── sandbox.ts            isolated-vm JS sandbox + python subprocess fallback
+├── fileBlocks.ts         ### FILE: and ### PATCH: parse/apply + automation script gen
+├── python.ts             MCTS-of-approaches + JS+Python double-check
+├── run.ts                12-step project pipeline
+└── project.ts            re-exports for direct consumers
+
+parse/
+├── json.ts               parseJsonSafe + tryParseJsonSafe
+└── llmSchemas.ts         Zod schemas for every LLM-emitted shape
 
 providers/
-└── index.js              Multi-provider adapter (OpenAI, Claude, Gemini, Perplexity, Grok, LM Studio, Ollama)
+├── index.ts              Multi-provider adapter
+└── gemini.ts             Direct Gemini Web API via cookies
 
 internet/
-├── extractFromUrl.js     Universal URL → HTML extractor (20+ formats)
-├── axios.js              Chrome TLS-spoofing axios adapter (impit)
-├── ollamaSearch.js       Ollama web search (REST + JS client fallback)
-├── interactWithInternet.js Search + fetch orchestration layer
-└── extractCitation.js    APA citation generator
+├── extractFromUrl.ts     Universal URL → HTML extractor (13 formats)
+├── axios.ts              Chrome TLS-spoofing axios adapter (impit)
+├── ollamaSearch.ts       Ollama web search
+├── interactWithInternet.ts Search + fetch orchestration
+├── mullvadLetaClient.ts   SearXNG meta-search
+└── extractCitation.ts    9 citation styles
 
 examples/
 ├── electron_explorer.js  Autonomous AI browser agent (Electron)
-└── research.js           Standalone deep research usage example
+└── research.js           Standalone deep research usage
 ```
+
+> All `.ts` files emit a sibling `.js` next to them at build time.
 
 ---
 

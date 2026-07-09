@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "sourceMap": false,
+    "noEmit": false,
+    "noEmitOnError": true,
+    "allowJs": false,
+    "checkJs": false
+  },
+  "include": [
+    "thinking/**/*.ts",
+    "providers/**/*.ts",
+    "internet/**/*.ts",
+    "parse/**/*.ts",
+    "codeGenerator/**/*.ts",
+    "index.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "tests",
+    "examples",
+    "scripts",
+    "data",
+    "research",
+    "dist"
+  ]
+}

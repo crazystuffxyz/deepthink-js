@@ -1,11 +1,21 @@
 {
   "name": "deepthink-js",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "SOTA NPM module for agentic processes using local or cloud LLMs.",
   "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
   "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "node tests/runAll.js",
     "test:fast": "node tests/test_dataTypes.js && node tests/test_memory.js && node tests/test_compression.js && node tests/test_consistency.js && node tests/test_toolUse.js && node tests/test_providers.js && node tests/test_sandbox.js && node tests/test_thinkingPatterns.js && node tests/test_evolvedScoring.js && node tests/test_evolvedMutate.js && node tests/test_evolvedThinking.js",
+    "test:ts": "npm run build && npm test",
     "evolve": "node scripts/evolve.js",
     "apply-best": "node scripts/applyBest.js",
     "probe": "node scripts/probeGeneralize.js",
@@ -22,6 +32,7 @@
     "electron": "^41.5.0",
     "fast-xml-parser": "^5.7.3",
     "impit": "^0.13.1",
+    "isolated-vm": "^5.0.4",
     "java-parser": "^3.0.1",
     "jsdom": "^29.1.0",
     "jszip": "^3.10.1",
@@ -32,12 +43,22 @@
     "parse5": "^8.0.1",
     "pdf-parse": "^2.4.5",
     "turndown": "^7.2.4",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^4.4.3"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/crazystuffxyz/deepthink-js.git"
   },
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^20.19.43",
+    "@types/p-queue": "^3.1.0",
+    "@types/papaparse": "^5.5.2",
+    "@types/turndown": "^5.0.6",
+    "p-queue": "^8.1.1",
+    "typescript": "5.7"
+  }
 }

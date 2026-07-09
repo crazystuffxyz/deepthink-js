@@ -1,7 +1,7 @@
 // test_sandbox.js — runJSSandbox and runPythonSandbox. No LLM needed.
 'use strict';
 
-import { runJSSandbox, runPythonSandbox, PYTHON_BIN, compareResults } from '../thinking/codeGenerator.js';
+import { runJSSandbox, runPythonSandbox, PYTHON_BIN, compareResults } from '../codeGenerator/index.js';
 
 function ok(c, m) { if (!c) throw new Error('FAIL: ' + m); }
 
@@ -15,15 +15,36 @@ function ok(c, m) { if (!c) throw new Error('FAIL: ' + m); }
   ok(out2 === '12345678901234567890', 'js BigInt -> ' + JSON.stringify(out2));
 
   // JS: sandbox returns output for valid code
-  const outFs = await runJSSandbox("const fs = require('fs'); console.log(typeof fs.readFileSync);");
-  ok(outFs === 'function', 'js sandbox returns output for require call');
+  const outFs = await runJSSandbox("console.log(2 + 3);");
+  ok(outFs === '5', 'js sandbox returns output for console.log call');
+
+  // JS: blocked modules
+  let blocked = false;
+  try {
+    await runJSSandbox("require('fs')");
+  } catch { blocked = true; }
+  ok(blocked, 'js blocks require(fs)');
 
   // JS: crash on bad code
   let crashed = false;
   try {
-    await runJSSandbox('process.exit(2);');
+    await runJSSandbox('throw new Error("nope");');
   } catch { crashed = true; }
-  ok(crashed, 'js non-zero exit rejected');
+  ok(crashed, 'js throws bubble out');
+
+  // JS: timeout
+  let timedOut = false;
+  try {
+    await runJSSandbox('while (true) {}');
+  } catch { timedOut = true; }
+  ok(timedOut, 'js infinite loop times out');
+
+  // JS: memory limit
+  let oom = false;
+  try {
+    await runJSSandbox('const a=[]; while(true) a.push(new Array(1000000).fill(0));');
+  } catch { oom = true; }
+  ok(oom, 'js memory growth disposed');
 
   if (PYTHON_BIN) {
     const p1 = await runPythonSandbox('print(2 ** 10)');

@@ -82,8 +82,15 @@ function seedPopulation(n, rand = Math.random) {
     return pop.slice(0, n);
 }
 async function evalCandidate(callChat, candidate, bench, opts) {
+    // mini-batch SGD: evalSample > 0 evaluates a random subset per candidate,
+    // so a big train bank stays cheap. the final best is re-evaluated on the
+    // full bank in evolvePrompts, so the reported fitness is always honest.
+    const sampleSize = Number(opts.evalSample || 0);
+    const items = sampleSize > 0 && sampleSize < bench.length
+        ? [...bench].sort(() => Math.random() - 0.5).slice(0, sampleSize)
+        : bench;
     const outputs = {};
-    for (const item of bench) {
+    for (const item of items) {
         const msgs = [
             { role: 'system', content: candidate.systemPrompt },
             { role: 'user', content: item.prompt }
@@ -108,7 +115,7 @@ async function evalCandidate(callChat, candidate, bench, opts) {
                 process.stdout.write(`  [eval] ${candidate.id} ${item.id} ERR: ${e.message}\n`);
         }
     }
-    const score = await scoreAgainstBench(callChat, outputs, bench, opts);
+    const score = await scoreAgainstBench(callChat, outputs, items, opts);
     return { outputs, score };
 }
 async function oneGeneration(callChat, population, bench, opts, log) {
@@ -194,6 +201,20 @@ async function evolvePrompts(callChat, opts = {}) {
             process.stdout.write(`[evolve] gen ${log.gen}  best=${best.fitness.toFixed(3)} (${best.id})  median=${median.toFixed(3)}  op=${best.operator || 'seed'}\n`);
     }
     let best = population[0];
+    // full-bank re-eval so the reported fitness is honest even with mini-batches
+    if (Number(opts.evalSample || 0) > 0) {
+        try {
+            const r = await evalCandidate(callChat, best, bench, opts);
+            best.fitness = r.score.aggregate;
+            best.score = r.score;
+            if (process.stdout?.write)
+                process.stdout.write(`[evolve] full-bank re-eval of best: ${best.fitness.toFixed(3)}\n`);
+        }
+        catch (e) {
+            if (process.stdout?.write)
+                process.stdout.write(`[evolve] full-bank re-eval failed: ${e.message}\n`);
+        }
+    }
     let oodScore = null;
     if (oodBench && oodBench.length) {
         try {

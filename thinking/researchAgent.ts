@@ -1093,16 +1093,22 @@ function formatReport(report: string, opts: any, topic: string, answerSpec: any,
 // targeted quote query can rescue the whole quant model — without a price
 // the DCF, VaR, and expected-price math all stay uncomputable and the
 // writer is forced into inventing numbers.
-async function recoverStockQuote(callChat: any, topic: string, opts: any = {}): Promise<any[]> {
+async function recoverStockQuote(callChat: any, topic: string, opts: any = {}, missing: string[] = []): Promise<any[]> {
   const ticker = opts.ticker || '';
-  // several phrasings — quote pages vary ("price", "quote", "live", "now")
-  // and the fallback search instance is literal; one phrasing can 404.
-  const queries = ticker
-    ? [`${ticker} stock price today`, `${ticker} current share price quote`, `${ticker} stock quote live now`, `${ticker} last close price`]
-    : [`${topic} current price quote`];
-  log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl (${queries.length} phrasings)`, source: 'researchAgent', ts: Date.now() });
+  // several phrasings per missing field — quote pages vary ("price",
+  // "quote", "live", "now") and the fallback search instance is literal;
+  // one phrasing can 404. run 10: the main crawl surfaced only industry
+  // articles, so price/EPS/beta were all missing — recover each one.
+  const queries: string[] = [];
+  if (missing.includes('price') || !missing.length) {
+    queries.push(`${ticker} stock price today`, `${ticker} current share price quote`, `${ticker} stock quote live now`, `${ticker} last close price`);
+  }
+  if (missing.includes('eps')) queries.push(`${ticker} diluted EPS trailing twelve months`, `${ticker} earnings per share TTM`);
+  if (missing.includes('beta')) queries.push(`${ticker} beta 5 year monthly`, `${ticker} stock beta volatility`);
+  if (!queries.length) queries.push(`${topic} current price quote`);
+  log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl (${queries.length} phrasings for: ${missing.join(', ') || 'all'})`, source: 'researchAgent', ts: Date.now() });
   try {
-    const results = await crawlerAgent(queries, 2, opts);
+    const results = await crawlerAgent(queries, 4, opts);
     // quote aggregators are low-DA pages — threshold 25 instead of 30 so
     // stockanalysis/marketwatch/yahoo actually make it through
     const credible = verificationAgent(results, 25, opts).slice(0, 6);
@@ -1188,13 +1194,16 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
     if (opts.mode === 'stock') {
       const preRecovery = verifiedNodes.length;
       quantModel = runQuantModel(verifiedNodes.map((n: any) => n.claim));
-      // no price = no math: one targeted quote crawl before giving up
-      if (quantModel.price == null) {
-        const extra = await recoverStockQuote(callChat, topic, opts);
+      // missing inputs = no math: one targeted quote crawl per missing
+      // field (price, EPS, beta) before giving up
+      const missing = ['price', 'eps', 'beta'].filter((k) => quantModel[k] == null);
+      if (missing.length) {
+        const extra = await recoverStockQuote(callChat, topic, opts, missing);
         if (extra.length) {
           verifiedNodes.push(...extra);
           quantModel = runQuantModel(verifiedNodes.map((n: any) => n.claim));
-          log({ level: quantModel.price != null ? 'success' : 'warn', msg: `[QUANT] Recovery added ${extra.length} claims — price ${quantModel.price != null ? '$' + quantModel.price.toFixed(2) : 'still missing'}`, source: 'researchAgent', ts: Date.now() });
+          const still = ['price', 'eps', 'beta'].filter((k) => quantModel[k] == null);
+          log({ level: still.length ? 'warn' : 'success', msg: `[QUANT] Recovery added ${extra.length} claims — still missing: ${still.join(', ') || 'none'}`, source: 'researchAgent', ts: Date.now() });
         }
       }
       stepSummary.quant = {
@@ -1259,16 +1268,6 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
         log({ level: remaining.length ? 'warn' : 'success', msg: `[QUANT] Purge repair ${remaining.length ? `incomplete — ${remaining.length} tokens remain` : 'clean'}`, source: 'researchAgent', ts: Date.now() });
       }
     }
-    // the computed quant section is appended AFTER the critique loop so no
-    // critic/repair pass can rewrite code-computed math — it lands between
-    // the conclusion and references as a modeling appendix.
-    if (quantModel && quantModel.section) {
-      const refIdx = finalReport.lastIndexOf('\n---\n## References');
-      if (refIdx > -1) finalReport = finalReport.slice(0, refIdx) + '\n\n' + quantModel.section + finalReport.slice(refIdx);
-      else finalReport += '\n\n' + quantModel.section;
-      stepSummary.quant.injected = true;
-      log({ level: 'success', msg: '[QUANT] Injected computed quantitative model section', source: 'researchAgent', ts: Date.now() });
-    }
     // humanize flag: rewrite until the detector says 0% AI-ness, fixing any
     // damage each rewrite causes, looping until clean.
     if (opts.humanize) {
@@ -1277,6 +1276,18 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
       finalReport = h.text;
       stepSummary.humanize = { iterations: h.iterations, finalScore: h.finalScore, ok: h.ok };
       log({ level: 'success', msg: `[HUMANIZE] Done — ${h.iterations} iterations, detector score ${h.finalScore}`, source: 'researchAgent', ts: Date.now() });
+    }
+    // the computed quant section is appended AFTER the critique loop AND the
+    // humanize loop so no critic/repair/humanizer pass can rewrite
+    // code-computed math — it lands between the conclusion and references
+    // as a modeling appendix. (run 10: the humanizer paraphrased the
+    // section's inputs line into "volatility: 08, 24, 28, 29".)
+    if (quantModel && quantModel.section) {
+      const refIdx = finalReport.lastIndexOf('\n---\n## References');
+      if (refIdx > -1) finalReport = finalReport.slice(0, refIdx) + '\n\n' + quantModel.section + finalReport.slice(refIdx);
+      else finalReport += '\n\n' + quantModel.section;
+      stepSummary.quant.injected = true;
+      log({ level: 'success', msg: '[QUANT] Injected computed quantitative model section', source: 'researchAgent', ts: Date.now() });
     }
     log({ level: 'success', msg: '[DONE] Research complete. Final report delivered.', source: 'researchAgent', ts: Date.now() });
     const report = formatReport(finalReport, opts, topic, answerSpec, references);

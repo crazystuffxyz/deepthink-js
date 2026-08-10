@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.4
+
+### Fixed
+- **P/E multiples never harvested as price** — run 11: "trades at 27 times forward earnings" is a valuation multiple, but the `trades at` anchor captured 27.00 as the current price and the whole model computed against it. `harvestAll` gains a post-match banned check (25 chars after the capture): `x` directly after the number, `times` (word-bounded), `forward earnings`, `multiple`, `p/e`, `pe ratio` all disqualify. `scanPriceForwardAll` gets the same guard, and the conformance sweep's price rules reject a trailing `x` and ban `times`/`multiple`.
+
 ## v1.8.3
 
 ### Fixed

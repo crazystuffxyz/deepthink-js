@@ -5,7 +5,7 @@
 // benchmarks/research/ so we can critique the OUTPUT and fix the PIPELINE.
 //
 // usage:
-//   node scripts/researchStockTest.js [--ticker NVDA] [--model X] [--humanize]
+//   node scripts/researchStockTest.js [--ticker NVDA] [--model X] [--humanize] [--files a.pdf,b.docx]
 //
 // output:
 //   benchmarks/research/stock-<ticker>-<n>.md   (the report)
@@ -30,6 +30,9 @@ function arg(name, def) {
 const TICKER = arg('ticker', 'NVDA');
 const MODEL = arg('model', process.env.BENCH_MODEL || 'gemma4:31b-cloud');
 const HUMANIZE = process.argv.includes('--humanize');
+// --files a.pdf,b.docx — local docs converted to markdown and injected as
+// max-credibility evidence sources alongside the web research
+const FILES = (arg('files', '') || '').split(',').map((s) => s.trim()).filter(Boolean);
 
 // pick the next free run number so we never clobber an earlier report
 let runN = 1;
@@ -54,6 +57,7 @@ async function main() {
     useOllamaSearch: true,
     academicFilter: false,
     humanize: HUMANIZE,
+    files: FILES,
   });
   const ms = Date.now() - t0;
 

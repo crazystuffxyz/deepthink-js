@@ -45,10 +45,17 @@ function normaliseMime(contentType = ''): string {
 }
 
 async function extractPdf(buffer: Buffer, url: string): Promise<string> {
-  const data = await PDFParse(buffer) as { text: string; info?: { Title?: string }; numpages: number; numrender: number };
+  // pdf-parse v2: class-based API — new PDFParse({data}) → load() → getText()
+  const parser = new PDFParse({ data: buffer });
+  await parser.load();
+  const data = await parser.getText() as { text: string; pages: Array<{ text: string; num: number }>; total: number };
+  let info: any = {};
+  try { info = await parser.getInfo(); } catch { /* info is optional */ }
+  parser.destroy();
+  const title = info?.info?.Title || info?.Title || '';
   const escaped = escapeHtml(data.text);
   const pages = escaped.split(/\f/).map((page, i) => `<section><h2>Page ${i + 1}</h2><p>${page.replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>')}</p></section>`).join('\n');
-  return `<article>\n        <h1>PDF Document${data.info?.Title ? ': ' + escapeHtml(data.info.Title) : ''}</h1>\n        <p><em>${data.numpages} page(s) · ${data.numrender} rendered</em></p>\n        ${pages}\n    </article>`;
+  return `<article>\n        <h1>PDF Document${title ? ': ' + escapeHtml(title) : ''}</h1>\n        <p><em>${data.total} page(s) · ${data.text.length} chars extracted</em></p>\n        ${pages}\n    </article>`;
 }
 
 async function extractDocx(buffer: Buffer): Promise<string> {
@@ -210,6 +217,36 @@ function extractHtml(html: string, url: string): string {
   if (article?.content) return article.content;
   if (process.stdout?.write) process.stdout.write(`[extractHtml] Readability could not find main content on ${url}.\n`);
   return `Error: Could not extract readable content from ${url}. The page might not be an article or is structured in a way that Readability cannot process.`;
+}
+
+// local file variant: same extractors, but the bytes come from disk instead
+// of the network. lets the research pipeline ingest user-supplied PDFs,
+// docx, xlsx, pptx, csv, epub, rtf, odt, markdown, etc. as evidence sources.
+export async function extractLocalFile(filePath: string): Promise<string> {
+  const fs = await import('node:fs/promises');
+  const buffer = await fs.readFile(filePath);
+  const mime = mimeFromExtension(filePath) || 'application/octet-stream';
+  if (mime === 'application/pdf') return await extractPdf(buffer, filePath);
+  if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || mime === 'application/docx') return await extractDocx(buffer);
+  if (mime === 'application/msword') {
+    try { return await extractDocx(buffer); }
+    catch { return `<article><p>Legacy .doc format could not be fully parsed. Please convert to .docx for best results.</p></article>`; }
+  }
+  if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || mime === 'application/vnd.ms-excel' || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.template') return extractSpreadsheet(buffer);
+  if (mime === 'application/vnd.oasis.opendocument.spreadsheet') return extractSpreadsheet(buffer);
+  if (mime === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || mime === 'application/vnd.ms-powerpoint') return await extractPptx(buffer);
+  if (mime === 'application/vnd.oasis.opendocument.text') return await extractOdt(buffer);
+  if (mime === 'application/epub+zip') return await extractEpub(buffer);
+  if (mime === 'application/rtf' || mime === 'text/rtf') return await extractRtf(buffer);
+  if (mime === 'text/csv' || mime === 'application/csv') return extractCsv(buffer.toString('utf8'), ',');
+  if (mime === 'text/tab-separated-values') return extractCsv(buffer.toString('utf8'), '\t');
+  if (mime === 'application/json' || mime === 'text/json') return extractJson(buffer.toString('utf8'));
+  if (mime === 'application/xml' || mime === 'text/xml' || mime === 'application/rss+xml' || mime === 'application/atom+xml' || mime === 'application/soap+xml') return extractXml(buffer.toString('utf8'));
+  if (mime === 'image/svg+xml') return extractSvg(buffer.toString('utf8'));
+  if (mime === 'text/markdown' || mime === 'text/x-markdown') return extractMarkdown(buffer.toString('utf8'));
+  if (mime.startsWith('text/')) return extractPlainText(buffer.toString('utf8'));
+  if (mime.startsWith('image/')) return extractImage(buffer, mime, filePath);
+  return extractUnknown(mime, filePath, buffer.byteLength);
 }
 
 export async function extractArticleText(url: string): Promise<string> {

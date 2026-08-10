@@ -12,6 +12,20 @@ function formatDate(date: Date | string | null | undefined): string {
   return d.toISOString().split('T')[0];
 }
 
+// Readability's byline is unreliable — on Wikipedia it sometimes grabs a
+// section heading ("9.5 French Competition Authority investigation") as the
+// author. sanitizeAuthor rejects anything that isn't plausibly a person or
+// org name: section-numbered headings, "By " prefixes, junk, overlong strings.
+function sanitizeAuthor(raw: string): string {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim().replace(/^By\s+/i, '');
+  if (!s || s.length > 80) return 'Unknown Author';
+  if (/^\d+(\.\d+)*\s+[A-Z]/.test(s)) return 'Unknown Author'; // "9.5 French..." section heading
+  if (/wikipedia|wikimedia/i.test(s)) return 'Unknown Author';
+  if (/^(the|a|an)\s+(article|page|report|post)$/i.test(s)) return 'Unknown Author';
+  if (/^[a-z0-9]{1,3}$/.test(s)) return 'Unknown Author'; // "by", "ed", "me"
+  return s;
+}
+
 function formatCitations(data: { author: string; title: string; year: number | string; site: string; url: string; accessed: string }): Record<string, string> {
   const { author, title, year, site, url, accessed } = data;
   const a = author === 'Unknown Author' ? '' : author;
@@ -71,7 +85,7 @@ export async function generateCitation(url: string): Promise<{ error: string } |
     const site = article?.siteName || $meta('meta[property="og:site_name"]').attr('content') || new URL(url).hostname;
     const accessed = formatDate(new Date());
     const data = {
-      author: author.replace(/\s+/g, ' ').trim(),
+      author: sanitizeAuthor(author),
       title: title.replace(/\s+/g, ' ').trim(),
       year: finalYear,
       site: site.replace(/\s+/g, ' ').trim(),

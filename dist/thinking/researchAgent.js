@@ -480,6 +480,44 @@ function buildCoverageGapsDisclaimer(plannedQueries, verifiedNodes) {
         return null;
     return `## Coverage Gaps\n\nThis report was planned to cover **${plannedTopics.length} topic areas**, but **${missingTopics.length} (${ratio}%)** returned no verified data, likely due to paywalls, bot-protection, or search engine rate-limiting.\n\n**Topics with no recovered data:**\n${missingTopics.slice(0, 15).map((t) => `- ${t}`).join('\n')}${missingTopics.length > 15 ? `\n- *(and ${missingTopics.length - 15} more...)*` : ''}\n\nFindings in this report are limited to sectors where data was successfully retrieved.\n\n---\n`;
 }
+// merge near-duplicate claims from different sources before the writer sees
+// them. two claims are duplicates when they share a distinctive number
+// (dollar amount, percentage, year) AND overlap in subject words — e.g. the
+// same price target reported by two sites. merged claims carry both source
+// URLs so the writer cites both in ONE paragraph instead of repeating the
+// fact in separate sections. qualitative claims (no numbers) never merge.
+function mergeDuplicateClaims(nodes) {
+    const numsOf = (s) => new Set((s.match(/\$?\d+(?:\.\d+)?[bm%]?/gi) || []).map((x) => x.toLowerCase()));
+    const wordsOf = (s) => new Set((s.toLowerCase().match(/[a-z]{4,}/g) || []).slice(0, 12));
+    const out = [];
+    const used = new Set();
+    for (let i = 0; i < nodes.length; i++) {
+        if (used.has(i))
+            continue;
+        const a = nodes[i];
+        const numsA = numsOf(a.claim || '');
+        const wordsA = wordsOf(a.claim || '');
+        const merged = { ...a, urls: [a.url] };
+        for (let j = i + 1; j < nodes.length; j++) {
+            if (used.has(j))
+                continue;
+            const b = nodes[j];
+            const numsB = numsOf(b.claim || '');
+            const sharedNums = [...numsA].filter((n) => numsB.has(n)).length;
+            if (sharedNums < 1)
+                continue;
+            const wordsB = wordsOf(b.claim || '');
+            const sharedWords = [...wordsA].filter((w) => wordsB.has(w)).length;
+            if (sharedWords >= 3) {
+                used.add(j);
+                merged.urls.push(b.url);
+                log({ level: 'info', msg: `[STEP 6] Merged duplicate claim (${sharedNums} shared numbers): "${(a.claim || '').slice(0, 60)}..." + "${(b.claim || '').slice(0, 60)}..."`, source: 'researchAgent', ts: Date.now() });
+            }
+        }
+        out.push(merged);
+    }
+    return out;
+}
 async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opts, plannedQueries = []) {
     log({ level: 'info', msg: `[STEP 6] Report Writer — ${verifiedNodes.length} verified claims, ${plannedQueries.length} planned queries`, source: 'researchAgent', ts: Date.now() });
     const chunk = opts.chunkSize ?? 20;
@@ -487,40 +525,51 @@ async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opt
     const coverageGaps = buildCoverageGapsDisclaimer(plannedQueries, verifiedNodes);
     if (coverageGaps)
         log({ level: 'warn', msg: '[STEP 6] Coverage gaps detected — disclaimer will be prepended', source: 'researchAgent', ts: Date.now() });
+    const deduped = mergeDuplicateClaims(verifiedNodes);
+    if (deduped.length < verifiedNodes.length)
+        log({ level: 'info', msg: `[STEP 6] Claim dedup: ${verifiedNodes.length} -> ${deduped.length}`, source: 'researchAgent', ts: Date.now() });
     const refMap = new Map();
-    for (const node of verifiedNodes) {
-        if (!refMap.has(node.url)) {
-            const cData = node.citation?.data || {};
-            const siteFallback = (() => { try {
-                const h = new URL(node.url).hostname;
-                return h || (node.url.startsWith('file://') ? node.title : node.url);
+    for (const node of deduped) {
+        for (const u of node.urls || [node.url]) {
+            if (!refMap.has(u)) {
+                const cData = node.citation?.data || {};
+                const siteFallback = (() => { try {
+                    const h = new URL(u).hostname;
+                    return h || (u.startsWith('file://') ? node.title : u);
+                }
+                catch {
+                    return u;
+                } })();
+                refMap.set(u, { id: refMap.size + 1, url: u, title: cData.title || node.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || node.publicationDate || 'n.d.', site: cData.site || siteFallback });
             }
-            catch {
-                return node.url;
-            } })();
-            refMap.set(node.url, { id: refMap.size + 1, url: node.url, title: cData.title || node.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || node.publicationDate || 'n.d.', site: cData.site || siteFallback });
         }
     }
     for (const [, ref] of refMap)
         ref.apa = buildAPACitation(ref);
     const chunks = [];
-    for (let i = 0; i < verifiedNodes.length; i += chunk)
-        chunks.push(verifiedNodes.slice(i, i + chunk));
+    for (let i = 0; i < deduped.length; i += chunk)
+        chunks.push(deduped.slice(i, i + chunk));
     log({ level: 'info', msg: `[STEP 6] Writing ${chunks.length} sections...`, source: 'researchAgent', ts: Date.now() });
     const sections = [];
     let previousTail = '';
     const requiredNote = (answerSpec.requiredFields || []).length ? `Required output fields: ${answerSpec.requiredFields.join(', ')}.` : '';
     const timeNote = (answerSpec.timeConstraints || []).length ? `Honour time constraints: ${answerSpec.timeConstraints.join('; ')}.` : '';
+    // stock mode: the report must actually DO the math, not just claim it.
+    // a DCF without a stated intrinsic value, or an Ito mention without an
+    // applied derivation, reads as hand-waving — the quant verifier flags it.
+    const stockNote = opts.mode === 'stock'
+        ? `\n\nSTOCK REPORT REQUIREMENTS (non-negotiable):\n  - If you run a DCF or Monte Carlo, STATE the resulting intrinsic value estimate in dollars per share.\n  - Apply Ito's lemma concretely: derive the expected log-return (μ - σ²/2)T and use it in your expected-return math. Do not just name-drop the equation.\n  - Every risk metric (VaR, Sharpe) must be consistent with the stated volatility: 1-day 95% VaR = 1.645 * σ / sqrt(252).\n  - State the expected return over your target horizon and the volatility that justifies the recommendation.`
+        : '';
     for (let ci = 0; ci < chunks.length; ci++) {
         const chunkSlice = chunks[ci];
         const isFirst = ci === 0;
         const taggedClaims = chunkSlice.map((node) => {
-            const refId = refMap.get(node.url)?.id ?? '?';
+            const refIds = (node.urls || [node.url]).map((u) => refMap.get(u)?.id ?? '?');
             const pubTag = node.publicationDate && node.publicationDate !== 'unknown' ? ` [published ${node.publicationDate}]` : '';
-            return `[Source ${refId}${pubTag}] ${node.claim}`;
+            return `[Source ${refIds.join(', Source ')}${pubTag}] ${node.claim}`;
         }).join('\n');
         const continuityNote = isFirst ? `Begin with a 3-sentence Executive Summary answering: "${topic}"` : `Continue the report seamlessly. The previous section ended with:\n"...${previousTail}"`;
-        const r = await callChat([{ role: 'system', content: `You are writing section ${ci + 1} of ${chunks.length} of a research report.\n\nORIGINAL QUESTION: "${topic}"\n${requiredNote}\n${timeNote}\n\nSECTION RULES:\n  1. Write complete, detailed prose for EVERY claim — do not skip any.\n  2. Do NOT save tokens. Do NOT summarize. Write fully.\n  3. Keep every [Source N] inline citation tag exactly as given.\n  4. Use ## subheadings to group claims by theme.\n  5. Do NOT write a conclusion — that comes in the final section.\n  6. Do NOT write a references section.\n  7. Do NOT repeat content from the previous section.\n  8. Each [Source N] tag includes a published date. When citing historical data,\n     clearly label it: "As of [date], ...". Do NOT present old data as current.\n\n${continuityNote}` },
+        const r = await callChat([{ role: 'system', content: `You are writing section ${ci + 1} of ${chunks.length} of a research report.\n\nORIGINAL QUESTION: "${topic}"\n${requiredNote}\n${timeNote}${stockNote}\n\nSECTION RULES:\n  1. Write complete, detailed prose for EVERY claim — do not skip any.\n  2. Do NOT save tokens. Do NOT summarize. Write fully.\n  3. Keep every [Source N] inline citation tag exactly as given.\n  4. Use ## subheadings to group claims by theme.\n  5. Do NOT write a conclusion — that comes in the final section.\n  6. Do NOT write a references section.\n  7. Do NOT repeat content from the previous section.\n  8. Each [Source N] tag includes a published date. When citing historical data,\n     clearly label it: "As of [date], ...". Do NOT present old data as current.\n\n${continuityNote}` },
             { role: 'user', content: `Claims for section ${ci + 1}:\n\n${taggedClaims}\n\nWrite the section now. Answer: "${topic}"` }], false, null, { ...opts, think: false, samplingProfile: 'creative' });
         const sectionText = (r.content || '').trim();
         sections.push(sectionText);
@@ -539,13 +588,15 @@ async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opt
     // resolve, and the References section must list every source. the writer is
     // told to keep tags — this makes sure it actually did.
     const claimsByRef = new Map();
-    for (const node of verifiedNodes) {
-        const id = refMap.get(node.url)?.id;
-        if (id == null)
-            continue;
-        if (!claimsByRef.has(id))
-            claimsByRef.set(id, []);
-        claimsByRef.get(id).push(node.claim);
+    for (const node of deduped) {
+        for (const u of node.urls || [node.url]) {
+            const id = refMap.get(u)?.id;
+            if (id == null)
+                continue;
+            if (!claimsByRef.has(id))
+                claimsByRef.set(id, []);
+            claimsByRef.get(id).push(node.claim);
+        }
     }
     const integrity = await enforceCitations(callChat, fullReport, refMap.size, claimsByRef, opts);
     fullReport = integrity.report;
@@ -606,6 +657,27 @@ MATH YOU MUST CHECK:
   5. DCF: PV = Σ CF_t / (1+r)^t. Check discount rates, growth rates, and terminal value math.
   6. Multiples: P/E, EV/EBITDA — check the numbers are consistent (price / EPS, etc.).
   7. Annualization: daily vol * sqrt(252) = annual vol. Monthly * sqrt(12).
+
+CROSS-CHECK PROTOCOL (mandatory): every number in the report must be derivable
+from the report's OWN stated inputs. For each of these, recompute and compare:
+  - If the report states annualized volatility σ AND a 1-day 95% VaR, verify
+    VaR = 1.645 * σ / sqrt(252). Example: σ = 42% implies 1-day 95% VaR =
+    1.645 * 0.42 / 15.87 = 4.35%. A stated VaR of 3.4% with σ = 42% is an
+    arithmetic_error — flag it and give the correct value.
+  - If the report states a Sharpe ratio AND return AND volatility, verify
+    Sharpe = (R_p - R_f) / σ_p.
+  - If the report states a price target AND current price, verify the implied
+    upside/downside percentage matches.
+  - If the report states a forward P/E AND price AND EPS, verify P/E = price / EPS.
+
+MISSING-MATH CHECKS (flag as critical, type "unsupported" or "missing_drift"):
+  - If the report claims to have run a DCF or Monte Carlo simulation but never
+    states the resulting intrinsic value estimate, flag it.
+  - If the report mentions Ito's lemma or GBM but never applies it to compute
+    an expected return or expected log-return (with the -σ²/2 drift
+    correction), flag it.
+  - If the report issues a buy/hold/sell recommendation, it must state the
+    expected return and the risk (volatility) that justify it.
 
 For every quantitative claim: state the formula, plug in the report's numbers, recompute, and compare. Flag any arithmetic error, wrong formula, wrong z-value, or missing drift correction.
 

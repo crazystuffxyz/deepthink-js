@@ -203,19 +203,23 @@ async function crawlerAgent(queries: any[], maxConcurrency = 5, opts: any = {}):
 function scoreCredibility(result: any, opts: any = {}): number {
   let score = 40;
   const { url = '', snippet = '', title = '' } = result;
+  // the CJK/Q&A penalties assume an ENGLISH research query — for a Chinese
+  // topic zhihu/baidu ARE the authoritative sources, so skip the foreign-
+  // language penalties entirely when the topic itself is CJK-heavy.
+  const topicCjk = ((opts.topic || '').match(/[一-鿿㐀-䶿]/g) || []).length / Math.max(1, (opts.topic || '').length) > 0.3;
   try {
     const hostname = new URL(url).hostname;
     const tld2 = '.' + hostname.split('.').slice(-2).join('.');
     const tld1 = '.' + hostname.split('.').pop();
     if (HIGH_CREDIBILITY_TLDS.has(tld2)) score += 30;
     else if (HIGH_CREDIBILITY_TLDS.has(tld1)) score += 20;
-    if (QNA_SPAM_DOMAINS.has(hostname)) score -= 60;
+    if (QNA_SPAM_DOMAINS.has(hostname) && !topicCjk) score -= 60;
   } catch { score -= 20; }
   const text = (snippet + ' ' + title).toLowerCase();
   // CJK title/snippet = the fallback search instance returned a foreign
   // Q&A page — dead weight for an English research query.
   const cjkRatio = (text.match(/[一-鿿㐀-䶿]/g) || []).length / Math.max(1, text.length);
-  if (cjkRatio > 0.3) score -= 45;
+  if (cjkRatio > 0.3 && !topicCjk) score -= 45;
   const academicSignals = ['study', 'research', 'analysis', 'data', 'findings', 'published', 'journal', 'peer-reviewed', 'according to', 'evidence'];
   score += Math.min(academicSignals.filter(s => text.includes(s)).length * 3, 20);
   if (snippet.length > 200) score += 10;
@@ -279,9 +283,11 @@ async function extractAndSummarize(callChat: any, source: any, topic: string, an
   // CJK spam guard (run 5): the fallback search instance returned Chinese
   // Q&A pages (zhihu/baidu/zybang) that polluted the whole crawl. a page
   // this CJK-heavy is not research evidence for an English query — reject
-  // before spending an extraction call on it.
+  // before spending an extraction call on it. (a CJK-heavy TOPIC keeps the
+  // pages: for Chinese research those sources are legitimate.)
+  const topicCjk = ((topic || '').match(/[一-鿿㐀-䶿]/g) || []).length / Math.max(1, (topic || '').length) > 0.3;
   const cjkChars = (rawContent.match(/[一-鿿㐀-䶿]/g) || []).length;
-  if (cjkChars / Math.max(1, rawContent.length) > 0.2) {
+  if (!topicCjk && cjkChars / Math.max(1, rawContent.length) > 0.2) {
     return { url, goal, summary: null, credibilityScore, error: 'Non-English (CJK) content' };
   }
   // context guard: a long article or a big local PDF would overflow the
@@ -993,6 +999,9 @@ async function recoverStockQuote(callChat: any, topic: string, opts: any = {}): 
 }
 
 export default async function runDeepResearch(callChat: any, topic: string, opts: any = {}): Promise<any> {
+  // thread the topic through opts so language-aware guards (CJK penalties)
+  // can decide per-query instead of blanket-rejecting non-English content
+  opts = { ...opts, topic };
   const stepSummary: any = {};
   if (opts.useOllamaSearch) log({ level: 'info', msg: '[CONFIG] Search backend: Ollama API', source: 'researchAgent', ts: Date.now() });
   else log({ level: 'info', msg: '[CONFIG] Search backend: SearXNG', source: 'researchAgent', ts: Date.now() });

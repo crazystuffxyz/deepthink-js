@@ -13,6 +13,10 @@
 ### Changed
 - Critique loop: domain expert now performs structural checks (Executive Summary must lead, no duplicate sections, conclusion answers with specifics); convergence guard stops when repair improves <20%.
 - Humanize loop: the previous detector pass's "tells" are fed into the next humanize pass so rewrites target the actual AI signals instead of guessing blind; plateau guard stops when two consecutive scores don't improve.
+- **Harvest hardening** (run 6: 113 claims, yet price/EPS "NOT FOUND" — regexes died on real phrasing): windows now cross digits ("EPS for Q3 FY2026 stood at $1.30"), lazy first-number-wins semantics ("volatility is 45%, up from 40%" → 45), year-like capture rejection with per-anchor rescan ("share price for fiscal 2026 was $150.42" → 150.42), price-TARGET guard (target/forecast/guidance hits are never current price), `vol(?!ume)` so trading volume can't masquerade as volatility, and EPS annual-preference scoring (annual/TTM beats quarterly, so Q3 EPS never feeds the annual DCF).
+- **Search-quality defenses** (run 5: the crawl returned Chinese Q&A spam and extraction failed 0/10): Q&A spam domains (zhihu/baidu/zybang/…) penalized -60 in credibility scoring, CJK-heavy titles/snippets -45, CJK-heavy page content rejected pre-extraction, and a spam-quarantine retry re-crawls with `-site:` exclusions when every result is filtered.
+- **Stock-mode guarantees**: plannerAgent always includes a current-price query (prompt rule + deterministic backstop); `recoverStockQuote` uses 4 query phrasings at a lower credibility threshold with more sources.
+- **Invented-math purge**: when the quant engine cannot compute, a post-critique repair pass strips fabricated GBM/VaR/Sharpe/DCF claims from the shipped report (run 6's writer invented "trading at $150" + a 0.36 Sharpe despite the anti-hallucination note — prompts are not guarantees).
 - `mergeDuplicateClaims` and `recoverStockQuote` exported for testing.
 
 ## v1.6.0

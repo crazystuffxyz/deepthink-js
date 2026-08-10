@@ -523,7 +523,7 @@ const result = await runDeepResearch(
     academicFilter:       false,
     outputFormat:         'markdown', // markdown | plain | json | html
     humanize:             false,      // true = rewrite until the AI-detector says 0%
-    mode:                 'general',  // 'stock' = quant-finance answer spec (Ito/GBM, VaR, Sharpe)
+    mode:                 'general',  // 'stock' = real quant engine + quant-finance answer spec
     files:                [],         // local PDFs/docx/xlsx/pptx/csv/epub/rtf/odt/md → converted to markdown and injected as max-credibility evidence
   }
 );
@@ -537,10 +537,30 @@ console.log(result.success);     // boolean
 **Citation integrity is enforced structurally** — after writing and after every
 critique repair, `enforceCitations` re-checks that every `[Source N]` tag in the
 body resolves, every source is cited, and the References section lists every
-source; missing tags are restored, orphan tags removed. The humanize loop
+source; missing tags are restored, orphan tags removed. Every source gets a
+full citation set in 9 styles (APA, MLA, Chicago, Harvard, Vancouver, IEEE,
+Bluebook, ACS, AMA, Turabian) via `extractCitation`. The humanize loop
 (`humanize: true`) runs humanize → integrity check → fix → detector until the
 detector scores 0%, with a local regex backstop that every number, name, date,
 and `[Source N]` tag survives each rewrite.
+
+**Stock mode computes real math.** When `mode: 'stock'`, a pure-code quant
+engine (`quantEngine`) harvests inputs from the *verified* claims — price, EPS,
+beta, volatility, risk-free rate, equity risk premium — and derives growth the
+way an analyst would (forward P/E ÷ PEG when no explicit growth % is cited).
+It then computes, with zero LLM involvement:
+
+- CAPM cost of equity: Re = Rf + β × ERP
+- A genuine 10-year DCF with Gordon terminal value → intrinsic value per share
+- GBM expected return with Ito's lemma: expected log-return (μ − σ²/2), the
+  volatility drag σ²/2, and E[S_T] = S₀e^{μT}
+- Sharpe ratio and 1-day 95%/99% + 1-year 95% VaR (z·σ·P·√T)
+
+The report writer is told to use these exact numbers, and the full derivations
+are appended as a `## Quantitative Model (computed by pipeline)` section after
+the critique loop — so no critic or repair pass can rewrite code-computed math.
+The quant finance verifier cross-checks every number the writer states against
+the formulas (VaR = 1.645·σ/√252, Sharpe = (μ − Rf)/σ, etc.).
 
 **Pipeline steps:**
 
@@ -554,6 +574,7 @@ and `[Source N]` tag survives each rewrite.
 | 5 | Fact Verification Loop | Each extracted claim is verified against its source |
 | 6 | Report Writing | Synthesises verified claims into a structured markdown report |
 | 7–9 | Critique & Repair Loop | Domain expert, adversarial, source fidelity, and math/logic critic agents (+ quant finance verifier in stock mode) |
+| — | Quant Engine | `mode: 'stock'` — pure-code CAPM, 10-year DCF, GBM/Ito, Sharpe, VaR computed from verified claims; injected after critique |
 | — | Citation Integrity | `enforceCitations` restores dropped `[Source N]` tags after every repair pass |
 | — | Humanize Loop | `humanize: true` — rewrite → integrity check → fix → detect, until 0% AI-ness |
 | — | Format Conversion | `outputFormat` — mechanical markdown → plain/json/html (never touches citations) |

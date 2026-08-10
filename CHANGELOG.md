@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.3
+
+### Fixed
+- **Humanize loop never touches the References section** — run 10: a humanize rewrite dropped the entire References section (the integrity check only catches individual claims — `[Source N]` tags and numbers — and the references carry neither). `humanizeText` now splits the report at the References marker, humanizes the body only, and re-attaches the tail verbatim — the same protection the conformance sweep already had.
+
 ## v1.8.2
 
 ### Fixed

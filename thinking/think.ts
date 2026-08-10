@@ -114,6 +114,14 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
       fmt: 'TRAP:\n[the wrong answer a careless solver gives]\nWHY WRONG:\n[the fallacy]\nAVOID:\n[what the correct approach must not do]'
     },
     {
+      tag: 'compute',
+      body: 'If this problem involves probability, expected value, counting, or arithmetic: COMPUTE the answer explicitly. ' +
+        'Enumerate the sample space, set up the equations, and evaluate them with actual numbers. ' +
+        'Do NOT rely on symmetry, intuition, or qualitative reasoning — write out the real computation. ' +
+        'If the problem is not computational, state the exact formula or procedure that would produce the answer.',
+      fmt: 'COMPUTE:\n[explicit enumeration/equations with actual numbers]\nRESULT: [the computed value]'
+    },
+    {
       tag: 'structure',
       body: 'Define the structure of the final response in exactly 5 numbered steps.',
       fmt: '**Response Structure:**\n1. [step]\n2. [step]\n3. [step]\n4. [step]\n5. [step]'
@@ -163,6 +171,14 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
       tag: 'alternative',
       body: 'Propose an alternative method — a different algorithmic approach, different framing, or different structure.',
       fmt: 'ALTERNATIVE:\n[max 100 words]'
+    },
+    {
+      tag: 'compute',
+      body: 'If this problem involves probability, expected value, counting, or arithmetic: COMPUTE the answer explicitly. ' +
+        'Enumerate the sample space, set up the equations, and evaluate them with actual numbers. ' +
+        'Do NOT rely on symmetry, intuition, or qualitative reasoning — write out the real computation. ' +
+        'If the problem is not computational, state the exact formula or procedure that would produce the answer.',
+      fmt: 'COMPUTE:\n[explicit enumeration/equations with actual numbers]\nRESULT: [the computed value]'
     }
   ]
 };

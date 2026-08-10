@@ -1,0 +1,28 @@
+// public entry. re-exports from every subsystem.
+export { default as Deepthink, default } from './thinking/deepthink.js';
+export { TraceStore } from './thinking/trace.js';
+export { AdaptiveConcurrency, isRateLimitError, isTimeoutError } from './thinking/concurrency.js';
+export { default as runDeepResearch } from './thinking/researchAgent.js';
+export { humanizeText, AI_TELL_WORDS, extractClaims, claimsSurvived } from './thinking/humanize.js';
+export { loadImages, describeImages, looksVisionCapable } from './thinking/images.js';
+export { enforceCitations, checkCitationIntegrity, checkReferencesSection, extractSourceTags, restoreCitations } from './thinking/citationIntegrity.js';
+export { generateAndRunCode, generateAndRunProject, staticAnalysisAgent, fetchPackageDocumentation, extractPackageList, classifyTaskComplexity, pipelinePlan, compareResults } from './codeGenerator/index.js';
+export { extractArticleText } from './internet/extractFromUrl.js';
+export { generateCitation } from './internet/extractCitation.js';
+export { selfConsistency, vote, sampleOnce } from './thinking/consistency.js';
+export { runDebate } from './thinking/personaDebate.js';
+export { runPlanAndExecute } from './thinking/planAndExecute.js';
+export { attachReflexion, makeReflexionStore } from './thinking/reflexion.js';
+export { compress, truncateMiddle, totalTokens, approxTokens } from './thinking/smartCompression.js';
+export { toolLoop, parseToolCall, describeTools, DEFAULT_TOOLS } from './thinking/toolUse.js';
+export { runMoA } from './thinking/mixtureOfAgents.js';
+export { makeCalibrator } from './thinking/confidence.js';
+export { makeStore, makeEphemeralStore } from './thinking/memory.js';
+export { evolvePrompts, applyEvolvedPrompt, applyEvolvedPromptWithTrace, splitTrace, loadBest } from './thinking/evolvedThinking.js';
+export { PATTERNS, composePrompt, fingerprint, fableMetaPrompt, fableFingerprint } from './thinking/thinkingPatterns.js';
+export { BENCH, OOD_BENCH } from './thinking/benchmarkSet.js';
+export { runJSSandbox, runPythonSandbox, PYTHON_BIN, sandbox, tmpSuffix } from './codeGenerator/sandbox.js';
+export { FILE_BLOCK_PROMPT, parseFilesFromResponse, applyPatchBlocks, checkSyntaxAST, detectExternalImages, detectBrokenLinks, generateAutomationScript } from './codeGenerator/fileBlocks.js';
+export { mutate, OPERATORS } from './thinking/evolvedMutate.js';
+export { scoreOne, scoreAgainstBench, extractAllNumbers, extractProbability, multiNumberScore, numericScore } from './thinking/evolvedScoring.js';
+export { buildProviderClient, buildOllamaClient, buildOpenAICompatClient } from './providers/index.js';

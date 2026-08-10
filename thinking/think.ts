@@ -123,7 +123,9 @@ async function probe(
     {
       ...opts,
       ...PROBE_OPTS,
-      options: { ...(opts.options || {}), ...(PROBE_OPTS.options as Record<string, unknown>) }
+      // PROBE_OPTS sets the DEFAULT cap (300); a caller (the synthesis
+      // pass) may override with its own num_predict. merge caller-last.
+      options: { ...(PROBE_OPTS.options as Record<string, unknown>), ...(opts.options || {}) }
     }
   );
   // gemma's thinking mode routes the whole response into `thinking` and

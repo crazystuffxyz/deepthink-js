@@ -173,9 +173,11 @@ export async function runMCTSApproaches(callChat: any, task: string, inputText: 
   const distinctDomains = new Set(best.domains);
   const confidence = best.count >= THRESHOLD && distinctDomains.size >= 2 ? 'HIGH'
     : best.count >= 2 ? 'MEDIUM' : 'LOW';
+  // validated = independent approaches from >=2 domains agree at HIGH
+  // (>=3 votes). MEDIUM (2 votes) is a candidate, not ground truth.
   // eslint-disable-next-line no-console
   console.log(`[MCTS] Consensus: ${best.result} — ${best.count}/${ok.length} agree — confidence=${confidence}`);
-  return { result: best.result, count: best.count, total: ok.length, confidence, sandboxValidated: true };
+  return { result: best.result, count: best.count, total: ok.length, confidence, sandboxValidated: confidence === 'HIGH' };
 }
 
 export async function reconcileResults(jsResult: string, pyResult: string | null): Promise<string> {
@@ -190,7 +192,9 @@ export async function generateAndRunCode(callChat: any, task: string, inputText:
     try {
       const m = await runMCTSApproaches(callChat, task, inputText, opts);
       if (m && m.confidence !== 'LOW') {
-        return { result: m.result, jsResult: null, pyResult: m.result, sandboxValidated: true, mctsConsensus: m };
+        // MEDIUM consensus (2 votes) still beats the single-path fallback,
+        // but only HIGH is stamped validated.
+        return { result: m.result, jsResult: null, pyResult: m.result, sandboxValidated: m.confidence === 'HIGH', mctsConsensus: m };
       }
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -232,5 +236,13 @@ export async function generateAndRunCode(callChat: any, task: string, inputText:
     }
   }
   const result = pyResult !== null ? await reconcileResults(jsResult, pyResult) : jsResult;
-  return { result, jsResult, pyResult, sandboxValidated: true };
+  // only cross-validated results are ground truth: JS and Python must agree.
+  // a single implementation that merely ran without crashing is a candidate —
+  // stamping it "validated" forced wrong answers down the whole pipeline.
+  const validated = pyResult !== null && compareResults(jsResult, pyResult);
+  if (!validated && pyResult !== null) {
+    // eslint-disable-next-line no-console
+    console.warn(`[SANDBOX] JS "${jsResult}" vs PY "${pyResult}" disagree — treating as candidate, not ground truth`);
+  }
+  return { result, jsResult, pyResult, sandboxValidated: validated };
 }

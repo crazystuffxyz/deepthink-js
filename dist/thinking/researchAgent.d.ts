@@ -13,7 +13,7 @@ declare function applyMMR(summaries: any[], maxResults?: number, diversityLambda
 declare function factVerificationLoop(callChat: any, validSummaries: any[], topic: string, opts: any): Promise<any[]>;
 declare function buildAPACitation(ref: any): string;
 declare function buildCoverageGapsDisclaimer(plannedQueries: any[], verifiedNodes: any[]): string | null;
-declare function reportWriterAgent(callChat: any, topic: string, answerSpec: any, verifiedNodes: any[], opts: any, plannedQueries?: any[]): Promise<any>;
+declare function reportWriterAgent(callChat: any, topic: string, answerSpec: any, verifiedNodes: any[], opts: any, plannedQueries?: any[], quantModel?: any): Promise<any>;
 declare function detectResearchDomain(callChat: any, topic: string, opts?: any): Promise<any>;
 declare function sourceFidelityVerifier(callChat: any, report: string, verifiedNodes: any[], opts?: any): Promise<any>;
 declare function mathLogicVerifier(callChat: any, report: string, domain: any, opts?: any): Promise<any>;

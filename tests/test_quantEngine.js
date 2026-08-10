@@ -125,6 +125,72 @@ function check(name, cond, detail = '') {
   check('conformance leaves P/E multiple alone', rep.includes('27 times forward earnings'), rep);
 }
 
+// ---- run-12: "PEG Ratio (5yr expected): 0.55" — the parenthetical must
+// not capture the "5" in "(5yr" (growth was 4.6% instead of 41.6%) ----
+{
+  const m = runQuantModel([
+    'Nvidia is trading at $190.04.',
+    'Diluted EPS for fiscal year 2026 stood at $4.43.',
+    'The forward P/E (5yr) is 22.88.',
+    'PEG Ratio (5yr expected): 0.55',
+    'The beta is 1.87.',
+  ]);
+  check('PEG parenthetical skipped (0.55 not 5)', m.growth != null && Math.abs(m.growth - 0.416) < 0.01, `got ${m.growth}`);
+  check('forward P/E parenthetical skipped (22.88 not 5)', m.intrinsicValue != null, `got ${m.intrinsicValue}`);
+}
+
+// ---- run-12b: same PEG bug via the "5-year expected" phrasing ----
+{
+  const m = runQuantModel([
+    'Nvidia is trading at $190.04.',
+    'Diluted EPS for fiscal year 2026 stood at $4.43.',
+    'The 5-year expected PEG ratio is 0.55.',
+    'The forward P/E is 22.88.',
+    'The beta is 1.87.',
+  ]);
+  check('PEG 5-year phrasing still derived', m.growth != null && Math.abs(m.growth - 0.416) < 0.01, `got ${m.growth}`);
+}
+
+// ---- run-9/12: glitched quote page says $8.00 but market cap ÷ shares
+// says ~$200 — the implied price must win ----
+{
+  const m = runQuantModel([
+    'The current price of NVDA on 2026-08-10 is $8.00 (Closed).',
+    'NVDA is trading at $8.00 as of August 10, 2026.',
+    'Nvidia has a market capitalization of 4.86 trillion USD.',
+    'The company has 24.20 billion shares outstanding.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('implausible quote rejected via market cap ÷ shares', m.price != null && m.price > 150 && m.price < 250, `got ${m.price}`);
+}
+
+// ---- implied price fills the slot when no quote is harvested at all ----
+{
+  const m = runQuantModel([
+    'Nvidia has a market capitalization of 4.86 trillion USD.',
+    'The company has 24.20 billion shares outstanding.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('implied price used when quote missing', m.price != null && m.price > 150 && m.price < 250, `got ${m.price}`);
+}
+
+// ---- a sane quote within 2x of the implied price is kept ----
+{
+  const m = runQuantModel([
+    'Nvidia is trading at $217.55.',
+    'Nvidia has a market capitalization of 4.86 trillion USD.',
+    'The company has 24.20 billion shares outstanding.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('sane quote kept over implied price', m.price === 217.55, `got ${m.price}`);
+}
+
 // ---- clusterPick: a genuinely cheap stock still clusters at its own level ----
 {
   const m = runQuantModel([

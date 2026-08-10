@@ -188,7 +188,25 @@ export function runQuantModel(claims) {
     // stood at $1.30") — [^0-9]{0,N} died on quarter numbers and years. the
     // yearLike guard in harvest() keeps years out of the capture, and banned
     // words keep price TARGETS out of the price slot.
-    const price = clusterPick([
+    // implied price = market cap ÷ shares outstanding — a deterministic
+    // cross-check on the harvested quote. runs 9/12: the Yahoo quote page
+    // glitched to "$8.00" and every claim repeated it, so clusterPick had
+    // nothing sane to cluster against. but the same claims carry "market
+    // capitalization of 4.86 trillion" and "24.20 billion shares
+    // outstanding" → $200.83/share. when the harvested price is off by
+    // more than 2x from the implied one, the implied price wins; when no
+    // quote was harvested at all, the implied price fills the slot.
+    const capM = text.match(/(?:market cap(?:italization)?|market value)[^0-9]{0,30}?\$?([\d,]+\.?\d*)\s*(trillion|billion|million|t|b|m)\b/i);
+    const sharesM = text.match(/([\d,]+\.?\d*)\s*(billion|million|b|m)\s+shares\s+outstanding/i)
+        ?? text.match(/(?:shares outstanding|shares issued)[^0-9]{0,30}?([\d,]+\.?\d*)\s*(billion|million|b|m)\b/i);
+    let impliedPrice = null;
+    if (capM && sharesM) {
+        const cap = parseFloat(capM[1].replace(/,/g, '')) * { trillion: 1e12, billion: 1e9, million: 1e6, t: 1e12, b: 1e9, m: 1e6 }[capM[2].toLowerCase()];
+        const shares = parseFloat(sharesM[1].replace(/,/g, '')) * { billion: 1e9, million: 1e6, b: 1e9, m: 1e6 }[sharesM[2].toLowerCase()];
+        if (cap > 0 && shares > 0)
+            impliedPrice = cap / shares;
+    }
+    let price = clusterPick([
         ...harvestAll(text, [
             /(?:trading at|currently at|closed at|trades at|price is|price of|sits at|traded at|quoted at)\s*\$?([\d,]+\.?\d*)/i,
             /(?:trades|trading|closed|sits|quoted)\s+(?:\w+\s+){0,2}(?:around|near|about|for|at)\s*\$?([\d,]+\.?\d*)/i,
@@ -196,6 +214,15 @@ export function runQuantModel(claims) {
         ], undefined, PRICE_BANNED_WORDS, MULTIPLE_RE),
         ...scanPriceForwardAll(text),
     ]);
+    let priceSource = 'quoted price';
+    if (price != null && impliedPrice != null && (price < impliedPrice * 0.5 || price > impliedPrice * 2)) {
+        price = impliedPrice;
+        priceSource = `implied from market cap ÷ shares (quote $${price.toFixed(2)} rejected as implausible)`;
+    }
+    else if (price == null && impliedPrice != null) {
+        price = impliedPrice;
+        priceSource = 'implied from market cap ÷ shares';
+    }
     // EPS must be fractional (6.53) — a bare "2026" after "EPS" is a fiscal
     // year, not earnings per share. requiring the decimal kills that grab,
     // and yearLike() kills "EPS $2026.00" artifacts. quarterly EPS ("Q3
@@ -231,8 +258,10 @@ export function runQuantModel(claims) {
         // fallback: PEG = forward P/E / expected growth  →  g = PE / PEG.
         // both are typically cited for stocks, so we derive growth the same way
         // an analyst would instead of leaving the DCF uncomputable.
-        const peF = harvest(text, [/(?:forward\s+p\/e|forward pe|fwd p\/e)[^0-9]{0,40}([\d.]+)/i]);
-        const peg = harvest(text, [/(?:peg\s+ratio|expected\s+peg)[^0-9]{0,40}([\d.]+)/i]);
+        // the parenthetical skip keeps "PEG Ratio (5yr expected): 0.55" from
+        // capturing the "5" in "(5yr" (run 12: growth 4.6% instead of 41.6%).
+        const peF = harvest(text, [/(?:forward\s+p\/e|forward pe|fwd p\/e)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i]);
+        const peg = harvest(text, [/(?:peg\s+ratio|expected\s+peg)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i]);
         if (peF != null && peg != null && peg > 0) {
             growth = peF / peg / 100;
             growthSource = `derived from forward P/E ${peF} ÷ PEG ${peg}`;
@@ -250,7 +279,7 @@ export function runQuantModel(claims) {
     const erp = pct(text.match(/(?:equity risk premium|ERP|market risk premium)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? ERP_DEFAULT;
     const inputs = [];
     if (price != null)
-        inputs.push(`price $${price.toFixed(2)}`);
+        inputs.push(`price $${price.toFixed(2)} (${priceSource})`);
     else
         inputs.push('price: NOT FOUND');
     if (eps != null)

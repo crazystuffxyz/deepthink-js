@@ -955,7 +955,7 @@ function quantConformanceRepair(report: string, quantModel: any): string {
   // banned words disqualify a match: "price target of $180" is never the
   // current price, "volatility drag" is a different metric, and quarterly
   // EPS must never be rewritten to the annual figure.
-  const PRICE_BAN = ['target', 'forecast', 'guidance', 'projection', 'estimate', 'expect', 'range', 'high', 'low', 'week', 'year'];
+  const PRICE_BAN = ['target', 'forecast', 'guidance', 'projection', 'estimate', 'expect', 'range', 'high', 'low', 'week', 'year', 'times', 'multiple'];
   const EPS_BAN = ['q1', 'q2', 'q3', 'q4', 'quarter', 'quarterly'];
   const rules: { re: RegExp; banned?: string[]; fn: (m: string, num: string) => string | null }[] = [
     // current/market/share/stock price — the consensus quote, never a target.
@@ -966,12 +966,13 @@ function quantConformanceRepair(report: string, quantModel: any): string {
     // period; the year-guard keeps years.
     { re: /(?:current|market|share|stock|trading|last)\s+price[^$\n]{0,40}?\$?([\d,]+(?:\.\d+)?)[^$\n]{0,15}/gi, banned: PRICE_BAN, fn: (m, n) => {
         const i = m.indexOf(n);
-        return (i > -1 && m[i + n.length] === '%') || /^(19|20)\d{2}$/.test(n) ? null : (R(q.price) && n !== R(q.price) ? R(q.price)! : null);
+        return (i > -1 && (m[i + n.length] === '%' || m[i + n.length] === 'x')) || /^(19|20)\d{2}$/.test(n) ? null : (R(q.price) && n !== R(q.price) ? R(q.price)! : null);
       } },
-    // price actions ("closed at $217.55", "trades at $150.42")
+    // price actions ("closed at $217.55", "trades at $150.42") — "trades at
+    // 27 times forward earnings" is a P/E multiple, never a price (run 11)
     { re: /(?:trades? at|trading at|closed at|currently trading at|currently sits at|quoted at|price (?:is|of))[^$\n]{0,30}?\$?([\d,]+(?:\.\d+)?)[^$\n]{0,15}/gi, banned: PRICE_BAN, fn: (m, n) => {
         const i = m.indexOf(n);
-        return (i > -1 && m[i + n.length] === '%') || /^(19|20)\d{2}$/.test(n) ? null : (R(q.price) && n !== R(q.price) ? R(q.price)! : null);
+        return (i > -1 && (m[i + n.length] === '%' || m[i + n.length] === 'x')) || /^(19|20)\d{2}$/.test(n) ? null : (R(q.price) && n !== R(q.price) ? R(q.price)! : null);
       } },
     // EPS — trailing context so "EPS of $1.30 for Q3" is caught by the ban;
     // %-guard stops "EPS growth of 5%" from grabbing the growth number

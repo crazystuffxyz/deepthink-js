@@ -12,7 +12,7 @@
 
 import type { Message } from './types.js';
 
-type CallChat = (messages: Message[], stream: boolean, onChunk: null, opts: Record<string, unknown>) => Promise<{ content: string }>;
+type CallChat = (messages: Message[], stream: boolean, onChunk: null, opts: Record<string, unknown>) => Promise<{ content: string; thinking?: string }>;
 
 // probes are fire-and-forget internal reasoning: hard output cap keeps
 // gemma from writing an essay per probe (it ignores "be concise").
@@ -126,7 +126,10 @@ async function probe(
       options: { ...(opts.options || {}), ...(PROBE_OPTS.options as Record<string, unknown>) }
     }
   );
-  return (r.content || '').trim();
+  // gemma's thinking mode routes the whole response into `thinking` and
+  // leaves `content` empty when the task says "internal reasoning only" —
+  // the probe's deliverable IS that internal stream, so fall back to it.
+  return ((r.content || '').trim() || (r.thinking || '').trim());
 }
 
 export async function runThink(

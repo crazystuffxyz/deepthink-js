@@ -14,8 +14,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import Deepthink from '../thinking/deepthink.js';
-import runDeepResearch from '../thinking/researchAgent.js';
+import Deepthink from '../dist/thinking/deepthink.js';
+import runDeepResearch from '../dist/thinking/researchAgent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');

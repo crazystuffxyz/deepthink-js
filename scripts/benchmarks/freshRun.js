@@ -51,7 +51,9 @@ const selected = LIMIT > 0 ? problems.slice(0, LIMIT) : problems;
 // "Star is to **Galaxy**", "The next number is **Nine**". so parseAnswer
 // returns a LIST of candidate answers (marker value, last number, short bolded
 // segments, bracketed value) and answersMatch tries each against the gold.
-const HEADER_RE = /^(by|recap|reasoning|explanation|analysis|conclusion|solution|answer|step|note|source|known|goal|constraint|reconstructed|diff|sanity|alternative|strategy|working|backward|structure|consolidated|response|approach|method|verification|check|final|wait|hmm|actually|first|second|third|addition|square|interleaved|remaining|give|eat)/i;
+// header words must match EXACTLY (whole segment) — a prefix test would
+// filter out real answers like "Eating" (starts with "eat") or "First"
+const HEADER_RE = /^(by|recap|reasoning|explanation|analysis|conclusion|solution|answer|step|note|source|known|goal|constraint|reconstructed|diff|sanity|alternative|strategy|working|backward|structure|consolidated|response|approach|method|verification|check|final|wait|hmm|actually|first|second|third|addition|square|interleaved|remaining|give|eat)$/i;
 function parseAnswer(text) {
   const t = String(text || '').trim();
   const out = [];
@@ -66,7 +68,16 @@ function parseAnswer(text) {
   const cands = bolds.map((b) => b.replace(/\*\*/g, '').trim())
     .filter((c) => c && c.length <= 25 && !HEADER_RE.test(c) && !/:$/.test(c));
   for (const c of cands.reverse()) out.push(c);
-  // 4. last bracketed value
+  // 4. label-value pairs: "**The missing word:** Key." — the value after a
+  // bolded label is often the real answer ("Key."), and "**Final Analogy:**
+  // Pencil : Eraser :: Lock : Key." contains it too
+  const labelRe = /\*\*([^*]+?):\*\*\s*([^\n]+)/g;
+  let lm;
+  while ((lm = labelRe.exec(t)) !== null) {
+    const val = lm[2].trim().replace(/[.。]$/, '');
+    if (val && val.length <= 60) out.push(val);
+  }
+  // 5. last bracketed value
   const b = t.match(/\[([^\]]+)\]\s*$/);
   if (b) out.push(b[1].trim());
   return out;
@@ -101,8 +112,8 @@ function answersMatch(got, gold) {
         if (g.includes('.')) { if (Math.abs(gn - an) < 0.01) return true; }
         else if (gn === an) return true;
       }
-      // semantic zero: "None." / "no change" for a 0 gold
-      if (g === '0' && /^(none|zero|no change|nothing|same)$/i.test(a)) return true;
+      // semantic zero: "None." / "no change" for a 0 gold (trailing period ok)
+      if (g === '0' && /^(none|zero|no change|nothing|same)\.?$/i.test(a)) return true;
       continue;
     }
     // fraction gold: n/d vs decimal, percent, or \frac{n}{d}

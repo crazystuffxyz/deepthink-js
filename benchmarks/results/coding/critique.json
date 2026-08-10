@@ -9,29 +9,29 @@
   ],
   "scores": {
     "plain": {
-      "seconds": 38.5,
-      "raw": "{\"correctness\":8,\"completeness\":9,\"code_quality\":8,\"ux\":7,\"perf\":8,\"total\":40,\"notes\":\"Core gravity simulation and drag-to-create work correctly. Minor bugs: trail alpha gradient not applied (globalAlpha only affects final stroke), and vector line width/rotation not reset on new mousedown. No mass control or collision handling.\"}",
+      "seconds": 19.2,
+      "raw": "{\"correctness\":8,\"completeness\":8,\"code_quality\":5,\"ux\":8,\"perf\":8,\"total\":37,\"notes\":\"Physics and UI work well, but dead code (Planet.updatePosition) and a trail alpha bug reduce code quality; trails don't fade as intended.\"}",
       "parsed": {
         "correctness": 8,
+        "completeness": 8,
+        "code_quality": 5,
+        "ux": 8,
+        "perf": 8,
+        "total": 37,
+        "notes": "Physics and UI work well, but dead code (Planet.updatePosition) and a trail alpha bug reduce code quality; trails don't fade as intended."
+      }
+    },
+    "dt": {
+      "seconds": 13.3,
+      "raw": "{\"correctness\":9,\"completeness\":9,\"code_quality\":8,\"ux\":7,\"perf\":8,\"total\":41,\"notes\":\"Physics is correct with semi-implicit Euler and softening. Trail alpha is set per segment but stroked once, so the intended fade effect doesn't work (uniform alpha instead). Minor lack of instructions and no mass control, but core sandbox features are complete.\"}",
+      "parsed": {
+        "correctness": 9,
         "completeness": 9,
         "code_quality": 8,
         "ux": 7,
         "perf": 8,
-        "total": 40,
-        "notes": "Core gravity simulation and drag-to-create work correctly. Minor bugs: trail alpha gradient not applied (globalAlpha only affects final stroke), and vector line width/rotation not reset on new mousedown. No mass control or collision handling."
-      }
-    },
-    "dt": {
-      "seconds": 14.9,
-      "raw": "{\"correctness\":8,\"completeness\":9,\"code_quality\":9,\"ux\":7,\"perf\":8,\"total\":41,\"notes\":\"Trail alpha fading is broken (globalAlpha applied after stroke), and no usage instructions; otherwise solid implementation.\"}",
-      "parsed": {
-        "correctness": 8,
-        "completeness": 9,
-        "code_quality": 9,
-        "ux": 7,
-        "perf": 8,
         "total": 41,
-        "notes": "Trail alpha fading is broken (globalAlpha applied after stroke), and no usage instructions; otherwise solid implementation."
+        "notes": "Physics is correct with semi-implicit Euler and softening. Trail alpha is set per segment but stroked once, so the intended fade effect doesn't work (uniform alpha instead). Minor lack of instructions and no mass control, but core sandbox features are complete."
       }
     }
   }

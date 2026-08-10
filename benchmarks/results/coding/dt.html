@@ -18,81 +18,75 @@
         canvas {
             display: block;
         }
-        #ui-overlay {
+        #ui-panel {
             position: absolute;
             top: 20px;
             left: 20px;
-            background: rgba(20, 20, 20, 0.85);
-            color: #eee;
-            padding: 18px;
-            border-radius: 12px;
-            border: 1px solid #444;
+            background: rgba(30, 30, 30, 0.8);
+            color: #fff;
+            padding: 15px;
+            border-radius: 8px;
             user-select: none;
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             pointer-events: auto;
-            backdrop-filter: blur(8px);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-            min-width: 200px;
+            z-index: 10;
         }
         .control-group {
             margin-bottom: 15px;
         }
-        label {
+        .control-group label {
             display: block;
-            font-size: 11px;
-            margin-bottom: 8px;
-            color: #aaa;
+            font-size: 12px;
+            margin-bottom: 5px;
             text-transform: uppercase;
             letter-spacing: 1px;
-            font-weight: bold;
+            color: #aaa;
         }
-        input[type="range"] {
-            width: 100%;
+        input[type=range] {
+            width: 150px;
             cursor: pointer;
-            accent-color: #4a9eff;
         }
         button {
-            background: #333;
-            color: #fff;
-            border: 1px solid #555;
-            padding: 8px 12px;
+            background: #444;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
             cursor: pointer;
-            border-radius: 6px;
-            font-size: 13px;
-            width: 100%;
-            transition: all 0.2s ease;
+            font-size: 12px;
+            transition: background 0.2s;
         }
         button:hover {
-            background: #444;
-            border-color: #777;
-        }
-        button:active {
-            background: #222;
+            background: #666;
         }
         #stats {
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 13px;
-            margin-top: 12px;
-            color: #00ffcc;
-            line-height: 1.6;
-            border-top: 1px solid #333;
-            padding-top: 12px;
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            color: #0f0;
+            font-family: monospace;
+            font-size: 14px;
+            text-align: right;
+            pointer-events: none;
+            text-shadow: 1px 1px 2px #000;
+            z-index: 10;
         }
     </style>
 </head>
 <body>
 
-    <div id="ui-overlay">
+    <div id="ui-panel">
         <div class="control-group">
             <label for="g-slider">Gravitational Constant (G)</label>
             <input type="range" id="g-slider" min="0" max="5" step="0.1" value="1">
         </div>
-        <div class="control-group">
-            <button id="reset-btn">Reset Simulation</button>
-        </div>
-        <div id="stats">
-            G: 1.0<br>
-            Planets: 0
-        </div>
+        <button id="reset-btn">Reset Simulation</button>
+    </div>
+
+    <div id="stats">
+        G: <span id="stat-g">1.0</span><br>
+        Planets: <span id="stat-count">0</span>
     </div>
 
     <canvas id="simCanvas"></canvas>
@@ -102,177 +96,175 @@
         const ctx = canvas.getContext('2d');
         const gSlider = document.getElementById('g-slider');
         const resetBtn = document.getElementById('reset-btn');
-        const statsDiv = document.getElementById('stats');
-
-        // Simulation State
-        let G = 1.0;
-        const EPSILON = 5; 
-        const DT = 1 / 60;
-        const SUBSTEPS = 4;
-        const TRAIL_LENGTH = 200;
-        const VELOCITY_SCALE = 0.2; 
+        const statG = document.getElementById('stat-g');
+        const statCount = document.getElementById('stat-count');
 
         let planets = [];
+        let G = 1.0;
+        const EPSILON_SQ = 25; // softening epsilon = 5
+        const DT = 1 / 60;
+        const TRAIL_LENGTH = 200;
+        const VELOCITY_SCALE = 1.0; // 1px drag = 1 unit/s velocity
+
         let isDragging = false;
-        let dragStart = { x: 0, y: 0 };
-        let dragCurrent = { x: 0, y: 0 };
+        let startX = 0;
+        let startY = 0;
+        let currentX = 0;
+        let currentY = 0;
+        let accumulator = 0;
+
+        class Planet {
+            constructor(x, y, vx, vy, mass = 1) {
+                this.x = x;
+                this.y = y;
+                this.vx = vx;
+                this.vy = vy;
+                this.mass = mass;
+                this.trail = [];
+                this.color = `hsl(${Math.random() * 360}, 70%, 60%)`;
+            }
+
+            updatePosition() {
+                this.trail.push({x: this.x, y: this.y});
+                if (this.trail.length > TRAIL_LENGTH) {
+                    this.trail.shift();
+                }
+                this.x += this.vx * DT;
+                this.y += this.vy * DT;
+            }
+
+            draw() {
+                if (this.trail.length > 1) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = this.color;
+                    ctx.lineWidth = 1;
+                    for (let i = 0; i < this.trail.length; i++) {
+                        const pos = this.trail[i];
+                        ctx.globalAlpha = (i / this.trail.length) * 0.5;
+                        if (i === 0) ctx.moveTo(pos.x, pos.y);
+                        else ctx.lineTo(pos.x, pos.y);
+                    }
+                    ctx.stroke();
+                }
+                ctx.globalAlpha = 1.0;
+                ctx.beginPath();
+                ctx.fillStyle = this.color;
+                ctx.arc(this.x, this.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
 
         function resize() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
         }
-
         window.addEventListener('resize', resize);
         resize();
 
-        // Interaction
         canvas.addEventListener('mousedown', (e) => {
             isDragging = true;
-            dragStart.x = e.clientX;
-            dragStart.y = e.clientY;
-            dragCurrent.x = e.clientX;
-            dragCurrent.y = e.clientY;
+            startX = e.clientX;
+            startY = e.clientY;
+            currentX = e.clientX;
+            currentY = e.clientY;
         });
 
         window.addEventListener('mousemove', (e) => {
             if (isDragging) {
-                dragCurrent.x = e.clientX;
-                dragCurrent.y = e.clientY;
+                currentX = e.clientX;
+                currentY = e.clientY;
             }
         });
 
         window.addEventListener('mouseup', (e) => {
-            if (!isDragging) return;
-            isDragging = false;
-
-            // Velocity proportional to (currentCursor - clickStart)
-            const vx = (e.clientX - dragStart.x) * VELOCITY_SCALE;
-            const vy = (e.clientY - dragStart.y) * VELOCITY_SCALE;
-
-            planets.push({
-                x: dragStart.x,
-                y: dragStart.y,
-                vx: vx,
-                vy: vy,
-                mass: 1,
-                trail: [],
-                color: `hsl(${Math.random() * 360}, 70%, 60%)`
-            });
+            if (isDragging) {
+                const vx = (e.clientX - startX) * VELOCITY_SCALE;
+                const vy = (e.clientY - startY) * VELOCITY_SCALE;
+                planets.push(new Planet(startX, startY, vx, vy));
+                isDragging = false;
+            }
         });
 
         resetBtn.addEventListener('click', () => {
             planets = [];
         });
 
-        gSlider.addEventListener('input', (e) => {
-            G = parseFloat(e.target.value);
+        gSlider.addEventListener('input', () => {
+            G = parseFloat(gSlider.value);
         });
 
-        function updatePhysics() {
-            const subDt = DT / SUBSTEPS;
+        function physicsStep() {
+            const accels = planets.map(() => ({ax: 0, ay: 0}));
 
-            for (let s = 0; s < SUBSTEPS; s++) {
-                const accels = planets.map(() => ({ ax: 0, ay: 0 }));
+            for (let i = 0; i < planets.length; i++) {
+                const p1 = planets[i];
+                for (let j = i + 1; j < planets.length; j++) {
+                    const p2 = planets[j];
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    const distSq = dx * dx + dy * dy;
+                    const dist = Math.sqrt(distSq + EPSILON_SQ);
+                    const force = (G * p1.mass * p2.mass) / (distSq + EPSILON_SQ);
+                    
+                    const fx = force * (dx / dist);
+                    const fy = force * (dy / dist);
 
-                for (let i = 0; i < planets.length; i++) {
-                    for (let j = i + 1; j < planets.length; j++) {
-                        const p1 = planets[i];
-                        const p2 = planets[j];
-
-                        const dx = p2.x - p1.x;
-                        const dy = p2.y - p1.y;
-                        const distSq = dx * dx + dy * dy;
-                        
-                        // Softening parameter epsilon=5 to avoid singularities
-                        // Force = G * m1 * m2 / (r^2 + eps^2)
-                        // Accel = Force / mass
-                        const softenedDist = Math.pow(distSq + EPSILON * EPSILON, 1.5);
-                        const common = G / softenedDist;
-                        
-                        const ax = common * dx;
-                        const ay = common * dy;
-
-                        accels[i].ax += ax * p2.mass;
-                        accels[i].ay += ay * p2.mass;
-                        accels[j].ax -= ax * p1.mass;
-                        accels[j].ay -= ay * p1.mass;
-                    }
-                }
-
-                for (let i = 0; i < planets.length; i++) {
-                    const p = planets[i];
-                    const a = accels[i];
-
-                    p.vx += a.ax * subDt;
-                    p.vy += a.ay * subDt;
-                    p.x += p.vx * subDt;
-                    p.y += p.vy * subDt;
+                    accels[i].ax += fx / p1.mass;
+                    accels[i].ay += fy / p1.mass;
+                    accels[j].ax -= fx / p2.mass;
+                    accels[j].ay -= fy / p2.mass;
                 }
             }
 
-            for (let p of planets) {
-                p.trail.push({ x: p.x, y: p.y });
-                if (p.trail.length > TRAIL_LENGTH) {
-                    p.trail.shift();
-                }
+            for (let i = 0; i < planets.length; i++) {
+                const p = planets[i];
+                p.vx += accels[i].ax * DT;
+                p.vy += accels[i].ay * DT;
+                p.updatePosition();
             }
         }
 
-        function draw() {
-            ctx.fillStyle = '#000';
+        let lastTime = performance.now();
+        function loop(currentTime) {
+            const deltaTime = (currentTime - lastTime) / 1000;
+            lastTime = currentTime;
+
+            accumulator += deltaTime;
+            let steps = 0;
+            while (accumulator >= DT && steps < 4) {
+                physicsStep();
+                accumulator -= DT;
+                steps++;
+            }
+
+            ctx.fillStyle = 'black';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-            // Draw Trails
-            ctx.lineWidth = 2;
             for (let p of planets) {
-                if (p.trail.length < 2) continue;
-                ctx.beginPath();
-                ctx.strokeStyle = p.color;
-                for (let i = 0; i < p.trail.length; i++) {
-                    const pos = p.trail[i];
-                    ctx.globalAlpha = (i / p.trail.length) * 0.5;
-                    if (i === 0) ctx.moveTo(pos.x, pos.y);
-                    else ctx.lineTo(pos.x, pos.y);
-                }
-                ctx.stroke();
-            }
-            ctx.globalAlpha = 1.0;
-
-            // Draw Planets
-            for (let p of planets) {
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-                ctx.fillStyle = p.color;
-                ctx.fill();
-                ctx.closePath();
+                p.draw();
             }
 
-            // Draw Launch Vector
             if (isDragging) {
                 ctx.beginPath();
-                ctx.moveTo(dragStart.x, dragStart.y);
-                ctx.lineTo(dragCurrent.x, dragCurrent.y);
-                ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                ctx.strokeStyle = 'white';
                 ctx.setLineDash([5, 5]);
+                ctx.moveTo(startX, startY);
+                ctx.lineTo(currentX, currentY);
                 ctx.stroke();
                 ctx.setLineDash([]);
-                
                 ctx.beginPath();
-                ctx.arc(dragStart.x, dragStart.y, 4, 0, Math.PI * 2);
-                ctx.fillStyle = '#fff';
+                ctx.fillStyle = 'white';
+                ctx.arc(startX, startY, 2, 0, Math.PI * 2);
                 ctx.fill();
             }
 
-            statsDiv.innerHTML = `G: ${G.toFixed(1)}<br>Planets: ${planets.length}`;
-        }
+            statG.innerText = G.toFixed(1);
+            statCount.innerText = planets.length;
 
-        function loop() {
-            updatePhysics();
-            draw();
             requestAnimationFrame(loop);
         }
 
-        loop();
+        requestAnimationFrame(loop);
     </script>
 </body>
 </html>

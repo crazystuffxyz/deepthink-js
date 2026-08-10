@@ -520,14 +520,25 @@ const result = await runDeepResearch(
     maxSummaries:         20,
     useOllamaSearch:      true,
     academicFilter:       false,
+    outputFormat:         'markdown', // markdown | plain | json | html
+    humanize:             false,      // true = rewrite until the AI-detector says 0%
+    mode:                 'general',  // 'stock' = quant-finance answer spec (Ito/GBM, VaR, Sharpe)
   }
 );
 
-console.log(result.report);      // Full markdown research report
+console.log(result.report);      // Full research report (formatted per outputFormat)
 console.log(result.references);  // Array of APA-formatted citations
 console.log(result.claimCount);  // Number of verified facts
 console.log(result.success);     // boolean
 ```
+
+**Citation integrity is enforced structurally** — after writing and after every
+critique repair, `enforceCitations` re-checks that every `[Source N]` tag in the
+body resolves, every source is cited, and the References section lists every
+source; missing tags are restored, orphan tags removed. The humanize loop
+(`humanize: true`) runs humanize → integrity check → fix → detector until the
+detector scores 0%, with a local regex backstop that every number, name, date,
+and `[Source N]` tag survives each rewrite.
 
 **Pipeline steps:**
 
@@ -540,7 +551,10 @@ console.log(result.success);     // boolean
 | 4 | MMR Diversity Filter | Maximal Marginal Relevance selects a diverse, high-credibility subset |
 | 5 | Fact Verification Loop | Each extracted claim is verified against its source |
 | 6 | Report Writing | Synthesises verified claims into a structured markdown report |
-| 7–9 | Critique & Repair Loop | Domain expert, adversarial, source fidelity, and math/logic critic agents |
+| 7–9 | Critique & Repair Loop | Domain expert, adversarial, source fidelity, and math/logic critic agents (+ quant finance verifier in stock mode) |
+| — | Citation Integrity | `enforceCitations` restores dropped `[Source N]` tags after every repair pass |
+| — | Humanize Loop | `humanize: true` — rewrite → integrity check → fix → detect, until 0% AI-ness |
+| — | Format Conversion | `outputFormat` — mechanical markdown → plain/json/html (never touches citations) |
 
 ---
 
@@ -640,13 +654,22 @@ tests in the sandbox (MBPP). The verifier model is
 sees the gold answer.
 
 ```bash
-node scripts/benchmarks/all.js                 # full run (AIME, USAMO, IMO, bee, MBPP, coding)
-node scripts/benchmarks/checkModes.js          # self-correction experiment (full/blind/zero)
-node scripts/benchmarks/compare.js             # old-vs-new pipeline table
+node scripts/benchmarks/run.js --bench aime2024   # official AIME 2024 (30 problems, plain vs dt)
+node scripts/benchmarks/freshRun.js --set freshMulti  # untrained multi-step set (choice format)
+node scripts/benchmarks/verifyMulti.js           # independent gold verification for freshMulti
+node scripts/iqTrain.js --pop 8 --gens 6         # IQ training loop (80% train / 20% OOD holdout)
 ```
 
 Raw per-row output (CSV, resume-safe) is in
-[`benchmarks/results/all.csv`](benchmarks/results/all.csv).
+[`benchmarks/results/`](benchmarks/results/).
+
+**Fresh untrained sets** (`benchmarks/data/`): `freshSet` (35 IQ-style),
+`freshHard` / `freshHard2` (novel computation), `freshMulti` (20 novel
+multi-step problems with compounding-error traps — the set that separates
+single-shot from pipeline reasoning). Every gold in `freshMulti` is verified
+by `verifyMulti.js` from first principles — no gold is taken on the author's
+word. `iqTrain.jsonl` (25 items) is the 80% training bank; `freshSet` is the
+20% held-out OOD probe for the evolution loop.
 
 | Benchmark | n | Plain | Deepthink (d=2, c=2) | Δ | self-corrected |
 |---|---:|---:|---:|---:|---:|

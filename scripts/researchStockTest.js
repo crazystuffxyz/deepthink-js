@@ -41,6 +41,7 @@ const MD = path.join(OUT, `stock-${TICKER}-${runN}.md`);
 const META = path.join(OUT, `stock-${TICKER}-${runN}.meta.json`);
 
 const dt = new Deepthink(MODEL, [], { provider: 'ollama' });
+dt.on('log', (e) => console.log(`[pipeline] ${e.msg}`));
 const callChat = dt.callChat.bind(dt);
 
 const topic = `Should I invest in ${TICKER} right now (as of 2026-08-10)? Give a rigorous buy/hold/sell recommendation backed by deep mathematics and quantitative research — Ito's lemma / geometric Brownian motion expected return, volatility, Sharpe ratio, and value at risk — paired with actual research on the company's latest financials, its industry status quo, competitive position, moat, catalysts, and risks. Use the most recent data available and cite every source.`;

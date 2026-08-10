@@ -942,6 +942,12 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
 // report) and once more after it (repair may re-introduce divergence).
 function quantConformanceRepair(report: string, quantModel: any): string {
   if (!quantModel || !quantModel.ok) return report;
+  // the References section is METADATA (titles, years, URLs) — never sweep
+  // it. run 8: the beta rule matched "beta" inside a URL and rewrote "[5]"
+  // into "[2.21]". split there and only touch the body.
+  const refIdx = report.search(/\n---\n## References|\n## References/i);
+  let head = refIdx > -1 ? report.slice(0, refIdx) : report;
+  const tail = refIdx > -1 ? report.slice(refIdx) : '';
   const q = quantModel;
   const R = (v: number | null, d = 2): string | null => v != null ? v.toFixed(d) : null;
   // Rpc — the engine stores rates as decimals (0.1449 = 14.49%), prose uses %
@@ -991,13 +997,14 @@ function quantConformanceRepair(report: string, quantModel: any): string {
       } },
   ];
   for (const rule of rules) {
-    report = report.replace(rule.re, (m: string, num: string) => {
+    // run against head only — the references tail never passes a rule
+    head = head.replace(rule.re, (m: string, num: string) => {
       if (rule.banned?.some((w) => m.toLowerCase().includes(w))) return m;
       const rep = rule.fn(m.toLowerCase(), num.replace(/,/g, ''));
       return rep != null ? m.replace(num, rep) : m;
     });
   }
-  return report;
+  return head + tail;
 }
 
 // ---- output format conversion ----

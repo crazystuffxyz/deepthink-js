@@ -39,6 +39,7 @@ const MD = path.join(OUT, `test-${runN}.${EXT}`);
 const META = path.join(OUT, `test-${runN}.meta.json`);
 
 const dt = new Deepthink(MODEL, [], { provider: 'ollama' });
+dt.on('log', (e) => console.log(`[pipeline] ${e.msg}`));
 const callChat = dt.callChat.bind(dt);
 
 async function main() {

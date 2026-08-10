@@ -100,5 +100,17 @@ function check(name, cond, detail = '') {
   check('per-URL metadata kept', merged[0].srcMeta && merged[0].srcMeta.length === 2 && merged[0].srcMeta[1].title === 'Nvidia Stock Beta - B.org', JSON.stringify(merged[0].srcMeta));
 }
 
+// ---- the References section is metadata — NEVER swept (run 8: beta rule
+// matched "beta" in a URL and rewrote "[5]" into "[2.21]") ----
+{
+  const q = { ok: true, price: 217.55, eps: 6.53, beta: 2.21, sigma: 0.367, costOfEquity: 0.16355, intrinsicValue: 55.36, expectedPrice: 256.21, expectedLogReturn: 0.096, expectedReturn: 0.16355, sharpe: 0.33, var95_1d: 8.28, var99_1d: 11.70, var95_1y: 131.37 };
+  const report = 'The stock carries a beta of 1.9 and trades at $210.\n\n---\n## References\n\n[4] (2026). *NVDA Stock Beta History & Chart Since 1999*. Wall Street Numbers. https://wallstreetnumbers.com/stocks/nvda/beta\n[5] (2026). *NVDA Stock Volatility History & Chart Since 1999*. Wall Street Numbers. https://wallstreetnumbers.com/stocks/nvda/volatility';
+  const rep = quantConformanceRepair(report, q);
+  check('body swept', rep.includes('beta of 2.21') && rep.includes('$217.55'), rep);
+  check('ref [4] title untouched', rep.includes('Since 1999*. Wall Street Numbers. https://wallstreetnumbers.com/stocks/nvda/beta'), rep);
+  check('ref [5] id untouched', rep.includes('[5] (2026). *NVDA Stock Volatility'), rep);
+  check('ref id not corrupted', !rep.includes('[2.21]'), rep);
+}
+
 console.log(`\nquantEngine: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

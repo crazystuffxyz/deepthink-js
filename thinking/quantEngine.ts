@@ -45,20 +45,60 @@ const HORIZON_YRS = 10;
 
 // pull one number out of the claims text with a fuzzy regex. returns null
 // if the anchor phrase is missing entirely — we do NOT guess.
-function harvest(text: string, anchors: RegExp[], fallbackPattern?: RegExp): number | null {
-  for (const a of anchors) {
-    const m = text.match(a);
-    if (m) {
-      const v = parseFloat((m[1] || '').replace(/[,$]/g, ''));
-      if (!isNaN(v)) return v;
+// banned: window words that mean the number is NOT what we want ("price
+// target of $180" must never harvest as the current price).
+// yearLike: "2026.00" after EPS is a fiscal year, not $2,026 — 4-digit
+// integer parts in the 1900-2099 band are always years, never prices/EPS.
+function yearLike(v: number): boolean {
+  return v >= 1900 && v <= 2099 && Number.isInteger(v);
+}
+// scanPriceForward — last resort for wordy price phrasings ("share price
+// for fiscal 2026 was $150.42"): walk each anchor hit and scan forward,
+// skipping year-like numbers ("2026") and %-moves ("up 5% to $150") until
+// a real price appears.
+const PRICE_ANCHORS = ['current price', 'market price', 'last price', 'share price', 'stock price', 'price per share'];
+function scanPriceForward(text: string): number | null {
+  for (const anchor of PRICE_ANCHORS) {
+    const g = new RegExp(anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    while (true) {
+      const hit = g.exec(text);
+      if (!hit) break;
+      const slice = text.slice(hit.index + hit[0].length, hit.index + hit[0].length + 60);
+      // a banned word between the anchor and the first number means this
+      // hit is about a target/forecast, not the current price — reject it
+      const before = slice.split(/\d/)[0].toLowerCase();
+      if (['target', 'forecast', 'guidance', 'projection', 'estimate'].some((w) => before.includes(w))) continue;
+      for (const nm of slice.matchAll(/\$?([\d,]+\.?\d*)\s*%?/g)) {
+        const v = parseFloat(nm[1].replace(/[,$]/g, ''));
+        if (!isNaN(v) && !yearLike(v) && !nm[0].includes('%')) return v;
+      }
     }
   }
-  if (fallbackPattern) {
-    const m = text.match(fallbackPattern);
-    if (m) {
-      const v = parseFloat((m[1] || '').replace(/[,$]/g, ''));
-      if (!isNaN(v)) return v;
+  return null;
+}
+
+// tryMatch walks every match of the anchor: a year-like capture ("share
+// price for fiscal 2026 was $150.42" → 2026) must not kill the anchor —
+// continue to the next match and find the real number.
+function harvest(text: string, anchors: RegExp[], fallbackPattern?: RegExp, banned: string[] = []): number | null {
+  const tryMatch = (a: RegExp): number | null => {
+    const g = new RegExp(a.source, a.flags.replace('g', '') + 'g');
+    while (true) {
+      const mm = g.exec(text);
+      if (!mm) break;
+      if (banned.some((w) => mm[0].toLowerCase().includes(w))) continue;
+      const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
+      if (!isNaN(v) && !yearLike(v)) return v;
     }
+    return null;
+  };
+  for (const a of anchors) {
+    const v = tryMatch(a);
+    if (v != null) return v;
+  }
+  if (fallbackPattern) {
+    const v = tryMatch(fallbackPattern);
+    if (v != null) return v;
   }
   return null;
 }
@@ -73,21 +113,43 @@ export function runQuantModel(claims: string[]): QuantModel {
   const text = claims.join('\n');
 
   // ---- harvest inputs from the verified claims ----
-  const price = harvest(text, [
-    /(?:trading at|currently at|closed at|trades at|price is|price of)\s*\$?([\d,]+\.?\d*)/i,
-    /(?:current price|market price|last price)\s*[=:]\s*\$?([\d,]+\.?\d*)/i,
-    /(?:share price|stock price|price per share)[^0-9]{0,20}\$?([\d,]+\.?\d*)/i,
+  // windows cross digits ("closed Wednesday at $150.42", "EPS for Q3 FY2026
+  // stood at $1.30") — [^0-9]{0,N} died on quarter numbers and years. the
+  // yearLike guard in harvest() keeps years out of the capture, and banned
+  // words keep price TARGETS out of the price slot.
+  let price = harvest(text, [
+    /(?:trading at|currently at|closed at|trades at|price is|price of|sits at|traded at|quoted at)\s*\$?([\d,]+\.?\d*)/i,
+    /(?:trades|trading|closed|sits|quoted)\s+(?:\w+\s+){0,2}(?:around|near|about|for|at)\s*\$?([\d,]+\.?\d*)/i,
     /\$([\d,]+\.\d{2})\s*(?:USD|per share|US\$)/i,
-  ]);
+  ], undefined, ['target', 'forecast', 'guidance', 'projection', 'estimate']);
+  if (price == null) price = scanPriceForward(text);
   // EPS must be fractional (6.53) — a bare "2026" after "EPS" is a fiscal
-  // year, not earnings per share. requiring the decimal kills that grab.
-  const eps = harvest(text, [
-    /(?:EPS|earnings per share)[^0-9]{0,40}([\d,]+\.\d+)/i,
-    /diluted\s+EPS[^0-9]{0,40}([\d,]+\.\d+)/i,
-  ]);
-  let growth = pct(text.match(/(?:revenue|sales|earnings)[^0-9]{0,80}([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
-    ?? pct(text.match(/(?:revenue|sales|earnings)\s+(?:grew|growth|increased|increase|jumped)[^0-9]{0,60}([\d.]+)\s*%/i))
-    ?? pct(text.match(/representing[^0-9]{0,40}([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i));
+  // year, not earnings per share. requiring the decimal kills that grab,
+  // and yearLike() kills "EPS $2026.00" artifacts. quarterly EPS ("Q3
+  // FY2026 … $1.30") must NOT feed the annual DCF — prefer annual/TTM
+  // phrasing when both exist (score: annual > neutral > quarterly).
+  const eps = (() => {
+    const cands: { v: number; q: number }[] = [];
+    for (const a of [/(?:EPS|earnings per share)[\s\S]{0,60}?([\d,]+\.\d+)/i, /diluted\s+EPS[\s\S]{0,60}?([\d,]+\.\d+)/i]) {
+      const g = new RegExp(a.source, a.flags.replace('g', '') + 'g');
+      while (true) {
+        const mm = g.exec(text);
+        if (!mm) break;
+        const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
+        if (isNaN(v) || yearLike(v)) continue;
+        const ctx = (mm[0] || '').toLowerCase();
+        const quarterly = /q[1-4]|quarterly|quarter\b/.test(ctx) ? 1 : 0;
+        const annual = /annual|full[- ]year|\bttm\b|trailing|fiscal year/.test(ctx) ? 1 : 0;
+        cands.push({ v, q: annual - quarterly });
+      }
+    }
+    if (!cands.length) return null;
+    cands.sort((x, y) => y.q - x.q);
+    return cands[0].v;
+  })();
+  let growth = pct(text.match(/(?:revenue|sales|earnings)[\s\S]{0,80}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
+    ?? pct(text.match(/(?:revenue|sales|earnings)[\s\S]{0,40}?\s+(?:grew|growth|increased|increase|jumped)[\s\S]{0,60}?([\d.]+)\s*%/i))
+    ?? pct(text.match(/(?:representing|represented)[\s\S]{0,50}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i));
   let growthSource = 'explicit growth %';
   if (growth == null) {
     // fallback: PEG = forward P/E / expected growth  →  g = PE / PEG.
@@ -106,7 +168,7 @@ export function runQuantModel(claims: string[]): QuantModel {
     /(?:beta|Beta)\s+(?:of|at|is|:|=)\s*([\d.]+)/i,
     /(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i,
   ]);
-  const sigma = pct(text.match(/(?:volatility|annualized volatility|vol)[^0-9]{0,30}([\d.]+)\s*%/i));
+  const sigma = pct(text.match(/(?:volatility|annualized volatility|vol(?!ume))[\s\S]{0,40}?([\d.]+)\s*%/i));
   const rf = pct(text.match(/(?:risk[- ]free rate|Rf|treasury)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? RF_DEFAULT;
   const erp = pct(text.match(/(?:equity risk premium|ERP|market risk premium)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? ERP_DEFAULT;
 

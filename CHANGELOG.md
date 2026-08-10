@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.7.0
+
+### Added
+- **Pipeline-computed quant engine** (`thinking/quantEngine.ts`) — stock research reports now contain real math, not LLM-asserted math. The engine harvests inputs from the *verified* claims (price, EPS, beta, volatility, risk-free rate, ERP), derives growth the way an analyst would (forward P/E ÷ PEG when no explicit growth % is cited), and computes CAPM cost of equity, a genuine 10-year DCF with Gordon terminal value → intrinsic value per share, GBM expected return with Ito's drift correction (μ − σ²/2), Sharpe, and 1-day/1-year VaR. The report writer is told to use these exact numbers and a `## Quantitative Model (computed by pipeline)` section with full derivations is injected after the critique loop so no critic or repair pass can rewrite code-computed math.
+- **Quote recovery crawl** — if stock mode finds no current price in the verified claims, one targeted quote query is crawled and verified before the quant model gives up.
+- **Quant verifier ground truth** — the quant finance critic now receives the pipeline's computed values and flags any report number that differs from them (deterministic anchor instead of re-derivation from the report's own prose).
+- **Anti-hallucination stock writer** — when the quant engine cannot compute (missing price/EPS/beta), the writer is explicitly forbidden from inventing models (Monte Carlo, jump-diffusion), expected returns, or risk figures.
+- **Cross-source claim dedup** — duplicate facts cited by multiple sources are merged into one claim node carrying both URLs (writer emits `[Source 1, Source 2]`). Number normalization folds "81.61 billion" and "$81.61B" into the same key, and 1-decimal fuzzy matching merges near-equal figures ("diluted EPS 6.53" vs "6.54") that different sources round differently.
+- **Citation author sanitization** (`internet/extractCitation.ts`) — rejects Readability byline junk ("9.5 French Competition Authority investigation" section headings from Wikipedia) and implausible authors before they land in the 9-style citation sets.
+
+### Changed
+- Critique loop: domain expert now performs structural checks (Executive Summary must lead, no duplicate sections, conclusion answers with specifics); convergence guard stops when repair improves <20%.
+- Humanize loop: the previous detector pass's "tells" are fed into the next humanize pass so rewrites target the actual AI signals instead of guessing blind; plateau guard stops when two consecutive scores don't improve.
+- `mergeDuplicateClaims` and `recoverStockQuote` exported for testing.
+
 ## v1.6.0
 
 ### Added

@@ -70,7 +70,7 @@ async function runDeepThink(dt, item) {
   const trace = new TraceStore('flat', 500);
   const t0 = Date.now();
   const r = await dt.generate(item.prompt, {
-    depth: DEPTH, checks: CHECKS, enableCode: false, _trace: trace,
+    depth: DEPTH, checks: CHECKS, enableCode: true, _trace: trace,
     systemPrompt: PLAIN_SYS,
   });
   const text = typeof r === 'object' && r !== null ? JSON.stringify(r) : String(r);

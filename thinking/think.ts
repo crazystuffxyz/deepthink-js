@@ -52,6 +52,17 @@ const SCRATCHPAD_BODY =
   'STEPS: [numbered computation, showing the actual arithmetic]\n' +
   'Then verify the result against every constraint.';
 
+const TRAP_BODY =
+  'TRAP DETECTION: what is the most likely WRONG answer a careless solver would give, and why is it wrong? ' +
+  'Identify the trap in this problem: misleading wording, tempting shortcut, common fallacy, ' +
+  'or an answer that is "close but off by one". Then state what the correct approach must avoid. ' +
+  'If the problem lists numbered choices, say which choice the trap points to and which is correct.';
+
+const RESTATE_BODY =
+  'RESTATE the problem in your own words. What exactly is being asked? What is NOT being asked? ' +
+  'List every given condition. Does the question use all of them, or is one a distractor? ' +
+  'Check for ambiguity: could the wording support a different reading? If so, which reading is intended?';
+
 // each probe: distinct lens on the same problem. same prefix, independent
 // sampling (temp 0.7 gives path diversity; the synthesis repairs gaps).
 const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> = {
@@ -98,6 +109,11 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
       fmt: 'RECONSTRUCTED PROBLEM:\n[restate the problem as the solution implies it]\nDIFF:\n- [constraint misread/missed/added]\n- [edge case ignored]'
     },
     {
+      tag: 'trap',
+      body: TRAP_BODY,
+      fmt: 'TRAP:\n[the wrong answer a careless solver gives]\nWHY WRONG:\n[the fallacy]\nAVOID:\n[what the correct approach must not do]'
+    },
+    {
       tag: 'structure',
       body: 'Define the structure of the final response in exactly 5 numbered steps.',
       fmt: '**Response Structure:**\n1. [step]\n2. [step]\n3. [step]\n4. [step]\n5. [step]'
@@ -132,6 +148,16 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
         'division-by-zero vulnerabilities, boundary-condition leaks, and logical non-sequiturs. ' +
         'Do not restate assumptions — attack the calculations.',
       fmt: 'SANITY CHECK:\n[findings — max 6 bullet points]'
+    },
+    {
+      tag: 'trap',
+      body: TRAP_BODY,
+      fmt: 'TRAP:\n[the wrong answer a careless solver gives]\nWHY WRONG:\n[the fallacy]\nAVOID:\n[what the correct approach must not do]'
+    },
+    {
+      tag: 'restate',
+      body: RESTATE_BODY,
+      fmt: 'RESTATED:\n[the problem in your own words]\nNOT ASKED:\n[what is not being asked]\nCONDITIONS:\n[every given condition, one per line]'
     },
     {
       tag: 'alternative',

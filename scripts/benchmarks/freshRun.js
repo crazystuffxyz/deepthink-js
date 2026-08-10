@@ -43,6 +43,7 @@ const DEPTH = Number(arg('depth', process.env.BENCH_DEPTH || '2'));
 const CHECKS = Number(arg('checks', process.env.BENCH_CHECKS || '1'));
 const LIMIT = Number(arg('limit', '0'));
 const CONCURRENCY = Number(arg('concurrency', process.env.BENCH_CONCURRENCY || '2'));
+const EVOLVED = arg('evolved', ''); // dir of an iqTrain run — injects the trained prompt
 const PLAIN_ONLY = process.argv.includes('--plain-only');
 const DT_ONLY = process.argv.includes('--dt-only');
 
@@ -72,6 +73,7 @@ async function runDeepThink(dt, item) {
   const r = await dt.generate(item.prompt, {
     depth: DEPTH, checks: CHECKS, enableCode: true, _trace: trace,
     systemPrompt: PLAIN_SYS,
+    ...(EVOLVED ? { evolvedApply: EVOLVED } : {}),
   });
   const text = typeof r === 'object' && r !== null ? JSON.stringify(r) : String(r);
   const evs = trace.toJSON();

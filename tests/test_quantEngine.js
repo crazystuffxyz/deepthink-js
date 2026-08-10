@@ -88,6 +88,40 @@ function check(name, cond, detail = '') {
   check('wordy price phrasing still harvested', m.price === 150.42, `got ${m.price}`);
 }
 
+// ---- run-9: glitched quote page claims $8.00, real price ~$217 ----
+// the source page really said "current price $8.00 (Closed)" and repeated
+// it for after-hours; every other signal said ~$217. the after-hours ban
+// kills 2 of the 3 bogus votes, and clusterPick keeps the lone $8.00 from
+// winning a plurality against the $217 cluster.
+{
+  const m = runQuantModel([
+    'The current price of NVDA on 2026-08-10 is $8.00 (Closed).',
+    'The after-hours price of NVDA on 2026-08-10 is $8.00.',
+    'The after-hours price of NVDA is $8.00 as of 7:30 PM EST.',
+    'The after-hours trading range for NVDA on 2026-08-10 is $217.35 to $219.66.',
+    'Nvidia stock price for fiscal 2026 was $223.96.',
+    'Nvidia is trading at $217.55.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('after-hours quotes banned', m.price !== 8.00, `got ${m.price}`);
+  check('price cluster picks ~$217', m.price != null && m.price > 200 && m.price < 230, `got ${m.price}`);
+}
+
+// ---- clusterPick: a genuinely cheap stock still clusters at its own level ----
+{
+  const m = runQuantModel([
+    'The stock is trading at $8.00.',
+    'The current market price of the stock is $8.00 per share.',
+    'The stock closed at $8.00 on Friday.',
+    'Diluted EPS for fiscal year 2026 stood at $0.24.',
+    'Revenue grew 12% year over year.',
+    'The beta is 0.9.',
+  ]);
+  check('cheap stock keeps its own price', m.price === 8.00, `got ${m.price}`);
+}
+
 // ---- merged claims keep per-URL citation metadata ----
 {
   const nodes = [
@@ -110,6 +144,20 @@ function check(name, cond, detail = '') {
   check('ref [4] title untouched', rep.includes('Since 1999*. Wall Street Numbers. https://wallstreetnumbers.com/stocks/nvda/beta'), rep);
   check('ref [5] id untouched', rep.includes('[5] (2026). *NVDA Stock Volatility'), rep);
   check('ref id not corrupted', !rep.includes('[2.21]'), rep);
+}
+
+// ---- run-8 residual gaps: no-$ price phrasing, "expected MEAN price",
+// and the clobber risks that optional-$ opens up ----
+{
+  const q = { ok: true, price: 217.55, eps: 6.53, beta: 2.21, sigma: 0.367, costOfEquity: 0.16355, intrinsicValue: 55.36, expectedPrice: 256.21, expectedLogReturn: 0.096, expectedReturn: 0.16355, sharpe: 0.33, var95_1d: 8.28, var99_1d: 11.70, var95_1y: 131.37 };
+  const prose = 'NVDA is trading at a current price of 218.14 USD [Source 1-7]. The expected mean price of $217.55 in one year based on GBM. The stock closed at 52-week high of $150. The market price of NVDA fell 5% to $210. Trading at levels not seen since 2021. EPS growth of 5% year over year.';
+  const rep = quantConformanceRepair(prose, q);
+  check('no-$ price phrase aligned', rep.includes('218.14') === false && rep.includes('217.55 USD'), rep);
+  check('expected mean price aligned to E[S_T]', rep.includes('expected mean price of $256.21'), rep);
+  check('52-week high untouched', rep.includes('52-week high of $150'), rep);
+  check('%-move untouched', rep.includes('fell 5% to $210'), rep);
+  check('year-like price untouched', rep.includes('since 2021'), rep);
+  check('EPS growth % untouched', rep.includes('EPS growth of 5%'), rep);
 }
 
 console.log(`\nquantEngine: ${pass} passed, ${fail} failed`);

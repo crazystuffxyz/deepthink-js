@@ -42,7 +42,14 @@ function extractAnswer(text) {
   const box = t.match(/\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/);
   if (box) return box[1].trim();
   const tail = t.match(/(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^.\n]+)/i);
-  if (tail) return tail[1].trim();
+  if (tail) {
+    const cap = tail[1].trim();
+    // "final answer is m + n = 25 + 8 = 33" — a chain of equalities; the
+    // value is the LAST number, not the whole expression
+    const chain = cap.match(/(?:=|\b)\s*(-?\d+(?:\.\d+)?(?:\/\d+)?)\s*$/);
+    if (chain) return chain[1];
+    return cap;
+  }
   const nums = t.match(/-?\d+(?:\.\d+)?(?:\/\d+)?/g);
   if (nums && nums.length) return nums[nums.length - 1];
   return t.trim();
@@ -90,8 +97,13 @@ async function chatPlain(client, prompt) {
   return r.content || '';
 }
 
+// the ANSWER: system prompt is what triggers the pipeline's OUTPUT FORMAT
+// directive — without it dt answers in prose ("final answer is m+n=25+8=33")
+// and the extractor can't parse the chain. same contract as freshRun.js.
+const DT_SYS = 'You are a precise problem solver. Solve the problem and give ONLY the answer, on a line that starts with "ANSWER: ". Do not include any other text after the answer line.';
+
 async function runOnce(dt, prompt) {
-  const r = await dt.generate(prompt, { depth, checks });
+  const r = await dt.generate(prompt, { depth, checks, systemPrompt: DT_SYS });
   if (typeof r === 'string') return r;
   if (r && typeof r === 'object') {
     return r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r);

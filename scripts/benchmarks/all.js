@@ -273,7 +273,7 @@ async function processOne(plain, dt, plan, row) {
     const t0 = Date.now();
     plainA = await chatPlain(plain, prompt);
     pSec = (Date.now() - t0) / 1000;
-    pVerify = verifyAnswer(plan, row, plainA);
+    pVerify = await verifyAnswer(plan, row, plainA);
     pOk = pVerify.ok ? 1 : 0;
   } catch (e) {
     plainA = `ERR: ${e.message}`;
@@ -291,7 +291,7 @@ async function processOne(plain, dt, plan, row) {
     const once = await runOnce(dt, prompt, isCode ? { answerFormat: undefined } : {});
     dtA = once.answer;
     dSec = (Date.now() - t0) / 1000;
-    dVerify = verifyAnswer(plan, row, dtA);
+    dVerify = await verifyAnswer(plan, row, dtA);
     dOk = dVerify.ok ? 1 : 0;
     tr = traceStats(once.trace);
     // persist the raw trace for offline reasoning-quality scoring
@@ -533,6 +533,9 @@ async function main() {
         if (c[6] === '1') dOk++;
         if (c[7] === '1') pExec++;
         if (c[8] === '1') dExec++;
+        dtCalls += Number(c[11]) || 0;
+        dtTok += (Number(c[12]) || 0) + (Number(c[13]) || 0);
+        if (c[19] === '1') corrected++;
         done2++;
       }
     }

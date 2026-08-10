@@ -866,6 +866,8 @@ export class Deepthink extends EventEmitter {
       monitor.updateBest(rawText, 0);
       let convo: ChatMessage[] = [...preFinal.filter(m => m.role !== 'system'), { role: 'assistant', content: rawText }];
       let prevVerdicts = '';
+      let stallIter = 0;
+      let bestPassed = 0;
       for (let iter = 0; iter < maxIter; iter++) {
         const checkResults = await this.runChecks(input, rawText, checks, mergedOpts, gt, sandboxPrefix);
         const passed = checkResults.filter(r => r.correct).length;
@@ -882,6 +884,13 @@ export class Deepthink extends EventEmitter {
           break;
         }
         prevVerdicts = verdicts;
+        // no-progress escape: verdicts keep churning but the passed count
+        // never improves across 3 revisions — more revising won't help.
+        if (passed > bestPassed) { bestPassed = passed; stallIter = 0; } else if (++stallIter >= 3) {
+          this.emit('log', { level: 'warn', msg: `[CHECK LOOP] no improvement in ${stallIter} revisions (best ${bestPassed}/${checks}) — stopping.`, source: 'checks', ts: Date.now() });
+          rawText = monitor.interrupt(rawText);
+          break;
+        }
         if (monitor.trackFeedback(failed)) {
           rawText = monitor.interrupt(rawText);
           break;

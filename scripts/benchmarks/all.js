@@ -105,10 +105,17 @@ function buildPrompt(row, exact) {
 }
 
 async function withTimeout(fn, ms) {
-  return await Promise.race([
-    fn(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms)),
-  ]);
+  // clear the race timer on settle so a finished run isn't kept alive
+  // by its losing timeout (hangs the process up to `ms` after done).
+  let timer;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function withRetry(fn, label = 'call', attempts = 5, timeoutMs = 15 * 60_000) {

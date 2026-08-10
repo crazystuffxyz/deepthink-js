@@ -569,6 +569,11 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
       `  - 1-day 95% VaR: $${quantModel.var95_1d.toFixed(2)} (${((quantModel.var95_1d / quantModel.price) * 100).toFixed(2)}%)\n` +
       `  - Expected price in one year E[S_T] = S₀e^{μT}: $${quantModel.expectedPrice.toFixed(2)}\n` +
       `  - A "## Quantitative Model" section with full derivations is appended automatically — write prose consistent with it.`;
+  } else if (opts.mode === 'stock') {
+    // engine couldn't compute (missing price/EPS/beta in claims): the writer
+    // MUST NOT invent math to fill the gap — that is how "Merton
+    // jump-diffusion" hallucinations enter reports.
+    quantNote = `\n\nTHE PIPELINE COULD NOT COMPUTE A QUANTITATIVE MODEL — the verified claims are missing inputs (current price, EPS, beta, or growth). Do NOT invent quantitative models (no Monte Carlo, no jump-diffusion, no unstated DCF values, no invented expected returns, Sharpe ratios, or VaR figures). State ONLY what the cited sources support, and attribute every number to its source.`;
   }
   const stockNote = opts.mode === 'stock'
     ? `\n\nSTOCK REPORT REQUIREMENTS (non-negotiable):\n  - If you run a DCF or Monte Carlo, STATE the resulting intrinsic value estimate in dollars per share.\n  - Apply Ito's lemma concretely: derive the expected log-return (μ - σ²/2)T and use it in your expected-return math. Do not just name-drop the equation.\n  - Every risk metric (VaR, Sharpe) must be consistent with the stated volatility: 1-day 95% VaR = 1.645 * σ / sqrt(252).\n  - State the expected return over your target horizon and the volatility that justifies the recommendation.${quantNote}`
@@ -670,8 +675,24 @@ async function mathLogicVerifier(callChat: any, report: string, domain: any, opt
   return { agent: 'mathLogic', issues: [], hasMathContent: false, mathRigorScore: 100 };
 }
 
-async function quantFinanceVerifier(callChat: any, report: string, opts: any = {}): Promise<any> {
+async function quantFinanceVerifier(callChat: any, report: string, opts: any = {}, quantModel: any = null): Promise<any> {
   log({ level: 'info', msg: '[STEP 8E] Quant Finance Verifier starting...', source: 'researchAgent', ts: Date.now() });
+  // when the quant engine computed values, the verifier gets ground truth to
+  // check the report against — a deterministic anchor instead of vibes.
+  const groundTruth = quantModel && quantModel.ok
+    ? `\nPIPELINE GROUND TRUTH (computed deterministically by the research pipeline's quant engine from the verified claims — the report MUST be consistent with these):\n` +
+      `  - Price: $${quantModel.price.toFixed(2)}\n` +
+      `  - EPS: $${quantModel.eps.toFixed(2)}\n` +
+      `  - Growth: ${(quantModel.growth * 100).toFixed(1)}%\n` +
+      `  - Beta: ${quantModel.beta}\n` +
+      `  - Cost of equity (CAPM): ${(quantModel.costOfEquity * 100).toFixed(2)}%\n` +
+      `  - Volatility: ${(quantModel.sigma * 100).toFixed(1)}%\n` +
+      `  - Intrinsic value (10-yr DCF): $${quantModel.intrinsicValue.toFixed(2)}/share\n` +
+      `  - Expected return μ: ${(quantModel.expectedReturn * 100).toFixed(1)}%, log-return (μ-σ²/2): ${(quantModel.expectedLogReturn * 100).toFixed(1)}%\n` +
+      `  - Sharpe: ${quantModel.sharpe.toFixed(3)}, 1-day 95% VaR: $${quantModel.var95_1d.toFixed(2)} (${((quantModel.var95_1d / quantModel.price) * 100).toFixed(2)}%), 1-day 99% VaR: $${quantModel.var99_1d.toFixed(2)}, 1-yr 95% VaR: $${quantModel.var95_1y.toFixed(2)}\n` +
+      `  - Expected price in 1 year: $${quantModel.expectedPrice.toFixed(2)}\n` +
+      `Any number the report states for these quantities that differs from the ground truth is an arithmetic_error with the ground-truth value as the correction. Any model the report claims to have run that the pipeline did not (Monte Carlo, jump-diffusion, etc.) is "unsupported".`
+    : `\nNo pipeline-computed ground truth is available — verify the report against its own stated inputs as described below, and flag any claimed model (Monte Carlo, jump-diffusion, DCF) that has no stated intrinsic value or applied derivation as "unsupported".`;
   const r = await isolatedCall(callChat,
     `You are a Quantitative Finance Auditor. You re-derive every quantitative claim in an investment report from first principles.
 
@@ -709,7 +730,7 @@ For every quantitative claim: state the formula, plug in the report's numbers, r
 
 Output ONLY valid JSON — no markdown fences, no prose:
 {"issues": [{"location": "exact text segment", "severity": "critical|major|minor", "type": "arithmetic_error|wrong_formula|missing_drift|wrong_z_value|unit_error|unsupported", "description": "...", "correction": "..."}], "quantScore": 0, "hasQuantContent": true}
-If no quantitative content is present, return {"issues": [], "quantScore": 100, "hasQuantContent": false}.`,
+If no quantitative content is present, return {"issues": [], "quantScore": 100, "hasQuantContent": false}.${groundTruth}`,
     `REPORT TO VERIFY:\n\n${report}`,
     { ...opts, samplingProfile: 'verify' });
   const parsed = parseJsonSafe(r.content || '', z.object({
@@ -782,7 +803,7 @@ async function constrainedRepairAgent(callChat: any, report: string, allIssues: 
   return repaired;
 }
 
-async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNodes: any[], topic: string, opts: any = {}): Promise<any> {
+async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNodes: any[], topic: string, opts: any = {}, quantModel: any = null): Promise<any> {
   const maxLoops = opts.maxCritiqueLoops ?? 4;
   const issueThreshold = opts.critiqueThreshold ?? 2;
   const severityWeights: Record<string, number> = { critical: 3, major: 2, minor: 1 };
@@ -797,7 +818,7 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
       domainExpertCritic(callChat, currentReport, domainInfo, opts),
       adversarialCritic(callChat, currentReport, topic, opts),
     ];
-    if (opts.mode === 'stock') criticTasks.push(quantFinanceVerifier(callChat, currentReport, opts));
+    if (opts.mode === 'stock') criticTasks.push(quantFinanceVerifier(callChat, currentReport, opts, quantModel));
     const settledCritics = await Promise.allSettled(criticTasks);
     const critics = settledCritics.filter((r: any) => r.status === 'fulfilled').map((r: any) => r.value);
     const allIssues: any[] = [];
@@ -914,6 +935,27 @@ function formatReport(report: string, opts: any, topic: string, answerSpec: any,
   return report; // markdown (default) — pass through untouched
 }
 
+// stock mode safety net: if the main crawl missed the current price, one
+// targeted quote query can rescue the whole quant model — without a price
+// the DCF, VaR, and expected-price math all stay uncomputable and the
+// writer is forced into inventing numbers.
+async function recoverStockQuote(callChat: any, topic: string, opts: any = {}): Promise<any[]> {
+  const ticker = opts.ticker || '';
+  const q = ticker ? `${ticker} stock price quote today` : `${topic} current price quote`;
+  log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl "${q}"`, source: 'researchAgent', ts: Date.now() });
+  try {
+    const results = await crawlerAgent([q], 2, opts);
+    const credible = verificationAgent(results, 30, opts).slice(0, 4);
+    if (!credible.length) return [];
+    const sums = await extractWithFallback(callChat, credible, [], topic, { requiredFields: ['current stock price', 'EPS', 'beta', 'revenue growth'] }, { ...opts, maxSummaries: 2 });
+    if (!sums.length) return [];
+    return await factVerificationLoop(callChat, sums.slice(0, 2), topic, opts);
+  } catch (e) {
+    log({ level: 'warn', msg: `[QUANT] Quote recovery failed: ${(e as Error).message}`, source: 'researchAgent', ts: Date.now() });
+    return [];
+  }
+}
+
 export default async function runDeepResearch(callChat: any, topic: string, opts: any = {}): Promise<any> {
   const stepSummary: any = {};
   if (opts.useOllamaSearch) log({ level: 'info', msg: '[CONFIG] Search backend: Ollama API', source: 'researchAgent', ts: Date.now() });
@@ -970,12 +1012,22 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
     // the report's DCF/GBM/VaR numbers are code-computed, not LLM-asserted.
     let quantModel: any = null;
     if (opts.mode === 'stock') {
+      const preRecovery = verifiedNodes.length;
       quantModel = runQuantModel(verifiedNodes.map((n: any) => n.claim));
+      // no price = no math: one targeted quote crawl before giving up
+      if (quantModel.price == null) {
+        const extra = await recoverStockQuote(callChat, topic, opts);
+        if (extra.length) {
+          verifiedNodes.push(...extra);
+          quantModel = runQuantModel(verifiedNodes.map((n: any) => n.claim));
+          log({ level: quantModel.price != null ? 'success' : 'warn', msg: `[QUANT] Recovery added ${extra.length} claims — price ${quantModel.price != null ? '$' + quantModel.price.toFixed(2) : 'still missing'}`, source: 'researchAgent', ts: Date.now() });
+        }
+      }
       stepSummary.quant = {
         ok: quantModel.ok, intrinsicValue: quantModel.intrinsicValue,
         costOfEquity: quantModel.costOfEquity, sharpe: quantModel.sharpe,
         var95_1d: quantModel.var95_1d, expectedLogReturn: quantModel.expectedLogReturn,
-        inputs: quantModel.inputs,
+        inputs: quantModel.inputs, recoveredClaims: verifiedNodes.length - preRecovery,
       };
       log({ level: quantModel.ok ? 'success' : 'warn', msg: `[QUANT] ${quantModel.ok ? 'Computed' : 'Partial'} model — IV $${quantModel.intrinsicValue?.toFixed(2) ?? 'n/a'}/share, Re ${quantModel.costOfEquity != null ? (quantModel.costOfEquity * 100).toFixed(2) + '%' : 'n/a'}, Sharpe ${quantModel.sharpe?.toFixed(2) ?? 'n/a'}`, source: 'researchAgent', ts: Date.now() });
     }
@@ -984,7 +1036,7 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
     let finalReport = initialReport;
     let critiqueHistory: any[] = [];
     if (opts.enableCritique !== false) {
-      const critiqueResult = await critiqueAndRepairLoop(callChat, initialReport, verifiedNodes, topic, opts);
+      const critiqueResult = await critiqueAndRepairLoop(callChat, initialReport, verifiedNodes, topic, opts, quantModel);
       finalReport = critiqueResult.report;
       critiqueHistory = critiqueResult.critiqueHistory;
       stepSummary.steps789 = {
@@ -1029,6 +1081,6 @@ export {
   extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent,
   buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier,
   mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent,
-  critiqueAndRepairLoop, isolatedCall, mergeDuplicateClaims,
+  critiqueAndRepairLoop, isolatedCall, mergeDuplicateClaims, recoverStockQuote,
   DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS,
 };

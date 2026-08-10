@@ -76,12 +76,18 @@ export function runQuantModel(claims: string[]): QuantModel {
   const price = harvest(text, [
     /(?:trading at|currently at|closed at|trades at|price is|price of)\s*\$?([\d,]+\.?\d*)/i,
     /(?:current price|market price|last price)\s*[=:]\s*\$?([\d,]+\.?\d*)/i,
+    /(?:share price|stock price|price per share)[^0-9]{0,20}\$?([\d,]+\.?\d*)/i,
+    /\$([\d,]+\.\d{2})\s*(?:USD|per share|US\$)/i,
   ]);
+  // EPS must be fractional (6.53) — a bare "2026" after "EPS" is a fiscal
+  // year, not earnings per share. requiring the decimal kills that grab.
   const eps = harvest(text, [
-    /(?:EPS|earnings per share)[^0-9]{0,40}([\d,]+\.?\d+)/i,
-    /diluted\s+EPS[^0-9]{0,40}([\d,]+\.?\d+)/i,
+    /(?:EPS|earnings per share)[^0-9]{0,40}([\d,]+\.\d+)/i,
+    /diluted\s+EPS[^0-9]{0,40}([\d,]+\.\d+)/i,
   ]);
-  let growth = pct(text.match(/(?:revenue|sales|earnings)\s+(?:grew|growth|increased|increase|jumped)[^0-9]{0,30}([\d.]+)\s*%/i));
+  let growth = pct(text.match(/(?:revenue|sales|earnings)[^0-9]{0,80}([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
+    ?? pct(text.match(/(?:revenue|sales|earnings)\s+(?:grew|growth|increased|increase|jumped)[^0-9]{0,60}([\d.]+)\s*%/i))
+    ?? pct(text.match(/representing[^0-9]{0,40}([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i));
   let growthSource = 'explicit growth %';
   if (growth == null) {
     // fallback: PEG = forward P/E / expected growth  →  g = PE / PEG.
@@ -96,7 +102,10 @@ export function runQuantModel(claims: string[]): QuantModel {
   }
   // skip parenthesized qualifiers like "Beta (5Y Monthly) is 2.21" — the
   // naive [^0-9] window would grab the "5" from "(5Y Monthly)".
-  const beta = harvest(text, [/(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i]);
+  const beta = harvest(text, [
+    /(?:beta|Beta)\s+(?:of|at|is|:|=)\s*([\d.]+)/i,
+    /(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i,
+  ]);
   const sigma = pct(text.match(/(?:volatility|annualized volatility|vol)[^0-9]{0,30}([\d.]+)\s*%/i));
   const rf = pct(text.match(/(?:risk[- ]free rate|Rf|treasury)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? RF_DEFAULT;
   const erp = pct(text.match(/(?:equity risk premium|ERP|market risk premium)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? ERP_DEFAULT;

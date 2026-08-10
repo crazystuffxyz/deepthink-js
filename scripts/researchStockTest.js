@@ -50,6 +50,7 @@ async function main() {
   const t0 = Date.now();
   const result = await runDeepResearch(callChat, topic, {
     mode: 'stock',
+    ticker: TICKER,
     maxQueries: 6,
     maxConcurrency: 3,
     credibilityThreshold: 30,

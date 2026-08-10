@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.0
+
+### Added
+- **Consensus price & beta harvesting** — when sources disagree on the current quote ($217.55 from four sources vs $223.96 from one), the engine now pools every price/beta candidate and takes the MODE, so the pipeline's number matches the one the writer sees cited most often. Engine and report prose converge instead of fighting each other.
+- **Deterministic quant conformance sweep** (`quantConformanceRepair`) — when the quant engine computes a model, the pipeline *enforces* its numbers in the report prose: every metric-anchored number (price, EPS, beta, volatility, cost of equity/WACC/discount rate, intrinsic value, E[S_T], expected returns, Sharpe, all three VaR horizons) is mechanically rewritten to the engine's value. Zero LLM in the step. Runs once before the critique loop (critics verify the aligned report) and once after (repair passes re-introducing writer-style numbers get swept again). The run-7 divergence — prose "$254.71 expected price / $241.18 IV / WACC 9.5%" vs computed "$258.87 / $1256.65 / Re 14.49%" — cannot ship anymore.
+- **Per-URL citation metadata** — merged duplicate claims keep each source's own title/citation (`srcMeta`), so the References section lists every URL with *its* page's metadata instead of the first source's title on four different URLs.
+- **Critique-loop regression guard** — the loop now tracks the best-scoring report version; a repair pass that stalls (<20% improvement) or regresses (54 → 28 → 39) restores the best version instead of shipping the damage, and the loop-cap path does the same.
+- **Quant engine regression tests** (`tests/test_quantEngine.js`, 25 model-free checks) — price/beta consensus, price-target rejection, the full run-7 divergence alignment, negative cases (quarterly EPS, volatility drag, forecast guidance, horizon-specific VaR untouched), EPS annual preference, wordy-phrase price recovery, and merged-claim metadata.
+
 ## v1.7.0
 
 ### Added

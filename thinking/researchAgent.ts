@@ -1,6 +1,8 @@
 // thinking/researchAgent.ts
 import { getSearchResults, getFetchResults } from '../internet/interactWithInternet.js';
+import { extractLocalFile } from '../internet/extractFromUrl.js';
 import { generateCitation } from '../internet/extractCitation.js';
+import path from 'node:path';
 import { runCognitiveFlow } from './cognitive.js';
 import { humanizeText } from './humanize.js';
 import { enforceCitations, checkReferencesSection } from './citationIntegrity.js';
@@ -237,13 +239,18 @@ function verificationAgent(rawResults: any[], threshold = 35, opts: any = {}): a
 async function extractAndSummarize(callChat: any, source: any, topic: string, answerSpec: any, opts: any): Promise<any> {
   const { url, goal, query, credibilityScore } = source;
   let rawContent: string;
-  try {
-    rawContent = await getFetchResults(url);
-    if (!rawContent || typeof rawContent !== 'string' || rawContent.startsWith('Error:')) {
-      return { url, goal, summary: null, credibilityScore, error: rawContent || 'Fetch failed' };
+  if (source.localContent) {
+    // local file source — content was converted at injection time
+    rawContent = source.localContent;
+  } else {
+    try {
+      rawContent = await getFetchResults(url);
+      if (!rawContent || typeof rawContent !== 'string' || rawContent.startsWith('Error:')) {
+        return { url, goal, summary: null, credibilityScore, error: rawContent || 'Fetch failed' };
+      }
+    } catch (e) {
+      return { url, goal, summary: null, credibilityScore, error: (e as Error).message };
     }
-  } catch (e) {
-    return { url, goal, summary: null, credibilityScore, error: (e as Error).message };
   }
   const requiredFieldsNote = (answerSpec.requiredFields || []).length ? `\nSpecifically extract: ${answerSpec.requiredFields.join(', ')}.` : '';
   const timeNote = (answerSpec.timeConstraints || []).length ? `\nOnly include content matching these time constraints: ${answerSpec.timeConstraints.join('; ')}.` : '';
@@ -439,7 +446,8 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
   for (const node of verifiedNodes) {
     if (!refMap.has(node.url)) {
       const cData = node.citation?.data || {};
-      refMap.set(node.url, { id: refMap.size + 1, url: node.url, title: cData.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || node.publicationDate || 'n.d.', site: cData.site || (() => { try { return new URL(node.url).hostname; } catch { return node.url; } })() });
+      const siteFallback = (() => { try { const h = new URL(node.url).hostname; return h || (node.url.startsWith('file://') ? node.title : node.url); } catch { return node.url; } })();
+      refMap.set(node.url, { id: refMap.size + 1, url: node.url, title: cData.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || node.publicationDate || 'n.d.', site: cData.site || siteFallback });
     }
   }
   for (const [, ref] of refMap) ref.apa = buildAPACitation(ref);
@@ -797,8 +805,30 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
     stepSummary.step1 = { queriesGenerated: queries.length };
     const rawResults = await crawlerAgent(queries, opts.maxConcurrency ?? 5, opts);
     stepSummary.step2 = { urlsRetrieved: rawResults.length };
-    const verifiedSources = verificationAgent(rawResults, opts.credibilityThreshold ?? 35, opts);
+    let verifiedSources = verificationAgent(rawResults, opts.credibilityThreshold ?? 35, opts);
     stepSummary.step3 = { urlsAfterFilter: verifiedSources.length };
+    // local file support: user-supplied PDFs/docs/etc. are converted to
+    // article text and injected as max-credibility sources, so they flow
+    // through the same summarize → verify → cite path as web sources.
+    if (opts.files && opts.files.length) {
+      const localSources = await Promise.all(opts.files.map(async (f: string) => {
+        try {
+          const content = await extractLocalFile(f);
+          const base = path.basename(f);
+          const abs = path.resolve(f).replace(/\\/g, '/');
+          return { url: 'file://' + abs, title: base, snippet: content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300), cite: '', query: 'local file', goal: 'local file content', depth: 0, topic: 'local', localContent: content, credibilityScore: 100 };
+        } catch (e) {
+          log({ level: 'error', msg: `[STEP 3] Local file failed: ${f} — ${(e as Error).message}`, source: 'researchAgent', ts: Date.now() });
+          return null;
+        }
+      }));
+      const ok = localSources.filter(Boolean);
+      if (ok.length) {
+        verifiedSources = [...ok, ...verifiedSources];
+        stepSummary.step3.localFiles = ok.length;
+        log({ level: 'info', msg: `[STEP 3] Injected ${ok.length} local file source(s) at max credibility`, source: 'researchAgent', ts: Date.now() });
+      }
+    }
     if (verifiedSources.length === 0) return { report: `No credible sources found for: "${topic}". Try lowering credibilityThreshold or broadening queries.`, references: [], claimCount: 0, stepSummary, success: false };
     const maxSourcesToFetch = opts.maxSummaries ?? 20;
     const primarySources = verifiedSources.slice(0, maxSourcesToFetch);

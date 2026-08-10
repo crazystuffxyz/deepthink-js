@@ -1,1 +1,1 @@
-{"version":3,"file":"extractFromUrl.d.ts","sourceRoot":"","sources":["../../internet/extractFromUrl.ts"],"names":[],"mappings":"AAsNA,wBAAsB,kBAAkB,CAAC,GAAG,EAAE,MAAM,GAAG,OAAO,CAAC,MAAM,CAAC,CA2DrE"}
+{"version":3,"file":"extractFromUrl.d.ts","sourceRoot":"","sources":["../../internet/extractFromUrl.ts"],"names":[],"mappings":"AAgOA,wBAAsB,gBAAgB,CAAC,QAAQ,EAAE,MAAM,GAAG,OAAO,CAAC,MAAM,CAAC,CAyBxE;AAED,wBAAsB,kBAAkB,CAAC,GAAG,EAAE,MAAM,GAAG,OAAO,CAAC,MAAM,CAAC,CA2DrE"}

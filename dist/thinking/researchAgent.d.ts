@@ -13,6 +13,7 @@ declare function applyMMR(summaries: any[], maxResults?: number, diversityLambda
 declare function factVerificationLoop(callChat: any, validSummaries: any[], topic: string, opts: any): Promise<any[]>;
 declare function buildAPACitation(ref: any): string;
 declare function buildCoverageGapsDisclaimer(plannedQueries: any[], verifiedNodes: any[]): string | null;
+declare function mergeDuplicateClaims(nodes: any[]): any[];
 declare function reportWriterAgent(callChat: any, topic: string, answerSpec: any, verifiedNodes: any[], opts: any, plannedQueries?: any[], quantModel?: any): Promise<any>;
 declare function detectResearchDomain(callChat: any, topic: string, opts?: any): Promise<any>;
 declare function sourceFidelityVerifier(callChat: any, report: string, verifiedNodes: any[], opts?: any): Promise<any>;
@@ -22,5 +23,5 @@ declare function adversarialCritic(callChat: any, report: string, topic: string,
 declare function constrainedRepairAgent(callChat: any, report: string, allIssues: any[], topic: string, opts?: any): Promise<string>;
 declare function critiqueAndRepairLoop(callChat: any, report: string, verifiedNodes: any[], topic: string, opts?: any): Promise<any>;
 export default function runDeepResearch(callChat: any, topic: string, opts?: any): Promise<any>;
-export { detectAnswerFormat, plannerAgent, crawlerAgent, verificationAgent, scoreCredibility, extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent, buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier, mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent, critiqueAndRepairLoop, isolatedCall, DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS, };
+export { detectAnswerFormat, plannerAgent, crawlerAgent, verificationAgent, scoreCredibility, extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent, buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier, mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent, critiqueAndRepairLoop, isolatedCall, mergeDuplicateClaims, DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS, };
 //# sourceMappingURL=researchAgent.d.ts.map

@@ -1,4 +1,5 @@
 // thinking/researchAgent.ts
+import { marked } from 'marked';
 import { getSearchResults, getFetchResults } from '../internet/interactWithInternet.js';
 import { extractLocalFile } from '../internet/extractFromUrl.js';
 import { generateCitation } from '../internet/extractCitation.js';
@@ -252,6 +253,15 @@ async function extractAndSummarize(callChat: any, source: any, topic: string, an
       return { url, goal, summary: null, credibilityScore, error: (e as Error).message };
     }
   }
+  // context guard: a long article or a big local PDF would overflow the
+  // extraction call. keep the head (where key facts live) plus the tail
+  // (where conclusions live), and say so in the prompt.
+  const MAX_CONTENT = opts.maxSourceChars ?? 50000;
+  if (rawContent.length > MAX_CONTENT) {
+    const head = rawContent.slice(0, Math.floor(MAX_CONTENT * 0.8));
+    const tail = rawContent.slice(-Math.floor(MAX_CONTENT * 0.2));
+    rawContent = `${head}\n\n[... ${rawContent.length - MAX_CONTENT} chars of the middle omitted to fit context ...]\n\n${tail}`;
+  }
   const requiredFieldsNote = (answerSpec.requiredFields || []).length ? `\nSpecifically extract: ${answerSpec.requiredFields.join(', ')}.` : '';
   const timeNote = (answerSpec.timeConstraints || []).length ? `\nOnly include content matching these time constraints: ${answerSpec.timeConstraints.join('; ')}.` : '';
   const entityNote = (answerSpec.entityTypes || []).length ? `\nPrioritize finding: ${answerSpec.entityTypes.join(', ')}.` : '';
@@ -364,48 +374,65 @@ function applyMMR(summaries: any[], maxResults = 20, diversityLambda = 0.6): any
   return selected;
 }
 
-async function factVerificationLoop(callChat: any, validSummaries: any[], topic: string, opts: any): Promise<any[]> {
-  log({ level: 'info', msg: `[STEP 5] FACT verification loop — ${validSummaries.length} summaries`, source: 'researchAgent', ts: Date.now() });
-  const verifiedNodes: any[] = [];
-  for (const source of validSummaries) {
-    const pubDateNote = source.publicationDate && source.publicationDate !== 'unknown' ? `\nThis article was published on: ${source.publicationDate}. Any claim must include this date context.` : '\nPublication date is unknown for this source.';
-    const claimsR = await callChat(
-      [{ role: 'system', content: `Extract every distinct factual claim from this summary relevant to: "${topic}"\nOutput ONLY valid JSON — no markdown fences, no prose: {"claims": ["claim 1", "claim 2", ...]}\nA claim is a specific, verifiable assertion with concrete data (numbers, names, dates, symbols).\nIMPORTANT: Each claim must include the year/date of the data.\nDo NOT omit or change the year to a different year.${pubDateNote}` },
-       { role: 'user', content: `Summary from ${source.url}:\n${source.summary || ''}` }],
-      false, null, { ...opts, think: false, samplingProfile: 'json' });
-    const claimsParsed = parseJsonSafe(claimsR.content || '', ClaimsSchema);
-    const claims: string[] = claimsParsed?.claims || [];
-    if (claims.length === 0) continue;
-    let citationData: any = null;
+async function verifyOneSource(callChat: any, source: any, topic: string, opts: any): Promise<any[]> {
+  const pubDateNote = source.publicationDate && source.publicationDate !== 'unknown' ? `\nThis article was published on: ${source.publicationDate}. Any claim must include this date context.` : '\nPublication date is unknown for this source.';
+  const claimsR = await callChat(
+    [{ role: 'system', content: `Extract every distinct factual claim from this summary relevant to: "${topic}"\nOutput ONLY valid JSON — no markdown fences, no prose: {"claims": ["claim 1", "claim 2", ...]}\nA claim is a specific, verifiable assertion with concrete data (numbers, names, dates, symbols).\nIMPORTANT: Each claim must include the year/date of the data.\nDo NOT omit or change the year to a different year.${pubDateNote}` },
+     { role: 'user', content: `Summary from ${source.url}:\n${source.summary || ''}` }],
+    false, null, { ...opts, think: false, samplingProfile: 'json' });
+  const claimsParsed = parseJsonSafe(claimsR.content || '', ClaimsSchema);
+  const claims: string[] = claimsParsed?.claims || [];
+  if (claims.length === 0) return [];
+  let citationData: any = null;
+  // local files can't be fetched for citation metadata — skip the doomed
+  // network call (it would just burn the 15s timeout) and let the report
+  // writer fall back to the file basename.
+  if (!String(source.url || '').startsWith('file://')) {
     try {
       const citResult: any = await generateCitation(source.url);
       if (!citResult.error) citationData = citResult;
     } catch { /* ignore */ }
-    const max = 2;
-    const verifiedClaims: any[] = [];
-    for (const claim of claims) {
-      let verifiedClaim = claim, verified = false;
-      for (let loop = 0; loop < max; loop++) {
-        const verifyR = await callChat(
-          [{ role: 'system', content: `You are a Fact Verifier.\nSource content:\n${source.summary || ''}\n\nDATE RULES — CRITICAL:\n  - The article was published on: ${source.publicationDate || 'unknown'}.\n  - Do NOT change any year or date in the claim.\n  - If the article is from 2023 or 2024, label it historical — NOT 2026.\n\nDoes the source content explicitly support the claim?\nOutput ONLY valid JSON — no markdown fences:\n{"supported": true|false, "confidence": 0-100, "correction": "corrected claim or null"}` },
-           { role: 'user', content: `Claim: "${verifiedClaim}"\nSource: ${source.url}` }],
-          false, null, { ...opts, think: false, samplingProfile: 'verify' });
-        const vResult = parseJsonSafe(verifyR.content || '', VerifyResultSchema);
-        if (vResult?.supported && vResult.confidence >= 60) {
-          verified = true;
-          break;
-        } else if (vResult?.correction && loop < max - 1) {
-          log({ level: 'warn', msg: `[STEP 5] Claim corrected: "${verifiedClaim.slice(0, 100)}..."`, source: 'researchAgent', ts: Date.now() });
-          verifiedClaim = vResult.correction;
-        } else {
-          log({ level: 'warn', msg: `[STEP 5] Claim discarded: "${verifiedClaim.slice(0, 100)}..."`, source: 'researchAgent', ts: Date.now() });
-          break;
-        }
+  }
+  const max = 2;
+  const verifiedClaims: any[] = [];
+  for (const claim of claims) {
+    let verifiedClaim = claim, verified = false;
+    for (let loop = 0; loop < max; loop++) {
+      const verifyR = await callChat(
+        [{ role: 'system', content: `You are a Fact Verifier.\nSource content:\n${source.summary || ''}\n\nDATE RULES — CRITICAL:\n  - The article was published on: ${source.publicationDate || 'unknown'}.\n  - Do NOT change any year or date in the claim.\n  - If the article is from 2023 or 2024, label it historical — NOT 2026.\n\nDoes the source content explicitly support the claim?\nOutput ONLY valid JSON — no markdown fences:\n{"supported": true|false, "confidence": 0-100, "correction": "corrected claim or null"}` },
+         { role: 'user', content: `Claim: "${verifiedClaim}"\nSource: ${source.url}` }],
+        false, null, { ...opts, think: false, samplingProfile: 'verify' });
+      const vResult = parseJsonSafe(verifyR.content || '', VerifyResultSchema);
+      if (vResult?.supported && vResult.confidence >= 60) {
+        verified = true;
+        break;
+      } else if (vResult?.correction && loop < max - 1) {
+        log({ level: 'warn', msg: `[STEP 5] Claim corrected: "${verifiedClaim.slice(0, 100)}..."`, source: 'researchAgent', ts: Date.now() });
+        verifiedClaim = vResult.correction;
+      } else {
+        log({ level: 'warn', msg: `[STEP 5] Claim discarded: "${verifiedClaim.slice(0, 100)}..."`, source: 'researchAgent', ts: Date.now() });
+        break;
       }
-      if (verified) verifiedClaims.push({ claim: verifiedClaim, url: source.url, goal: source.goal, credibility: source.credibilityScore, publicationDate: source.publicationDate || 'unknown', citation: citationData, citedSummary: source.summary, verified: true });
     }
-    verifiedNodes.push(...verifiedClaims);
-    log({ level: 'info', msg: `[STEP 5] ${source.url.slice(0, 50)}... → ${verifiedClaims.length}/${claims.length} claims verified`, source: 'researchAgent', ts: Date.now() });
+    if (verified) verifiedClaims.push({ claim: verifiedClaim, url: source.url, title: source.title || '', goal: source.goal, credibility: source.credibilityScore, publicationDate: source.publicationDate || 'unknown', citation: citationData, citedSummary: source.summary, verified: true });
+  }
+  log({ level: 'info', msg: `[STEP 5] ${source.url.slice(0, 50)}... → ${verifiedClaims.length}/${claims.length} claims verified`, source: 'researchAgent', ts: Date.now() });
+  return verifiedClaims;
+}
+
+async function factVerificationLoop(callChat: any, validSummaries: any[], topic: string, opts: any): Promise<any[]> {
+  log({ level: 'info', msg: `[STEP 5] FACT verification loop — ${validSummaries.length} summaries`, source: 'researchAgent', ts: Date.now() });
+  const verifiedNodes: any[] = [];
+  // sources are independent — verify them in parallel batches so a 20-source
+  // run doesn't serialize ~60 LLM calls. results keep source order.
+  const concurrency = opts.verifyConcurrency ?? 4;
+  for (let i = 0; i < validSummaries.length; i += concurrency) {
+    const batch = validSummaries.slice(i, i + concurrency);
+    const settled = await Promise.allSettled(batch.map(s => verifyOneSource(callChat, s, topic, opts)));
+    for (const outcome of settled) {
+      if (outcome.status === 'fulfilled' && Array.isArray(outcome.value)) verifiedNodes.push(...outcome.value);
+      else log({ level: 'warn', msg: `[STEP 5] Source verification failed: ${(outcome as any).reason?.message || 'unknown'}`, source: 'researchAgent', ts: Date.now() });
+    }
   }
   log({ level: 'success', msg: `[STEP 5] FACT complete — ${verifiedNodes.length} total verified claims`, source: 'researchAgent', ts: Date.now() });
   return verifiedNodes;
@@ -447,7 +474,7 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
     if (!refMap.has(node.url)) {
       const cData = node.citation?.data || {};
       const siteFallback = (() => { try { const h = new URL(node.url).hostname; return h || (node.url.startsWith('file://') ? node.title : node.url); } catch { return node.url; } })();
-      refMap.set(node.url, { id: refMap.size + 1, url: node.url, title: cData.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || node.publicationDate || 'n.d.', site: cData.site || siteFallback });
+      refMap.set(node.url, { id: refMap.size + 1, url: node.url, title: cData.title || node.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || node.publicationDate || 'n.d.', site: cData.site || siteFallback });
     }
   }
   for (const [, ref] of refMap) ref.apa = buildAPACitation(ref);
@@ -723,30 +750,10 @@ function mdToPlain(md: string): string {
 }
 
 function mdToHtml(md: string): string {
-  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const lines = String(md || '').split('\n');
-  const out: string[] = [];
-  let inList = false;
-  for (const line of lines) {
-    const h = line.match(/^(#{1,6})\s+(.*)/);
-    if (h) {
-      if (inList) { out.push('</ul>'); inList = false; }
-      const lvl = h[1].length;
-      out.push(`<h${lvl}>${esc(h[2])}</h${lvl}>`);
-      continue;
-    }
-    const li = line.match(/^\s*[-*+]\s+(.*)/);
-    if (li) {
-      if (!inList) { out.push('<ul>'); inList = true; }
-      out.push(`<li>${esc(li[1])}</li>`);
-      continue;
-    }
-    if (inList) { out.push('</ul>'); inList = false; }
-    if (line.trim() === '') { out.push(''); continue; }
-    out.push(`<p>${esc(line)}</p>`);
-  }
-  if (inList) out.push('</ul>');
-  return out.join('\n');
+  // full markdown renderer (headings, bold, links, lists, tables, code) —
+  // marked is already a dependency, and the conversion is mechanical so
+  // [Source N] citation tags pass through untouched.
+  return marked.parse(String(md || ''), { gfm: true, breaks: false }) as string;
 }
 
 function mdToJson(md: string, topic: string, answerSpec: any, references: any[]): string {
@@ -767,8 +774,8 @@ function mdToJson(md: string, topic: string, answerSpec: any, references: any[])
     id: i + 1,
     title: r.title || '',
     url: r.url || '',
-    source: r.source || '',
-    date: r.publicationDate || r.date || '',
+    source: r.site || r.source || '',
+    date: r.year || r.publicationDate || r.date || '',
   }));
   return JSON.stringify({
     topic,

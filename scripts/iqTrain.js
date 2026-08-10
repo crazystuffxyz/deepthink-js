@@ -33,6 +33,7 @@ const MODEL = arg('model', process.env.BENCH_MODEL || 'gemma4:31b-cloud');
 const POP = Number(arg('pop', '8'));
 const GENS = Number(arg('gens', '6'));
 const CONCURRENCY = Number(arg('concurrency', process.env.BENCH_CONCURRENCY || '2'));
+const EVAL_SAMPLE = Number(arg('sample', process.env.BENCH_EVAL_SAMPLE || '0')); // mini-batch size (0 = full bank)
 
 // ---- train bench: IQ banks (kind 'choice', reference = 1-based choice index)
 const train = fs.readFileSync(path.join(DATA, 'iqTrain.jsonl'), 'utf-8')
@@ -74,7 +75,8 @@ const callChat = (msgs, stream, onChunk, opts) => queue.add(() => dt.callChat(ms
     oodBench: ood,
     dataDir: OUT,
     runId: 'iq-' + new Date().toISOString().replace(/[:.]/g, '-'),
-    tournamentK: 3
+    tournamentK: 3,
+    evalSample: EVAL_SAMPLE
   });
   const mins = ((Date.now() - t0) / 60000).toFixed(1);
   console.log(`\n[iqTrain] done in ${mins} min`);

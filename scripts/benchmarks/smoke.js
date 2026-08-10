@@ -14,6 +14,7 @@ const MODEL = arg('model', 'gemma4:31b-cloud');
 const VERIFIER = arg('verifier', 'deepseek-v4-flash:0731-cloud');
 const DEPTH = Number(arg('depth', '1'));
 const CHECKS = Number(arg('checks', '1'));
+const STYLE = arg('checkStyle', 'full');
 
 const dt = new Deepthink(MODEL, [], { provider: 'ollama' }, Infinity, VERIFIER, { traceMode: 'flat' });
 dt.on('log', (e) => {
@@ -23,10 +24,10 @@ dt.on('log', (e) => {
 
 const prompt = arg('prompt', 'What is 47 * 89? Answer with just the number in [brackets].');
 
-console.log(`smoke: model=${MODEL} verifier=${VERIFIER} depth=${DEPTH} checks=${CHECKS}`);
+console.log(`smoke: model=${MODEL} verifier=${VERIFIER} depth=${DEPTH} checks=${CHECKS} style=${STYLE}`);
 console.log(`prompt: ${prompt}`);
 const t0 = Date.now();
-const out = await dt.generate(prompt, { depth: DEPTH, checks: CHECKS });
+const out = await dt.generate(prompt, { depth: DEPTH, checks: CHECKS, checkStyle: STYLE });
 const wall = ((Date.now() - t0) / 1000).toFixed(1);
 console.log(`\nanswer: ${String(out).slice(0, 300)}`);
 console.log(`wall: ${wall}s`);
@@ -44,5 +45,11 @@ for (const e of tr.events) {
 }
 const withTok = tr.events.filter((e) => e.promptTokens != null).length;
 console.log(`token capture: ${withTok}/${tr.events.length} calls have token counts ${withTok === tr.events.length ? '✓' : '✗'}`);
+// pipeline assertions: probes must carry real content (the thinking-mode
+// fix), and a final answer call must exist.
+const thinkEvs = tr.events.filter((e) => e.phase === 'think');
+const realProbes = thinkEvs.filter((e) => (e.response || '').trim().length > 50);
+const hasFinal = tr.events.some((e) => e.phase === 'final');
+console.log(`pipeline: ${thinkEvs.length} think events, ${realProbes.length} with real content ${realProbes.length === thinkEvs.length ? '✓' : '✗'}, final call ${hasFinal ? '✓' : '✗'}`);
 console.log(`concurrency level: ${dt.concurrencyScaler?.current ?? 'n/a'}`);
 dt.destroy();

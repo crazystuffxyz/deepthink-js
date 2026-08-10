@@ -1316,7 +1316,11 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
         // as a modeling appendix. (run 10: the humanizer paraphrased the
         // section's inputs line into "volatility: 08, 24, 28, 29".)
         if (quantModel && quantModel.section) {
-            const refIdx = finalReport.lastIndexOf('\n---\n## References');
+            // same dual-pattern search as the humanize split — the writer's
+            // References header may or may not carry the --- separator, and a
+            // section landing AFTER the references would read as an appendix
+            // to the bibliography
+            const refIdx = finalReport.search(/\n---\n## References|\n## References/i);
             if (refIdx > -1)
                 finalReport = finalReport.slice(0, refIdx) + '\n\n' + quantModel.section + finalReport.slice(refIdx);
             else

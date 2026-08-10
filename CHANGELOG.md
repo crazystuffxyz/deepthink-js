@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.6.0
+
+### Added
+- **Local HTTP proxy** (`src/proxy.js`, `npm run proxy`) — Fastify server on `http://127.0.0.1:8000` that speaks OpenAI and Anthropic wire formats over the deepthink pipeline. `POST /v1/chat/completions`, `GET /v1/models`, `POST /v1/messages`, plus `/health`. Any OpenAI/Anthropic-compatible tool (Cursor, Aider, Claude Code, custom SDKs) can use deepthink-js as a drop-in backend.
+- **Real SSE streaming** — the final synthesis call streams token-by-token through the pipeline's `onChunk` hook, framed as standard OpenAI chunks (`data: {...}` + `data: [DONE]`, usage chunk on `stream_options.include_usage`) or Anthropic events (`message_start` → `content_block_delta` → `message_stop`). 15s keep-alive comments keep long MCTS searches alive through proxies.
+- **Thinking traces** — `x-deepthink-trace: true` returns the internal reasoning as `reasoning_content` (OpenAI) or a `thinking` block (Anthropic), with the full call trace under `_deepthink.trace`; every response carries `x-deepthink-trace-id` / `x-deepthink-calls` / `x-deepthink-ms` headers.
+- **Per-request deepthink knobs** — `deepthink` object in the request body or `x-deepthink-*` headers control depth (0–3), checks (0–5), output type, code execution, and engine model.
+- **MCP server** (`src/mcp.js`, `npm run mcp`) — `@modelcontextprotocol/sdk` server exposing the `deepthink_reason` tool (prompt/type/depth/enableCode). Runs over stdio (Claude Desktop, Cursor) or streamable HTTP at `/mcp` on the proxy (session-based, GET/POST/DELETE).
+- **Smoke tests** — `tests/test_proxy.js` (23 checks: models, non-streaming, SSE streaming, Anthropic, traces, errors, /mcp lifecycle) and `tests/test_mcp.js` (10 checks: stdio JSON-RPC initialize/tools/list/tools/call). Auto-discovered by `tests/runAll.js`.
+
+### Changed
+- New dependencies: `@modelcontextprotocol/sdk` ^1.30.0, `fastify` ^5.11.3.
+
 ## v1.5.0
 
 ### Added

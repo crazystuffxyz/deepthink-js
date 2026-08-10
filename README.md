@@ -603,6 +603,35 @@ Tests default to `gemma4:31b-cloud`. Override with `DEEPTHINK_TEST_MODEL=... npm
 
 ---
 
+## Benchmarks
+
+Public benchmark numbers against `gemma4:31b-cloud` on Ollama, comparing
+a single direct chat call ("plain") against the same model wrapped in
+`Deepthink.generate(prompt, { depth: 3, checks: 2 })`. Questions were
+pulled from the official public sources (no training-data recall):
+**[AIME 2024](https://huggingface.co/datasets/Maxwell-Jia/AIME_2024)**,
+**[GSM8K](https://github.com/openai/grade-school-math)**,
+and **[MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500)**.
+
+Run with:
+```bash
+node scripts/benchmarks/run.js --bench all --depth 3 --checks 2
+```
+
+Raw per-row output is in [`benchmarks/results.csv`](benchmarks/results.csv).
+
+| Benchmark | Source | n | Plain | Deepthink (d=3, c=2) | Δ |
+|---|---|---:|---:|---:|---:|
+| AIME 2024  | Maxwell-Jia/AIME_2024 | 30 | _running_ | _running_ | _running_ |
+| GSM8K      | openai/grade-school-math | 200 | _running_ | _running_ | _running_ |
+| MATH-500   | HuggingFaceH4/MATH-500 | 200 | _running_ | _running_ | _running_ |
+
+> Numbers above are placeholders — the harness writes
+> `benchmarks/results.csv` and `benchmarks/results.summary.json` after
+> each run. The README table is regenerated from those files.
+
+---
+
 ## Advanced Options Reference
 
 ### `generate()` Options

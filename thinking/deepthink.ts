@@ -60,6 +60,7 @@ type DeepthinkOptions = {
   type?: string;
   depth?: number;
   checks?: number;
+  checkStyle?: 'full' | 'blind';
   onChunk?: ((chunk: string, meta: { kind: 'content' | 'thinking' }) => void) | null;
   mixtureModels?: Array<string | { name: string; callChat?: (...a: unknown[]) => Promise<unknown> }>;
   mixtureJudge?: (...a: unknown[]) => Promise<unknown>;
@@ -588,25 +589,38 @@ export class Deepthink extends EventEmitter {
   async runChecks(input: unknown, response: string, checksCount: number, opts: DeepthinkOptions = {}, groundTruth: { value: unknown; sandboxValidated?: boolean } | null = null, sandboxPrefix: ChatMessage[] = []): Promise<CheckResult[]> {
     const inputText = messagesToText(input);
     const gtVal = groundTruth?.sandboxValidated ? String(groundTruth.value).trim() : null;
+    // checkStyle: 'full' = checker audits the whole draft; 'blind' = checker
+    // sees ONLY the claimed answer and must re-derive it (verifier-blind —
+    // tests whether seeing the reasoning biases the audit).
+    const blind = opts.checkStyle === 'blind';
+    const claimed = blind ? (response.match(/\[([^\]]+)\]\s*$/)?.[1] || response.trim().slice(-160)) : null;
     const personas = [{
       label: 'Standard',
       system: gtVal
         ? `You are a Ground Truth Verifier. The sandbox-verified answer is [${gtVal}]. Your sole mission is to detect any deviation from this value. If the response contradicts this value or omits it where required, you MUST return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
-        : `You are a Quality Assurance Specialist. Audit the response for correctness, completeness, and adherence to the user's constraints. If any critical detail is missing or incorrect, you MUST return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+        : blind
+          ? `You are an Independent Verifier. You see ONLY the claimed answer, never the reasoning. Solve the problem yourself from scratch and judge whether the claim is correct. If it is wrong, or you cannot confirm it, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+          : `You are a Quality Assurance Specialist. Audit the response for correctness, completeness, and adherence to the user's constraints. If any critical detail is missing or incorrect, you MUST return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
     }, {
       label: 'Adversarial',
       system: gtVal
         ? `You are a Red-Team Auditor. The verified answer is [${gtVal}]. Your goal is to dismantle the response. Look for "hallucinated precision" (adding detail that isn't true), logical leaps, or subtle deviations from the ground truth. If you find ANY flaw, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
-        : `You are a Red-Team Auditor. Assume the response contains a subtle error, a logical gap, or a hallucination. Be ruthless. Only return YES if the response is absolutely flawless. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+        : blind
+          ? `You are an Adversarial Verifier. You see ONLY the claimed answer. Solve the problem independently, then attack the claim from every angle. Only return YES if the claim is unquestionably correct. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+          : `You are a Red-Team Auditor. Assume the response contains a subtle error, a logical gap, or a hallucination. Be ruthless. Only return YES if the response is absolutely flawless. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
     }, {
       label: 'Numerical',
       model: this.auditModel,
       system: gtVal
         ? `You are a Numerical Forensic Analyst. Does the response explicitly and correctly state the verified value [${gtVal}]? Any rounding error, sign flip, or missing digit is a failure. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
-        : `You are a Numerical Forensic Analyst. Audit every number and calculation in the response. Check for internal consistency, order-of-magnitude errors, and precision loss. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+        : blind
+          ? `You are a Numerical Verifier. Recompute the claimed answer yourself. Any rounding error, sign flip, or missing digit means the claim is wrong — return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+          : `You are a Numerical Forensic Analyst. Audit every number and calculation in the response. Check for internal consistency, order-of-magnitude errors, and precision loss. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
     }].slice(0, Math.min(checksCount, 3));
 
-    const results = await Promise.allSettled(personas.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${response}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify', _phase: 'checks', _depth: 3 })));
+    const shown = claimed ? `<claimed answer>\n${claimed}\n</claimed answer>` : response;
+
+    const results = await Promise.allSettled(personas.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${shown}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify', _phase: 'checks', _depth: 3 })));
 
     return results.map((r, i) => {
       const p = personas[i];
@@ -851,12 +865,23 @@ export class Deepthink extends EventEmitter {
       });
       monitor.updateBest(rawText, 0);
       let convo: ChatMessage[] = [...preFinal.filter(m => m.role !== 'system'), { role: 'assistant', content: rawText }];
+      let prevVerdicts = '';
       for (let iter = 0; iter < maxIter; iter++) {
         const checkResults = await this.runChecks(input, rawText, checks, mergedOpts, gt, sandboxPrefix);
         const passed = checkResults.filter(r => r.correct).length;
         monitor.updateBest(rawText, passed);
         const failed = checkResults.filter(r => !r.correct);
         if (!failed.length) break;
+        // verdict-pattern escape: same Y/N pattern twice in a row = the
+        // revision isn't converging (feedback wording churns, verdicts
+        // don't). stop burning tokens, return the best-scoring draft.
+        const verdicts = checkResults.map(r => (r.correct ? 'Y' : 'N')).join('');
+        if (verdicts === prevVerdicts) {
+          this.emit('log', { level: 'warn', msg: `[CHECK LOOP] verdict pattern ${verdicts} repeated at iter ${iter} — revision not converging, stopping.`, source: 'checks', ts: Date.now() });
+          rawText = monitor.interrupt(rawText);
+          break;
+        }
+        prevVerdicts = verdicts;
         if (monitor.trackFeedback(failed)) {
           rawText = monitor.interrupt(rawText);
           break;

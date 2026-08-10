@@ -777,7 +777,9 @@ export class Deepthink extends EventEmitter {
       // find it unambiguously instead of guessing at prose.
       const fmtDirective = mergedOpts.answerFormat === 'bracket' && type !== 'json'
         ? ' End with the final answer in square brackets on the last line, e.g. [42]. Nothing after the closing bracket.'
-        : '';
+        : /ANSWER\s*:/.test(typeof mergedOpts.systemPrompt === 'string' ? mergedOpts.systemPrompt : '')
+          ? ' End with the final answer on a line starting with "ANSWER: ", e.g. "ANSWER: 3". Nothing after that line.'
+          : '';
       const preFinal: ChatMessage[] = [
         { role: 'system', content: `Extract the final verified answer from this cognitive process log. Match the requested data type: ${mergedOpts.type}. Output ONLY the final answer.${fmtDirective}` },
         { role: 'user', content: flowResult }
@@ -886,6 +888,16 @@ export class Deepthink extends EventEmitter {
       finalMessages = insertSystemPrompt(
         finalMessages,
         'OUTPUT FORMAT: end your response with the final answer alone on the last line, in square brackets - e.g. [42] or [sqrt(2)/3]. Nothing may follow the closing bracket.'
+      );
+    }
+    // caller's system prompt demands an "ANSWER: X" line (benchmarks, tools):
+    // reinforce it in the final call — the model drifts to prose otherwise.
+    // same ride-in-system-messages trick so check-loop revisions keep it.
+    const sysText = typeof mergedOpts.systemPrompt === 'string' ? mergedOpts.systemPrompt : '';
+    if (/ANSWER\s*:/.test(sysText) && type !== 'json') {
+      finalMessages = insertSystemPrompt(
+        finalMessages,
+        'OUTPUT FORMAT: end your response with the final answer on a line starting with "ANSWER: " — e.g. "ANSWER: 3". Nothing after that line.'
       );
     }
     const preFinal = consolidateSystemMessages(finalMessages);

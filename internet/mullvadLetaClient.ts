@@ -37,9 +37,10 @@ async function getWorkingSearxngInstances(): Promise<string[]> {
       if (process.stdout?.write) process.stdout.write(`[mullvad] Instance list fetched in ${elapsed}ms — ${workingUrls.length} clearnet instances found\n`);
       return workingUrls;
     } catch (error) {
-      if (process.stdout?.write) process.stdout.write(`[mullvad] Failed to fetch instance list: ${(error as Error).message} — using fallback\n`);
+      if (process.stdout?.write) process.stdout.write(`[mullvad] Failed to fetch instance list: ${(error as Error).message} — using fallback list\n`);
       instancesPromise = null;
-      return ['https://search.rhscz.eu'];
+      // known-good public instances, tried in order if the list fetch fails
+      return ['https://search.rhscz.eu', 'https://search.mdosch.de', 'https://searx.tiekoetter.com', 'https://search.bus-hit.me'];
     }
   })();
   return instancesPromise;
@@ -89,8 +90,11 @@ async function fetchSearxngPage(query: string, pageNo: number, baseUrl: string, 
       if (process.stdout?.write) process.stdout.write(`[mullvad] page=${pageNo} done in ${elapsed}ms — ${mappedResults.length} results, hasMore=${hasMore}\n`);
       return { results: mappedResults, hasMore, actualResultsOnPage: mappedResults.length };
     } catch (error) {
-      if (attempt > maxRetries) {
-        if (process.stdout?.write) process.stdout.write(`[mullvad] FAILED all ${maxRetries + 1} attempts: ${(error as Error).message.slice(0, 100)}\n`);
+      const status = (error as { response?: { status?: number } }).response?.status;
+      // 429 = rate limited: retrying the SAME instance just burns time — fail
+      // fast so the outer loop switches to the next instance
+      if (status === 429 || attempt > maxRetries) {
+        if (process.stdout?.write) process.stdout.write(`[mullvad] ${status === 429 ? 'RATE LIMITED' : 'FAILED'} page=${pageNo} on ${baseUrl}: ${(error as Error).message.slice(0, 100)}\n`);
         return { results: [], hasMore: false, actualResultsOnPage: 0 };
       }
       const delay = 1000 * attempt;

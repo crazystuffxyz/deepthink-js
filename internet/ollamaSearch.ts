@@ -34,6 +34,24 @@ class Concurrency {
 
 const _clientQueue = new Concurrency(ollama1);
 let _webSearchSignature: string | null = null;
+// probe once: the local ollama server often has no web_search endpoint (404)
+// or needs auth (401) — paying that failure on EVERY query is wasted latency.
+// after the first probe we know whether the client tier is worth trying.
+let _clientTierUsable: boolean | null = null;
+
+async function probeClientTier(): Promise<boolean> {
+  if (_clientTierUsable !== null) return _clientTierUsable;
+  try {
+    const r = await searchViaClient('probe');
+    _clientTierUsable = true;
+    if (process.stdout?.write) process.stdout.write('[ollamaSearch] client tier probe OK\n');
+    return true;
+  } catch (err) {
+    _clientTierUsable = false;
+    if (process.stdout?.write) process.stdout.write(`[ollamaSearch] client tier probe FAILED (${(err as Error).message.slice(0, 60)}) — skipping client tier this session\n`);
+    return false;
+  }
+}
 
 async function callWebSearch(query: string): Promise<unknown> {
   if (typeof (_ollamaClient as any).webSearch !== 'function') {
@@ -111,11 +129,14 @@ export async function getOllamaSearchResults(query: string, maxResults = 5): Pro
       if (process.stdout?.write) process.stdout.write(`[ollamaSearch/api-key] ${(err as Error).message} — trying JS client\n`);
     }
   } else if (process.stdout?.write) {
-    process.stdout.write('[ollamaSearch] No OLLAMA_API_KEY — using JS client (no key required)\n');
+    process.stdout.write('[ollamaSearch] No OLLAMA_API_KEY — checking JS client tier\n');
   }
-  try {
-    return await searchViaClient(query);
-  } catch (err) {
-    throw new Error(`Both Ollama tiers failed. Last error: ${(err as Error).message}`);
+  if (await probeClientTier()) {
+    try {
+      return await searchViaClient(query);
+    } catch (err) {
+      throw new Error(`Ollama client tier failed: ${(err as Error).message}`);
+    }
   }
+  throw new Error('Ollama search unavailable (no API key, client tier unusable)');
 }

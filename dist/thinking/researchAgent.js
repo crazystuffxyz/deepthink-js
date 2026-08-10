@@ -671,7 +671,7 @@ async function constrainedRepairAgent(callChat, report, allIssues, topic, opts =
     return repaired;
 }
 async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opts = {}) {
-    const maxLoops = opts.maxCritiqueLoops ?? 2;
+    const maxLoops = opts.maxCritiqueLoops ?? 4;
     const issueThreshold = opts.critiqueThreshold ?? 2;
     const severityWeights = { critical: 3, major: 2, minor: 1 };
     const domainInfo = await detectResearchDomain(callChat, topic, opts);
@@ -708,6 +708,14 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
         critiqueHistory.push({ loop, issueCount: allIssues.length, issueScore, criticalCount, expertAssessment: expertCritic?.overallAssessment });
         if (issueScore < issueThreshold && criticalCount === 0) {
             log({ level: 'success', msg: `[CRITIQUE LOOP ${loop}] Issue score below threshold (${issueScore} < ${issueThreshold}) — report accepted`, source: 'researchAgent', ts: Date.now() });
+            break;
+        }
+        // convergence guard: if the last repair pass barely moved the score
+        // (<20% improvement), more loops just burn calls — the report has
+        // reached what this model can fix.
+        const prevScore = critiqueHistory.length > 1 ? critiqueHistory[critiqueHistory.length - 2].issueScore : null;
+        if (prevScore != null && issueScore >= prevScore * 0.8) {
+            log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair converged (score ${prevScore} -> ${issueScore}, <20% improvement) — stopping`, source: 'researchAgent', ts: Date.now() });
             break;
         }
         allIssues.sort((a, b) => (severityWeights[b.severity] || 1) - (severityWeights[a.severity] || 1));

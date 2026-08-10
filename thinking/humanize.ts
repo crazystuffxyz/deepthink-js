@@ -122,7 +122,7 @@ function claimsSurvived(original: string, rewritten: string): string[] {
 }
 
 export async function humanizeText(callChat: any, text: string, opts: any = {}): Promise<any> {
-  const maxIterations = opts.maxIterations ?? 5;
+  const maxIterations = opts.maxIterations ?? 12;
   const threshold = opts.detectorThreshold ?? 0;
   const log = opts.log || (() => {});
   let current = String(text ?? '');
@@ -130,8 +130,15 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
 
   for (let iter = 1; iter <= maxIterations; iter++) {
     log({ level: 'info', msg: `[humanize] iteration ${iter}/${maxIterations} — humanize pass`, source: 'humanize', ts: Date.now() });
+    // feedback loop: the previous detector pass told us exactly what reads
+    // as AI — hand those tells to the humanizer so it targets them instead
+    // of guessing blind every iteration.
+    const lastDet = history.at(-1);
+    const tellsNote = lastDet && lastDet.tells?.length
+      ? `\n\nThe detector flagged these tells in the previous pass — eliminate them specifically:\n${lastDet.tells.map((t: string) => `- ${t}`).join('\n')}`
+      : '';
     const hR = await callChat(
-      [{ role: 'system', content: HUMANIZE_SYS }, { role: 'user', content: current }],
+      [{ role: 'system', content: HUMANIZE_SYS }, { role: 'user', content: current + tellsNote }],
       false, null, { ...opts, think: false, samplingProfile: 'creative' });
     let rewritten = (hR.content || '').trim();
     if (!rewritten || rewritten.length < current.length * 0.3) {
@@ -179,6 +186,14 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
     if (score <= threshold) {
       log({ level: 'success', msg: `[humanize] detector at ${score} <= ${threshold} — done after ${iter} iterations`, source: 'humanize', ts: Date.now() });
       return { text: current, iterations: iter, finalScore: score, history, ok: true };
+    }
+    // plateau guard: if the score stopped improving two passes in a row,
+    // more rewrites just burn calls — the tells feedback has converged.
+    const prev = history.at(-2)?.aiScore;
+    const prev2 = history.at(-3)?.aiScore;
+    if (prev != null && prev2 != null && score >= prev && prev >= prev2) {
+      log({ level: 'warn', msg: `[humanize] score plateaued (${prev2} -> ${prev} -> ${score}) — stopping early`, source: 'humanize', ts: Date.now() });
+      return { text: current, iterations: iter, finalScore: score, history, ok: score <= threshold };
     }
   }
   log({ level: 'warn', msg: `[humanize] hit max iterations (${maxIterations}) — final score ${history.at(-1)?.aiScore ?? '?'}`, source: 'humanize', ts: Date.now() });

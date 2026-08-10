@@ -35,6 +35,11 @@ function yearLike(v) {
 // price") and between the anchor and the number ("price target of $180").
 const PRICE_ANCHORS = ['current price', 'market price', 'last price', 'share price', 'stock price', 'price per share'];
 const PRICE_BANNED_WORDS = ['target', 'forecast', 'guidance', 'projection', 'estimate', 'after-hours', 'after hours', 'afterhours'];
+// MULTIPLE_RE — "trades at 27 times forward earnings" / "27x" / "27x P/E"
+// is a valuation multiple, never a price (run 11 harvested $27.00 from
+// it). word-boundary "times" so "sometimes" doesn't trip it; "x" only
+// when it directly follows the number.
+const MULTIPLE_RE = /^\s*x\b|\btimes\b|forward earnings|multiple|p\/e|pe ratio/i;
 function scanPriceForwardAll(text) {
     const out = [];
     for (const anchor of PRICE_ANCHORS) {
@@ -54,8 +59,11 @@ function scanPriceForwardAll(text) {
                 continue;
             for (const nm of slice.matchAll(/\$?([\d,]+\.?\d*)\s*%?/g)) {
                 const v = parseFloat(nm[1].replace(/[,$]/g, ''));
-                if (!isNaN(v) && !yearLike(v) && !nm[0].includes('%'))
-                    out.push(v);
+                if (isNaN(v) || yearLike(v) || nm[0].includes('%'))
+                    continue;
+                if (MULTIPLE_RE.test(slice.slice(nm.index + nm[0].length, nm.index + nm[0].length + 25)))
+                    continue;
+                out.push(v);
             }
         }
     }
@@ -99,7 +107,9 @@ function harvest(text, anchors, fallbackPattern, banned = []) {
 // prose converge on the same number instead of fighting each other.
 // the banned check also looks 25 chars BEFORE the match: "after-hours price
 // of NVDA is $8.00" starts at "price of", and the qualifier sits outside it.
-function harvestAll(text, anchors, fallbackPattern, banned = []) {
+// postBanned is tested against the 25 chars AFTER the match: "trades at 27
+// times forward earnings" is a P/E multiple, not a price (run 11).
+function harvestAll(text, anchors, fallbackPattern, banned = [], postBanned) {
     const out = [];
     const tryMatch = (a) => {
         const g = new RegExp(a.source, a.flags.replace('g', '') + 'g');
@@ -109,6 +119,8 @@ function harvestAll(text, anchors, fallbackPattern, banned = []) {
                 break;
             const ctx = text.slice(Math.max(0, mm.index - 25), mm.index + mm[0].length).toLowerCase();
             if (banned.some((w) => ctx.includes(w)))
+                continue;
+            if (postBanned && postBanned.test(text.slice(mm.index + mm[0].length, mm.index + mm[0].length + 25)))
                 continue;
             const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
             if (!isNaN(v) && !yearLike(v))
@@ -181,7 +193,7 @@ export function runQuantModel(claims) {
             /(?:trading at|currently at|closed at|trades at|price is|price of|sits at|traded at|quoted at)\s*\$?([\d,]+\.?\d*)/i,
             /(?:trades|trading|closed|sits|quoted)\s+(?:\w+\s+){0,2}(?:around|near|about|for|at)\s*\$?([\d,]+\.?\d*)/i,
             /\$([\d,]+\.\d{2})\s*(?:USD|per share|US\$)/i,
-        ], undefined, PRICE_BANNED_WORDS),
+        ], undefined, PRICE_BANNED_WORDS, MULTIPLE_RE),
         ...scanPriceForwardAll(text),
     ]);
     // EPS must be fractional (6.53) — a bare "2026" after "EPS" is a fiscal

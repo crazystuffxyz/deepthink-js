@@ -109,6 +109,22 @@ function check(name, cond, detail = '') {
   check('price cluster picks ~$217', m.price != null && m.price > 200 && m.price < 230, `got ${m.price}`);
 }
 
+// ---- run-11: "trades at 27 times forward earnings" is a P/E multiple ----
+{
+  const m = runQuantModel([
+    'Nvidia\'s dominant position has led it to trade at 27 times forward earnings.',
+    'Nvidia is trading at $190.04.',
+    'Diluted EPS for fiscal year 2026 stood at $4.43.',
+    'Revenue grew 62% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('P/E multiple NOT harvested as price', m.price === 190.04, `got ${m.price}`);
+  const m2 = runQuantModel(['The stock trades at 27x forward earnings.']);
+  check('27x multiple NOT harvested', m2.price === null, `got ${m2.price}`);
+  const rep = quantConformanceRepair('Nvidia trades at 27 times forward earnings, a premium valuation.', { ok: true, price: 190.04, eps: 4.43, beta: 1.87, sigma: 0.4, costOfEquity: 0.1449, intrinsicValue: 55.36, expectedPrice: 220.0, expectedLogReturn: 0.07, expectedReturn: 0.1449, sharpe: 0.26, var95_1d: 4.7, var99_1d: 6.6, var95_1y: 125.0 });
+  check('conformance leaves P/E multiple alone', rep.includes('27 times forward earnings'), rep);
+}
+
 // ---- clusterPick: a genuinely cheap stock still clusters at its own level ----
 {
   const m = runQuantModel([

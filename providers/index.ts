@@ -3,7 +3,9 @@
 import { Ollama } from 'ollama';
 
 type ChatMessage = { role: string; content: string; images?: string[] };
-type ChatResult = { content: string; thinking: string };
+// token counts + latency are optional extras the ollama client reports;
+// the trace layer reads them when present.
+type ChatResult = { content: string; thinking: string; promptTokens?: number | null; responseTokens?: number | null; latencyMs?: number | null };
 type StreamMeta = { kind: 'content' | 'thinking' };
 type ChatParams = {
   model?: string;
@@ -57,9 +59,15 @@ function buildOllamaClient(opts: ProviderOpts, apiKey: string | null): ProviderC
         const response = await ollamaClient.chat({ ...(chatOpts as Parameters<typeof ollamaClient.chat>[0]), stream: true });
         let text = '', thinking = '';
         let thinkingStarted = false, thinkingEnded = false;
+        let promptTokens = null, responseTokens = null, latencyMs = null;
         for await (const part of response) {
           const th = part?.message?.thinking || '';
           const ct = part?.message?.content || '';
+          if (part?.done) {
+            if (part.prompt_eval_count != null) promptTokens = part.prompt_eval_count;
+            if (part.eval_count != null) responseTokens = part.eval_count;
+            if (part.total_duration != null) latencyMs = part.total_duration / 1e6;
+          }
           if (ollamaOutput) {
             if (th && !thinkingStarted) { onChunk('<think>\n', { kind: 'content' }); thinkingStarted = true; }
             if (th) onChunk(th, { kind: 'content' });
@@ -73,7 +81,7 @@ function buildOllamaClient(opts: ProviderOpts, apiKey: string | null): ProviderC
           if (ct) text += ct;
         }
         if (ollamaOutput && thinkingStarted && !thinkingEnded) onChunk('\n</think>\n\n', { kind: 'content' });
-        return { content: _stripThink(text), thinking: _stripThink(thinking) };
+        return { content: _stripThink(text), thinking: _stripThink(thinking), promptTokens: promptTokens ?? null, responseTokens: responseTokens ?? null, latencyMs: latencyMs ?? null };
       } else {
         const r = await ollamaClient.chat({ ...(chatOpts as Parameters<typeof ollamaClient.chat>[0]), stream: false });
         const ct = r?.message?.content || '';
@@ -87,7 +95,7 @@ function buildOllamaClient(opts: ProviderOpts, apiKey: string | null): ProviderC
             if (ct) onChunk(ct, { kind: 'content' });
           }
         }
-        return { content: _stripThink(ct), thinking: _stripThink(th) };
+        return { content: _stripThink(ct), thinking: _stripThink(th), promptTokens: r?.prompt_eval_count ?? null, responseTokens: r?.eval_count ?? null, latencyMs: r?.total_duration != null ? r.total_duration / 1e6 : null };
       }
     }
   };

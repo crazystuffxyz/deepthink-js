@@ -10,7 +10,7 @@ import { Ollama } from 'ollama';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.resolve(__dirname, '..', '..', 'benchmarks', 'results', 'coding');
-const CRITIQUE_MODEL = 'minimax-m3:cloud';
+const CRITIQUE_MODEL = process.env.BENCH_VERIFIER || 'deepseek-v4-flash:0731-cloud';
 
 const SYSTEM = `You are a strict senior frontend reviewer. You are given a single self-contained HTML file. You score it on 5 axes from 1 to 10 each, integer only. Be ruthless but fair.
 

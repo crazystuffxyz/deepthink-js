@@ -764,8 +764,14 @@ export class Deepthink extends EventEmitter {
       const inputText = messagesToText(input);
       const flowResult = await runCognitiveFlow(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, mergedOpts);
 
+      // answerFormat: 'bracket' — the final answer must land as [value]
+      // on the last line, so extractors (benchmark verify, tools) can
+      // find it unambiguously instead of guessing at prose.
+      const fmtDirective = mergedOpts.answerFormat === 'bracket' && type !== 'json'
+        ? ' End with the final answer in square brackets on the last line, e.g. [42]. Nothing after the closing bracket.'
+        : '';
       const preFinal: ChatMessage[] = [
-        { role: 'system', content: `Extract the final verified answer from this cognitive process log. Match the requested data type: ${mergedOpts.type}. Output ONLY the final answer.` },
+        { role: 'system', content: `Extract the final verified answer from this cognitive process log. Match the requested data type: ${mergedOpts.type}. Output ONLY the final answer.${fmtDirective}` },
         { role: 'user', content: flowResult }
       ];
 
@@ -852,6 +858,15 @@ export class Deepthink extends EventEmitter {
           }
         }
       }
+    }
+    // answerFormat: 'bracket' — same deal as the cognitiveFlow branch:
+    // the final answer must end as [value] on the last line. rides in the
+    // system messages so every revision pass keeps seeing it.
+    if (mergedOpts.answerFormat === 'bracket' && type !== 'json') {
+      finalMessages = insertSystemPrompt(
+        finalMessages,
+        'OUTPUT FORMAT: end your response with the final answer alone on the last line, in square brackets - e.g. [42] or [sqrt(2)/3]. Nothing may follow the closing bracket.'
+      );
     }
     const preFinal = consolidateSystemMessages(finalMessages);
     const isStream = typeof onChunk === 'function';

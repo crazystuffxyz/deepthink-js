@@ -144,7 +144,7 @@ async function chatPlain(client, prompt) {
 async function runOnce(dt, prompt) {
   const myTrace = new TraceStore('flat', 500);
   const r = await withRetry(
-    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS, checkStyle: CHECK_STYLE, _trace: myTrace }),
+    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS, checkStyle: CHECK_STYLE, answerFormat: 'bracket', _trace: myTrace }),
     'dt.generate'
   );
   const answer = typeof r === 'string' ? r : (r && typeof r === 'object') ? (r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r)) : String(r);

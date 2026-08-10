@@ -158,8 +158,9 @@ function extractCandidate(modelText) {
   // [N] anywhere — take the LAST one (final answer)
   const allBrackets = [...t.matchAll(/\[\s*([^\[\]]+?)\s*\]/g)].map((m) => m[1].trim());
   if (allBrackets.length) return stripBrackets(allBrackets[allBrackets.length - 1]);
-  // "Final answer:" prefix
-  const fa = t.match(/(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^\n]+)/i);
+  // "Final answer:" / "Answer is:" prefix — anchored to line start so
+  // "**Verified Answer: 42**" (appended by the pipeline) can't false-match.
+  const fa = t.match(/(?:^|\n)\s*(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^\n]+)/i);
   if (fa) return stripBrackets(fa[1]);
   // else: last non-empty line, stripped of trailing period
   const lines = t.split(/\n/).map((l) => l.trim()).filter(Boolean);
@@ -182,22 +183,47 @@ function normalizeForSympy(s) {
     .replace(/\s+/g, ' ');
 }
 
+// last-ditch prose extraction: "the walk takes 2 minutes" -> "2".
+// only consulted when the primary candidate fails sympy's parser.
+export function extractLastNumber(text) {
+  if (!text) return '';
+  const m = String(text).match(/-?\d+(?:\.\d+)?(?:\s*\/\s*\d+)?/g);
+  return m ? m[m.length - 1].trim() : '';
+}
+
+// try the primary candidate; if it isn't sympy-parseable, retry with the
+// last number buried in the prose (models occasionally skip the format).
+function tryWithFallback(run, modelText, norm) {
+  let r = run(norm);
+  if ((r.reason || '').startsWith('parse:')) {
+    const num = normalizeForSympy(extractLastNumber(modelText));
+    if (num && num !== norm) r = run(num);
+  }
+  return r;
+}
+
 function verify({ row, modelText }) {
   const cand = extractCandidate(modelText);
   const norm = normalizeForSympy(cand);
   if (row.kind === 'math-aime' || row.kind === 'math-aime-short') {
     if (!norm) return { ok: false, reason: 'no model answer' };
-    return runPython(SCRIPT_AIME, [b64(row.answer), b64(norm)]);
+    return tryWithFallback(
+      (n) => runPython(SCRIPT_AIME, [b64(row.answer), b64(n)]),
+      modelText, norm
+    );
   }
   if (row.kind === 'int-definite') {
     if (!norm) return { ok: false, reason: 'no model answer' };
-    return runPython(SCRIPT_INT_DEFINITE, [
-      b64(row.integrand),
-      b64(String(row.lo ?? 0)),
-      b64(String(row.hi ?? 0)),
-      b64(norm),
-      b64(row.gold || row.answer),
-    ]);
+    return tryWithFallback(
+      (n) => runPython(SCRIPT_INT_DEFINITE, [
+        b64(row.integrand),
+        b64(String(row.lo ?? 0)),
+        b64(String(row.hi ?? 0)),
+        b64(n),
+        b64(row.gold || row.answer),
+      ]),
+      modelText, norm
+    );
   }
   if (row.kind === 'int-indefinite') {
     if (!norm) return { ok: false, reason: 'no model answer' };

@@ -1,19 +1,20 @@
 // scripts/benchmarks/freshRun.js
-// plain vs deepthink on the FRESH untrained problem set (benchmarks/data/freshSet.jsonl).
+// plain vs deepthink on an untrained problem set (benchmarks/data/<set>.jsonl).
 // every problem is newly authored — not in any training data, not used to tune
 // any prompt. this is the honest measurement of what deepthink adds.
 //
 // usage:
-//   node scripts/benchmarks/freshRun.js [--model X] [--verifier Y] [--depth N]
-//       [--checks N] [--limit N] [--plain-only] [--dt-only] [--concurrency N]
+//   node scripts/benchmarks/freshRun.js [--set freshSet|freshHard] [--model X]
+//       [--verifier Y] [--depth N] [--checks N] [--limit N] [--plain-only]
+//       [--dt-only] [--concurrency N]
 //
 // output:
-//   benchmarks/results/fresh.csv        (one row per problem per mode)
-//   benchmarks/results/fresh.summary.json
-//   benchmarks/results/fresh.table.md
-//   benchmarks/results/traces/fresh-*.json
+//   benchmarks/results/<set>.csv        (one row per problem per mode)
+//   benchmarks/results/<set>.summary.json
+//   benchmarks/results/<set>.table.md
+//   benchmarks/results/traces/<set>-*.json
 //
-// resume-safe: problems already in fresh.csv are skipped.
+// resume-safe: problems already in <set>.csv are skipped.
 
 import fs from 'fs';
 import path from 'path';
@@ -23,7 +24,6 @@ import Deepthink, { TraceStore } from '../../dist/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..', 'benchmarks');
-const DATA = path.join(ROOT, 'data', 'freshSet.jsonl');
 const RES = path.join(ROOT, 'results');
 const TRACES = path.join(RES, 'traces');
 fs.mkdirSync(RES, { recursive: true });
@@ -34,6 +34,8 @@ function arg(name, def) {
   if (i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--')) return process.argv[i + 1];
   return def;
 }
+const SET = arg('set', 'freshSet');
+const DATA = path.join(ROOT, 'data', SET + '.jsonl');
 const MODEL = arg('model', process.env.BENCH_MODEL || 'gemma4:31b-cloud');
 const CRITIQUE_MODEL = arg('verifier', process.env.BENCH_VERIFIER || 'deepseek-v4-flash:0731-cloud');
 const DEPTH = Number(arg('depth', process.env.BENCH_DEPTH || '2'));
@@ -60,8 +62,8 @@ function parseAnswer(text) {
   // 1. explicit markers: "ANSWER: X", "answer: X", "answer is X", "the answer is X"
   const m = t.match(/(?:ANSWER|answer)\s*:\s*([^\n]+)/i) || t.match(/(?:the\s+)?answer\s+is\s+([^\n.]+)/i);
   if (m) out.push(m[1].trim().replace(/\*\*/g, ''));
-  // 2. last number
-  const nums = t.match(/-?\d+(?:\.\d+)?/g);
+  // 2. last number (comma-aware: "20,000" is one token, not "20" + "000")
+  const nums = t.match(/-?\d[\d,]*(?:\.\d+)?/g);
   if (nums && nums.length) out.push(nums[nums.length - 1]);
   // 3. short bolded segments (not headers, no trailing colon), last first
   const bolds = t.match(/\*\*([^*]+)\*\*/g) || [];
@@ -70,8 +72,9 @@ function parseAnswer(text) {
   for (const c of cands.reverse()) out.push(c);
   // 4. label-value pairs: "**The missing word:** Key." — the value after a
   // bolded label is often the real answer ("Key."), and "**Final Analogy:**
-  // Pencil : Eraser :: Lock : Key." contains it too
-  const labelRe = /\*\*([^*]+?):\*\*\s*([^\n]+)/g;
+  // Pencil : Eraser :: Lock : Key." contains it too. the value stops at the
+  // next bold or sentence end so collapsed-newline text (csv raw) still works
+  const labelRe = /\*\*([^*]+?):\*\*\s*([^*]+?)(?=\*\*|\.\s|$)/g;
   let lm;
   while ((lm = labelRe.exec(t)) !== null) {
     const val = lm[2].trim().replace(/[.。]$/, '');
@@ -112,8 +115,9 @@ function answersMatch(got, gold) {
         if (g.includes('.')) { if (Math.abs(gn - an) < 0.01) return true; }
         else if (gn === an) return true;
       }
-      // semantic zero: "None." / "no change" for a 0 gold (trailing period ok)
-      if (g === '0' && /^(none|zero|no change|nothing|same)\.?$/i.test(a)) return true;
+      // semantic zero: "None." / "no change" / "no missing dollar" for a 0
+      // gold — substring test on normed text so explanations still match
+      if (g === '0' && /none|zero|nochange|nothing|same|nomissingdollar/.test(norm(a))) return true;
       continue;
     }
     // fraction gold: n/d vs decimal, percent, or \frac{n}{d}
@@ -161,13 +165,13 @@ async function runDeepThink(dt, item) {
   const calls = evs.length;
   const phases = {};
   for (const e of evs) phases[e.phase] = (phases[e.phase] || 0) + 1;
-  fs.writeFileSync(path.join(TRACES, `fresh-${item.id}.json`), JSON.stringify({ id: item.id, calls, tokens, ms: Date.now() - t0, phases, events: evs }, null, 2), 'utf-8');
+  fs.writeFileSync(path.join(TRACES, `${SET}-${item.id}.json`), JSON.stringify({ id: item.id, calls, tokens, ms: Date.now() - t0, phases, events: evs }, null, 2), 'utf-8');
   const parsed = parseAnswer(text);
   return { answer: parsed[0] ?? null, candidates: parsed, raw: text, ms: Date.now() - t0, tokens, calls, phases };
 }
 
 // ---- csv ----
-const CSV = path.join(RES, 'fresh.csv');
+const CSV = path.join(RES, SET + '.csv');
 const csvHeader = 'id,kind,mode,answer,gold,ok,ms,tokens,calls,raw';
 function csvEscape(s) {
   const t = String(s ?? '').replace(/\r?\n/g, ' ').slice(0, 2000);
@@ -194,10 +198,10 @@ function loadDone() {
         out.plainOk = answersMatch(p.candidates ?? p.answer, item.answer);
         if (out.plainOk) plainOk++;
         plainN++;
-        process.stdout.write(`[fresh] ${item.id} plain: ${out.plainOk ? 'OK' : 'X'} got=${p.answer} gold=${item.answer} (${p.ms}ms)\n`);
+        process.stdout.write(`[${SET}] ${item.id} plain: ${out.plainOk ? 'OK' : 'X'} got=${p.answer} gold=${item.answer} (${p.ms}ms)\n`);
       } catch (e) {
         out.plain = { error: e.message };
-        process.stdout.write(`[fresh] ${item.id} plain ERR: ${e.message}\n`);
+        process.stdout.write(`[${SET}] ${item.id} plain ERR: ${e.message}\n`);
       }
     }
     if (!DT_ONLY && !done.has(item.id + '|dt')) {
@@ -207,10 +211,10 @@ function loadDone() {
         out.dtOk = answersMatch(d.candidates ?? d.answer, item.answer);
         if (out.dtOk) dtOk++;
         dtN++;
-        process.stdout.write(`[fresh] ${item.id} dt: ${out.dtOk ? 'OK' : 'X'} got=${d.answer} gold=${item.answer} (${d.ms}ms, ${d.calls} calls, ${d.tokens} tok)\n`);
+        process.stdout.write(`[${SET}] ${item.id} dt: ${out.dtOk ? 'OK' : 'X'} got=${d.answer} gold=${item.answer} (${d.ms}ms, ${d.calls} calls, ${d.tokens} tok)\n`);
       } catch (e) {
         out.dt = { error: e.message };
-        process.stdout.write(`[fresh] ${item.id} dt ERR: ${e.message}\n`);
+        process.stdout.write(`[${SET}] ${item.id} dt ERR: ${e.message}\n`);
       }
     }
     rows.push(out);
@@ -242,7 +246,7 @@ function loadDone() {
     dt: { n: dRows.length, correct: dOk, pct: dRows.length ? +(dOk / dRows.length * 100).toFixed(1) : 0 },
     delta: dRows.length && pRows.length ? +(dOk / dRows.length * 100 - pOk / pRows.length * 100).toFixed(1) : 0,
   };
-  fs.writeFileSync(path.join(RES, 'fresh.summary.json'), JSON.stringify(summary, null, 2), 'utf-8');
+  fs.writeFileSync(path.join(RES, SET + '.summary.json'), JSON.stringify(summary, null, 2), 'utf-8');
 
   // markdown table
   const kinds = [...new Set(allRows.map((r) => r.kind))];
@@ -253,10 +257,10 @@ function loadDone() {
     md.push(`| ${k} | ${pn}/${pk.length} | ${dn}/${dk.length} | ${dk.length ? '+' + (dn / dk.length * 100 - pn / Math.max(pk.length, 1) * 100).toFixed(0) : ''} |`);
   }
   md.push(`| **total** | **${pOk}/${pRows.length}** | **${dOk}/${dRows.length}** | **+${summary.delta}** |`);
-  fs.writeFileSync(path.join(RES, 'fresh.table.md'), md.join('\n'), 'utf-8');
+  fs.writeFileSync(path.join(RES, SET + '.table.md'), md.join('\n'), 'utf-8');
 
   console.log('\n' + md.join('\n'));
-  console.log(`\n[fresh] plain ${pOk}/${pRows.length} (${summary.plain.pct}%) | dt ${dOk}/${dRows.length} (${summary.dt.pct}%) | delta +${summary.delta} pts`);
-  console.log(`[fresh] saved ${CSV}`);
+  console.log(`\n[${SET}] plain ${pOk}/${pRows.length} (${summary.plain.pct}%) | dt ${dOk}/${dRows.length} (${summary.dt.pct}%) | delta +${summary.delta} pts`);
+  console.log(`[${SET}] saved ${CSV}`);
   process.exit(0);
-})().catch((e) => { console.error('[fresh] fatal:', e); process.exit(1); });
+})().catch((e) => { console.error('[${SET}] fatal:', e); process.exit(1); });

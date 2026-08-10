@@ -827,9 +827,11 @@ export class Deepthink extends EventEmitter {
           try {
             const results = await Promise.all(needs.tasks!.map(t => this.limiter.add(() => callCode(t))));
             const combined = results.map((r, i) => `Task ${i + 1}: ${needs.tasks![i]}\nResult: ${r.result}`).join('\n\n');
-            codeExec = { result: results.map(r => r.result).join(' | '), sandboxValidated: true };
-            sandboxPrefix = [{ role: 'system', content: sandbox + `PARALLEL SANDBOX RESULTS${combined}\n\nDo NOT contradict these values.` }];
-            finalMessages = [...(thinkCtxMsg ? [thinkCtxMsg] : []), { role: 'user', content: `Original: ${inputText}` }];
+            // a parallel batch is validated only if EVERY subtask was
+            // independently cross-validated; one weak link poisons the lot.
+            const allValidated = results.every(r => r.sandboxValidated);
+            codeExec = { result: results.map(r => r.result).join(' | '), sandboxValidated: allValidated };
+            sandboxPrefix = [{ role: 'system', content: sandbox + `PARALLEL SANDBOX RESULTS${combined}\n\n${allValidated ? 'These values are cross-validated. Do NOT contradict them.' : 'Treat these as candidate results — verify before finalizing.'}` }];
           } catch (e: unknown) {
             finalMessages = insertSystemPrompt(finalMessages, `PARALLEL CODE FAILED: ${(e as Error).message}. Use reasoning.`);
           }
@@ -837,8 +839,14 @@ export class Deepthink extends EventEmitter {
           try {
             codeExec = await callCode(needs.task);
             if (brain) brain.add('code_result', `${needs.task} = ${codeExec.result}`, 10);
-            sandboxPrefix = [{ role: 'system', content: sandbox + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\nThis value is CERTAIN. Your answer MUST state [${codeExec.result}] exactly.` }];
-            finalMessages = [...(thinkCtxMsg ? [thinkCtxMsg] : []), { role: 'user', content: `Original: ${inputText}` }];
+            const validated = !!codeExec.sandboxValidated;
+            sandboxPrefix = [{
+              role: 'system',
+              content: sandbox + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\n` +
+                (validated
+                  ? 'This value is cross-validated by independent implementations. Your answer MUST state [' + codeExec.result + '] exactly.'
+                  : 'This is a candidate result from one implementation — independently verify it before finalizing.'),
+            }];
           } catch (e: unknown) {
             finalMessages = insertSystemPrompt(finalMessages, `CODE FAILED: ${(e as Error).message}. Use reasoning.`);
           }

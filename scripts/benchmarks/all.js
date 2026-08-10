@@ -33,7 +33,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import PQueue from 'p-queue';
-import Deepthink, { TraceStore } from '../../dist/index.js';
+import Deepthink, { TraceStore, runPythonSandbox } from '../../dist/index.js';
 import { verify } from './verify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -76,6 +76,10 @@ const BENCH_PLAN = [
   { bench: 'usamo-2024', file: 'usamo-2024.jsonl', label: 'USAMO 2024', limit: 6, exact: true },
   { bench: 'imo-2024', file: 'imo-2024.jsonl', label: 'IMO 2024', limit: 6, exact: true },
   { bench: 'integration-bee', file: 'integrationBee.jsonl', label: 'Integration Bee', limit: 2, exact: true },
+  // MBPP = python code-gen. the hidden tests assert on a specific function
+  // name, so the prompt names it (calling contract, not an answer leak).
+  // verification runs the model's code + asserts through the python sandbox.
+  { bench: 'mbpp', file: 'mbpp.jsonl', label: 'MBPP', limit: 5, exact: false },
 ];
 
 function loadBench(name) {
@@ -102,6 +106,51 @@ function buildPrompt(row, exact) {
     p += EXACT_SUFFIX;
   }
   return p;
+}
+
+// MBPP: the hidden tests call a specific function name that the problem
+// text doesn't state (e.g. remove_Occ). name it in the prompt — that's the
+// calling contract, same as real MBPP evals. never an answer leak.
+function mbppName(row) {
+  const m = (row.tests || [])[0]?.match(/assert\s+(\w+)\s*\(/);
+  return m ? m[1] : '';
+}
+
+// pull the code out of a model response: first fenced block, else the whole
+// text minus any trailing [bracket] answer line.
+function codeFromText(text) {
+  if (!text) return '';
+  const s = String(text);
+  const fence = s.match(/```(?:python)?\s*\n([\s\S]*?)```/);
+  if (fence) return fence[1];
+  return s.replace(/\[\s*[^\]]*\s*\]\s*$/m, '').trim();
+}
+
+// run the model's code against the row's hidden asserts in the python
+// sandbox. exact-name pass first; if the model picked a differently-cased
+// def name, retry with the tests re-pointed at it (still same logic — the
+// casing mismatch is a naming artifact, not a solution defect).
+async function verifyCode(row, modelText) {
+  const code = codeFromText(modelText);
+  if (!code) return { ok: false, reason: 'no code found' };
+  const tests = row.tests || [];
+  const script = [row.test_setup || '', code, ...tests].join('\n');
+  const runs = [script];
+  const defName = code.match(/def\s+(\w+)/)?.[1];
+  const wantName = mbppName(row);
+  if (defName && wantName && defName !== wantName) {
+    runs.push([row.test_setup || '', code, ...tests.map((t) => t.split(wantName).join(defName))].join('\n'));
+  }
+  let lastErr = 'tests failed';
+  for (const s of runs) {
+    try {
+      await runPythonSandbox(s);
+      return { ok: true, reason: 'tests pass' };
+    } catch (e) {
+      lastErr = String(e.message || e).slice(0, 80);
+    }
+  }
+  return { ok: false, reason: lastErr };
 }
 
 async function withTimeout(fn, ms) {
@@ -148,14 +197,21 @@ async function chatPlain(client, prompt) {
 // run with a caller-owned TraceStore so concurrent problems never race
 // on the shared dt._lastTrace. the store survives retries and is returned
 // for the telemetry writer.
-async function runOnce(dt, prompt) {
+async function runOnce(dt, prompt, opts = {}) {
   const myTrace = new TraceStore('flat', 500);
   const r = await withRetry(
-    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS, checkStyle: CHECK_STYLE, answerFormat: 'bracket', _trace: myTrace }),
+    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS, checkStyle: CHECK_STYLE, answerFormat: 'bracket', _trace: myTrace, ...opts }),
     'dt.generate'
   );
   const answer = typeof r === 'string' ? r : (r && typeof r === 'object') ? (r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r)) : String(r);
   return { answer, trace: myTrace };
+}
+
+// code plans (mbpp) don't want the [value] bracket directive — the answer
+// IS the code block — and their correctness is test-execution, not sympy.
+function verifyAnswer(plan, row, modelText) {
+  if (plan.bench === 'mbpp') return verifyCode(row, modelText);
+  return verify({ row, modelText });
 }
 
 // extract 4-dimension telemetry from a finished trace. returns zeros when
@@ -181,7 +237,10 @@ function traceStats(store) {
 }
 
 async function processOne(plain, dt, plan, row) {
-  const prompt = buildPrompt(row, plan.exact);
+  const isCode = plan.bench === 'mbpp';
+  const name = mbppName(row);
+  let prompt = buildPrompt(row, plan.exact);
+  if (isCode && name) prompt += `\n\nDefine it as a function named exactly \`${name}\` (same spelling and casing) and nothing else.`;
   const traceDir = path.join(RES, 'traces');
 
   // plain
@@ -193,7 +252,7 @@ async function processOne(plain, dt, plan, row) {
     const t0 = Date.now();
     plainA = await chatPlain(plain, prompt);
     pSec = (Date.now() - t0) / 1000;
-    pVerify = verify({ row, modelText: plainA });
+    pVerify = verifyAnswer(plan, row, plainA);
     pOk = pVerify.ok ? 1 : 0;
   } catch (e) {
     plainA = `ERR: ${e.message}`;
@@ -208,10 +267,10 @@ async function processOne(plain, dt, plan, row) {
   let tr = traceStats(null);
   try {
     const t0 = Date.now();
-    const once = await runOnce(dt, prompt);
+    const once = await runOnce(dt, prompt, isCode ? { answerFormat: undefined } : {});
     dtA = once.answer;
     dSec = (Date.now() - t0) / 1000;
-    dVerify = verify({ row, modelText: dtA });
+    dVerify = verifyAnswer(plan, row, dtA);
     dOk = dVerify.ok ? 1 : 0;
     tr = traceStats(once.trace);
     // persist the raw trace for offline reasoning-quality scoring

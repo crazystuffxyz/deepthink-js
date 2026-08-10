@@ -12,6 +12,7 @@
   },
   "files": [
     "dist",
+    "src",
     "README.md",
     "CHANGELOG.md"
   ],
@@ -24,11 +25,14 @@
     "evolve": "node scripts/evolve.js",
     "apply-best": "node scripts/applyBest.js",
     "probe": "node scripts/probeGeneralize.js",
-    "probe-ood": "node scripts/probeOOD.js"
+    "probe-ood": "node scripts/probeOOD.js",
+    "proxy": "node src/proxy.js",
+    "mcp": "node src/mcp.js"
   },
   "dependencies": {
     "@babel/parser": "^7.29.2",
     "@iarna/rtf-to-html": "^1.1.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@mozilla/readability": "^0.6.0",
     "axios": "^1.15.2",
     "cheerio": "^1.2.0",
@@ -36,6 +40,7 @@
     "ejs": "^5.0.2",
     "electron": "^41.5.0",
     "fast-xml-parser": "^5.7.3",
+    "fastify": "^5.11.3",
     "impit": "^0.13.1",
     "isolated-vm": "^6.2.0",
     "java-parser": "^3.0.1",

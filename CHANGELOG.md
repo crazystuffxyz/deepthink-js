@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.2
+
+### Fixed
+- **Quant section injected after humanize** — run 10: the humanize loop ran *after* the computed quant section was injected and paraphrased code-computed math ("volatility: NOT FOUND" became "volatility: 08, 24, 28, 29"). The section now lands after the humanize loop, so no LLM pass (critic, repair, or humanizer) can touch it.
+- **Quote recovery covers all missing inputs** — the recovery crawl only fired on a missing *price* and only asked for quotes. It now triggers on any missing input (price, EPS, beta) and issues per-field phrasings ("diluted EPS trailing twelve months", "beta 5 year monthly") at higher concurrency. Run 10's main crawl surfaced only industry articles, so all three were missing and the model died.
+
 ## v1.8.1
 
 ### Fixed

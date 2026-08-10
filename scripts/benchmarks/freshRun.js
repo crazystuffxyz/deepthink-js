@@ -47,19 +47,29 @@ const problems = fs.readFileSync(DATA, 'utf-8').split('\n').filter(Boolean).map(
 const selected = LIMIT > 0 ? problems.slice(0, LIMIT) : problems;
 
 // ---- answer parsing ----
-const ANSWER_RE = /ANSWER:\s*([^\n]+)/i;
+// the model does not always obey "ANSWER: X" — it writes "answer is **Eating**",
+// "Star is to **Galaxy**", "The next number is **Nine**". so parseAnswer
+// returns a LIST of candidate answers (marker value, last number, short bolded
+// segments, bracketed value) and answersMatch tries each against the gold.
+const HEADER_RE = /^(by|recap|reasoning|explanation|analysis|conclusion|solution|answer|step|note|source|known|goal|constraint|reconstructed|diff|sanity|alternative|strategy|working|backward|structure|consolidated|response|approach|method|verification|check|final|wait|hmm|actually|first|second|third|addition|square|interleaved|remaining|give|eat)/i;
 function parseAnswer(text) {
-  let t = String(text || '').trim();
-  // strip markdown formatting that wraps the answer: **7.5**, `7.5`, [7.5]
-  t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1');
-  const m = t.match(ANSWER_RE);
-  if (m) return m[1].trim().replace(/\*\*/g, '');
-  // last bracketed value, else last number
-  const b = t.match(/\[([^\]]+)\]\s*$/);
-  if (b) return b[1].trim();
+  const t = String(text || '').trim();
+  const out = [];
+  // 1. explicit markers: "ANSWER: X", "answer: X", "answer is X", "the answer is X"
+  const m = t.match(/(?:ANSWER|answer)\s*:\s*([^\n]+)/i) || t.match(/(?:the\s+)?answer\s+is\s+([^\n.]+)/i);
+  if (m) out.push(m[1].trim().replace(/\*\*/g, ''));
+  // 2. last number
   const nums = t.match(/-?\d+(?:\.\d+)?/g);
-  if (nums) return nums[nums.length - 1];
-  return null;
+  if (nums && nums.length) out.push(nums[nums.length - 1]);
+  // 3. short bolded segments (not headers, no trailing colon), last first
+  const bolds = t.match(/\*\*([^*]+)\*\*/g) || [];
+  const cands = bolds.map((b) => b.replace(/\*\*/g, '').trim())
+    .filter((c) => c && c.length <= 25 && !HEADER_RE.test(c) && !/:$/.test(c));
+  for (const c of cands.reverse()) out.push(c);
+  // 4. last bracketed value
+  const b = t.match(/\[([^\]]+)\]\s*$/);
+  if (b) out.push(b[1].trim());
+  return out;
 }
 
 function norm(s) {
@@ -70,21 +80,47 @@ function isNumeric(s) {
   return s != null && /^-?\d+(\.\d+)?$/.test(String(s).trim());
 }
 
+// "$20,000" / "20,000" / "20 000" → 20000
+function toNum(s) {
+  const t = String(s).replace(/[$,\s%]/g, '');
+  return /^-?\d+(\.\d+)?$/.test(t) ? parseFloat(t) : NaN;
+}
+
 function answersMatch(got, gold) {
   if (got == null || gold == null) return false;
   const g = String(gold).trim();
-  const a = String(got).trim();
-  if (isNumeric(g) && isNumeric(a)) {
-    const gn = parseFloat(g), an = parseFloat(a);
-    if (g.includes('.')) return Math.abs(gn - an) < 0.01;
-    return gn === an;
+  const candidates = Array.isArray(got) ? got : [got];
+  for (const a0 of candidates) {
+    const a = String(a0).trim();
+    if (a === '') continue; // empty answer must never match anything
+    if (isNumeric(g)) {
+      // numeric gold: exact or tolerance only — no substring games
+      const an = toNum(a);
+      if (isFinite(an)) {
+        const gn = parseFloat(g);
+        if (g.includes('.')) { if (Math.abs(gn - an) < 0.01) return true; }
+        else if (gn === an) return true;
+      }
+      // semantic zero: "None." / "no change" for a 0 gold
+      if (g === '0' && /^(none|zero|no change|nothing|same)$/i.test(a)) return true;
+      continue;
+    }
+    // fraction gold: n/d vs decimal, percent, or \frac{n}{d}
+    const gfrac = g.match(/^(\d+)\/(\d+)$/);
+    if (gfrac) {
+      const gd = parseInt(gfrac[1], 10) / parseInt(gfrac[2], 10);
+      const af = a.match(/^(\d+)\/(\d+)$/);
+      if (af) { if (Math.abs(parseInt(af[1], 10) / parseInt(af[2], 10) - gd) < 0.01) return true; continue; }
+      const latex = a.match(/\\frac\{(\d+)\}\{(\d+)\}/);
+      if (latex) { if (Math.abs(parseInt(latex[1], 10) / parseInt(latex[2], 10) - gd) < 0.01) return true; continue; }
+      const pct = a.match(/^(\d+(?:\.\d+)?)%$/);
+      if (pct) { if (Math.abs(parseFloat(pct[1], 10) / 100 - gd) < 0.01) return true; continue; }
+      if (isNumeric(a)) { if (Math.abs(parseFloat(a) - gd) < 0.01) return true; continue; }
+      continue;
+    }
+    if (norm(a) === norm(g) || norm(a).includes(norm(g)) || norm(g).includes(norm(a))) return true;
   }
-  // fraction support: 3/8 vs 0.375
-  const frac = a.match(/^(\d+)\/(\d+)$/);
-  if (frac && isNumeric(g)) {
-    return Math.abs(parseInt(frac[1], 10) / parseInt(frac[2], 10) - parseFloat(g)) < 0.01;
-  }
-  return norm(a) === norm(g) || norm(a).includes(norm(g)) || norm(g).includes(norm(a));
+  return false;
 }
 
 // ---- runners ----
@@ -97,7 +133,8 @@ async function runPlain(dt, item) {
     false, null,
     { think: false, autoSystemPrompt: false, temperature: 0.2 }
   );
-  return { answer: parseAnswer(r.content), raw: r.content, ms: Date.now() - t0, tokens: r.usage?.total_tokens ?? 0 };
+  const parsed = parseAnswer(r.content);
+  return { answer: parsed[0] ?? null, candidates: parsed, raw: r.content, ms: Date.now() - t0, tokens: r.usage?.total_tokens ?? 0 };
 }
 
 async function runDeepThink(dt, item) {
@@ -114,7 +151,8 @@ async function runDeepThink(dt, item) {
   const phases = {};
   for (const e of evs) phases[e.phase] = (phases[e.phase] || 0) + 1;
   fs.writeFileSync(path.join(TRACES, `fresh-${item.id}.json`), JSON.stringify({ id: item.id, calls, tokens, ms: Date.now() - t0, phases, events: evs }, null, 2), 'utf-8');
-  return { answer: parseAnswer(text), raw: text, ms: Date.now() - t0, tokens, calls, phases };
+  const parsed = parseAnswer(text);
+  return { answer: parsed[0] ?? null, candidates: parsed, raw: text, ms: Date.now() - t0, tokens, calls, phases };
 }
 
 // ---- csv ----
@@ -142,7 +180,7 @@ function loadDone() {
       try {
         const p = await runPlain(dt, item);
         out.plain = p;
-        out.plainOk = answersMatch(p.answer, item.answer);
+        out.plainOk = answersMatch(p.candidates ?? p.answer, item.answer);
         if (out.plainOk) plainOk++;
         plainN++;
         process.stdout.write(`[fresh] ${item.id} plain: ${out.plainOk ? 'OK' : 'X'} got=${p.answer} gold=${item.answer} (${p.ms}ms)\n`);
@@ -155,7 +193,7 @@ function loadDone() {
       try {
         const d = await runDeepThink(dt, item);
         out.dt = d;
-        out.dtOk = answersMatch(d.answer, item.answer);
+        out.dtOk = answersMatch(d.candidates ?? d.answer, item.answer);
         if (out.dtOk) dtOk++;
         dtN++;
         process.stdout.write(`[fresh] ${item.id} dt: ${out.dtOk ? 'OK' : 'X'} got=${d.answer} gold=${item.answer} (${d.ms}ms, ${d.calls} calls, ${d.tokens} tok)\n`);

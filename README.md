@@ -17,6 +17,7 @@
   - [New Reasoning Modes](#new-reasoning-modes)
   - [`generateAndRunProject()` (via codeGenerator)](#generateandrunproject-via-codegenerator)
 - [Research Agent](#research-agent)
+- [Proxy & MCP Integration](#proxy--mcp-integration)
 - [Internet Utilities](#internet-utilities)
 - [Electron Free Explorer](#electron-free-explorer)
 - [Testing](#testing)
@@ -741,6 +742,112 @@ runDeepResearch()
 ├── Step 6  reportWriterAgent()
 └── Steps 7–9  critiqueAndRepairLoop()
 ```
+
+---
+
+## Proxy & MCP Integration
+
+Deepthink ships as a local server too: an OpenAI/Anthropic-compatible HTTP proxy and a Model Context Protocol (MCP) server. Any tool that speaks OpenAI or Anthropic wire formats — Cursor, Aider, Claude Code, ChatGPT UI, custom scripts — can use deepthink-js as a drop-in backend, and any MCP client (Claude Desktop, Cursor, Claude Code) can call `deepthink_reason` as a tool.
+
+### HTTP proxy
+
+```bash
+npm run proxy          # or: node src/proxy.js
+```
+
+Listens on `http://127.0.0.1:8000` (override with `PORT` / `HOST` env vars) and serves:
+
+| Endpoint | Format | Purpose |
+|---|---|---|
+| `POST /v1/chat/completions` | OpenAI | chat completions, streaming + non-streaming |
+| `GET /v1/models` | OpenAI | model list |
+| `POST /v1/messages` | Anthropic | messages API, streaming + non-streaming |
+| `GET/POST/DELETE /mcp` | MCP streamable HTTP | MCP server over HTTP |
+| `GET /health` | — | liveness + in-flight count |
+
+Requests are routed through the full deepthink pipeline: parallel probes, MCTS-style search, sandboxed code verification, and the self-correction check loop. The `model` field in the request body is ignored — the engine model comes from `DEEPTHINK_MODEL` (or `OLLAMA_MODEL`), overridable per request via the `x-deepthink-model` header.
+
+**Pointing tools at it:**
+
+- **Cursor** — Settings → Models → OpenAI API Key: any value, Base URL: `http://localhost:8000/v1`
+- **Aider** — `aider --openai-api-base http://localhost:8000/v1 --openai-api-key dummy`
+- **Claude Code** — `ANTHROPIC_BASE_URL=http://localhost:8000 ANTHROPIC_API_KEY=dummy claude`
+- **Any OpenAI SDK** — set `baseURL` to `http://localhost:8000/v1`
+
+**Streaming** — `"stream": true` returns real SSE: the final synthesis call streams token-by-token through the pipeline's `onChunk` hook, framed as standard OpenAI chunks (`data: {...}` + `data: [DONE]`) or Anthropic events (`message_start` → `content_block_delta` → `message_stop`). A keep-alive comment is written every 15s while the engine thinks, so long MCTS searches survive proxy idle timeouts.
+
+**Thinking traces** — send `x-deepthink-trace: true` to get the internal reasoning back:
+
+- OpenAI: `message.reasoning_content` (non-streaming) or a `reasoning_content` delta chunk (streaming), plus the full call trace under `_deepthink.trace`
+- Anthropic: a `thinking` content block
+- Every response carries `x-deepthink-trace-id`, `x-deepthink-calls`, and `x-deepthink-ms` headers
+
+**Deepthink knobs** — per-request via a `deepthink` object in the body or `x-deepthink-*` headers:
+
+```json
+{
+  "model": "gpt-4o",
+  "messages": [{ "role": "user", "content": "Solve this IMO problem..." }],
+  "deepthink": { "depth": 2, "checks": 2, "type": "string", "enableCode": true }
+}
+```
+
+| Knob | Body field | Header | Default |
+|---|---|---|---|
+| reasoning depth (0–3) | `deepthink.depth` | `x-deepthink-depth` | 1 |
+| check-loop passes (0–5) | `deepthink.checks` | `x-deepthink-checks` | 1 |
+| output type | `deepthink.type` | — | `string` |
+| sandboxed code execution | `deepthink.enableCode` | — | `true` |
+| engine model | `deepthink.model` | `x-deepthink-model` | `DEEPTHINK_MODEL` |
+
+**Env vars:** `PORT` (8000), `HOST` (127.0.0.1), `DEEPTHINK_MODEL`, `DEEPTHINK_MAX_INFLIGHT` (8 — beyond this, requests get 429), `DEEPTHINK_API_KEY` (optional bearer auth; when set, every request needs `Authorization: Bearer <key>`).
+
+### MCP server
+
+Two transports, one tool: `deepthink_reason` — *"Executes deep test-time compute reasoning, sandboxed code verification, MCTS tree search, and adversarial critique to solve hard mathematical, algorithmic, or multi-file coding problems."*
+
+| Input | Type | Default | Meaning |
+|---|---|---|---|
+| `prompt` | string | — | the problem or question (required) |
+| `type` | string | `string` | `string` \| `integer` \| `double` \| `boolean` \| `json` |
+| `depth` | number | 1 | reasoning depth 0–3 |
+| `enableCode` | boolean | `true` | allow sandboxed code execution |
+
+**Stdio** (Claude Desktop, Cursor CLI, Claude Code):
+
+```bash
+npm run mcp          # or: node src/mcp.js
+```
+
+**Claude Desktop** — Settings → Developer → Edit Config, add to `claude_desktop_config.json` (Windows: `%APPDATA%\Claude\claude_desktop_config.json`; use absolute paths — Claude Desktop doesn't inherit your shell PATH):
+
+```json
+{
+  "mcpServers": {
+    "deepthink": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["C:\\path\\to\\deepthink-js\\src\\mcp.js"]
+    }
+  }
+}
+```
+
+Fully restart Claude Desktop after editing. Logs land in `%APPDATA%\Claude\logs\`.
+
+**Cursor** — `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "deepthink": {
+      "command": "node",
+      "args": ["C:\\path\\to\\deepthink-js\\src\\mcp.js"]
+    }
+  }
+}
+```
+
+**Over HTTP** — the proxy exposes the same server at `http://localhost:8000/mcp` (MCP streamable HTTP transport, session-based). Point any MCP client that supports remote servers at that URL. The stdio server exits cleanly when stdin closes; stdout carries only MCP frames, so logs go to stderr.
 
 ---
 

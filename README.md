@@ -628,30 +628,44 @@ Tests default to `gemma4:31b-cloud`. Override with `DEEPTHINK_TEST_MODEL=... npm
 
 ## Benchmarks
 
-Public benchmark numbers against `gemma4:31b-cloud` on Ollama, comparing
-a single direct chat call ("plain") against the same model wrapped in
-`Deepthink.generate(prompt, { depth: 3, checks: 2 })`. Questions were
-pulled from the official public sources (no training-data recall):
-**[AIME 2024](https://huggingface.co/datasets/Maxwell-Jia/AIME_2024)**,
-**[GSM8K](https://github.com/openai/grade-school-math)**,
-and **[MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500)**.
+Head-to-head against `gemma4:31b-cloud` on Ollama: a single direct chat
+call ("plain") vs the same model wrapped in
+`Deepthink.generate(prompt, { depth: 2, checks: 2 })`. Problems come from
+official public sources (AIME 2024/2023, USAMO 2024, IMO 2024, MIT
+Integration Bee, MBPP) — never given to the model with answers. Answers are
+verified exactly (sympy-backed, prose-number fallback) or by running hidden
+tests in the sandbox (MBPP). The verifier model is
+`deepseek-v4-flash:0731-cloud`, used only for critique/checks — it never
+sees the gold answer.
 
-Run with:
 ```bash
-node scripts/benchmarks/run.js --bench all --depth 3 --checks 2
+node scripts/benchmarks/all.js                 # full run (AIME, USAMO, IMO, bee, MBPP, coding)
+node scripts/benchmarks/checkModes.js          # self-correction experiment (full/blind/zero)
+node scripts/benchmarks/compare.js             # old-vs-new pipeline table
 ```
 
-Raw per-row output is in [`benchmarks/results.csv`](benchmarks/results.csv).
+Raw per-row output (CSV, resume-safe) is in
+[`benchmarks/results/all.csv`](benchmarks/results/all.csv).
 
-| Benchmark | Source | n | Plain | Deepthink (d=3, c=2) | Δ |
-|---|---|---:|---:|---:|---:|
-| AIME 2024  | Maxwell-Jia/AIME_2024 | 30 | _running_ | _running_ | _running_ |
-| GSM8K      | openai/grade-school-math | 200 | _running_ | _running_ | _running_ |
-| MATH-500   | HuggingFaceH4/MATH-500 | 200 | _running_ | _running_ | _running_ |
+| Benchmark | n | Plain | Deepthink (d=2, c=2) | Δ | self-corrected |
+|---|---:|---:|---:|---:|---:|
+| AIME 2024 I  | 5 | 4/5 | **5/5** | +1 | 2 |
+| AIME 2024 II | 5 | 5/5 | 5/5 | 0 | 1 |
+| AIME 2023 I  | 5 | 4/5 | 4/5 | 0 | 0 |
+| USAMO 2024   | 6 | 3/6 | 3/6 | 0 | 3 |
+| IMO 2024     | 6 | 6/6 | 6/6 | 0 | 6 |
+| Integration Bee | 2 | 1/2 | 1/2 | 0 | 0 |
+| MBPP (code-gen) | 5 | 4/5 | 4/5 | 0 | 0 |
+| Coding (HTML critique) | 1 | 37/50 | **41/50** | +4 | — |
+| **Total (math)** | **29** | **23/29 (79%)** | **24/29 (83%)** | **+1** | **12** |
 
-> Numbers above are placeholders — the harness writes
-> `benchmarks/results.csv` and `benchmarks/results.summary.json` after
-> each run. The README table is regenerated from those files.
+Deepthink's win condition is the revert rule: any pipeline change must
+improve ≥2 of the 4 measured dimensions (correctness, reasoning-trace
+quality, self-correction, token efficiency) and worsen none. The current
+pipeline lands +1 on AIME 2024-I (5/5 vs 4/5), matches everywhere else,
+and self-corrects 11 problems — while the check-loop escapes cut IMO
+token burn from 173–253k/problem (v1.4, escape bug) to ~22k with ≤2
+revisions. Full per-run logs land in `benchmarks/results/`.
 
 ---
 

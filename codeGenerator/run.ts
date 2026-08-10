@@ -590,25 +590,95 @@ async function oracleFixLoop(callChat: any, files: Record<string, string>, oracl
   return updatedFiles;
 }
 
+// one cheap call that decides how deep the pipeline goes. a single-file
+// "hello world" must not pay for package docs + architecture + PM + UX +
+// security + deployment agents (6-8 wasted LLM calls). only "large" tasks
+// get the full 12-step treatment.
+export async function classifyTaskComplexity(callChat: any, task: string, opts: any = {}): Promise<{ level: 'small' | 'medium' | 'large'; backend: boolean; frontend: boolean; packages: string[]; reason: string }> {
+  try {
+    const r = await callChat(
+      [{ role: 'system', content:
+        'You are a project complexity classifier for a Node.js code generator.\n' +
+        'Classify the task into exactly one of:\n' +
+        '  - "small": single file / single page / trivial UI component / simple script. No backend, no database, no auth, no state.\n' +
+        '  - "medium": multi-file app, OR a backend API, OR a database, OR moderate interactivity. Not deployment-grade.\n' +
+        '  - "large": full-stack app with auth/db/sessions, or many pages + API + persistence, or anything needing production hardening.\n\n' +
+        'Also list any npm packages you are CERTAIN the task needs (empty array if none).\n' +
+        'Output ONLY valid JSON:\n' +
+        '{"level":"small|medium|large","backend":true|false,"frontend":true|false,"packages":["..."],"reason":"one line"}' },
+       { role: 'user', content: `Task: ${task}` }],
+      false, null, { ...opts, think: false, samplingProfile: 'json' }
+    );
+    const cleaned = (r.content || '').replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+    const p = JSON.parse(cleaned);
+    const level = ['small', 'medium', 'large'].includes(p.level) ? p.level : 'medium';
+    return {
+      level,
+      backend: !!p.backend,
+      frontend: !!p.frontend,
+      packages: Array.isArray(p.packages) ? p.packages.slice(0, 10) : [],
+      reason: String(p.reason || '').slice(0, 120),
+    };
+  } catch {
+    return { level: 'medium', backend: true, frontend: true, packages: [], reason: 'classifier failed — defaulting to medium' };
+  }
+}
+
+// which steps run, and how many loop iterations each level gets.
+// termination caps shrink with complexity: the point is MINIMUM verified
+// calls, not maximum polish.
+export function pipelinePlan(level: 'small' | 'medium' | 'large'): { expand: boolean; packages: boolean; docs: boolean; architecture: boolean; pm: boolean; ux: boolean; security: boolean; deployment: boolean; maxBugLoops: number; maxOracleLoops: number; maxFeedbackLoops: number } {
+  switch (level) {
+    case 'small':
+      return { expand: true, packages: true, docs: false, architecture: false, pm: false, ux: false, security: false, deployment: false, maxBugLoops: 2, maxOracleLoops: 1, maxFeedbackLoops: 1 };
+    case 'medium':
+      return { expand: true, packages: true, docs: true, architecture: true, pm: false, ux: false, security: false, deployment: false, maxBugLoops: 4, maxOracleLoops: 2, maxFeedbackLoops: 2 };
+    case 'large':
+    default:
+      return { expand: true, packages: true, docs: true, architecture: true, pm: true, ux: true, security: true, deployment: true, maxBugLoops: 6, maxOracleLoops: 3, maxFeedbackLoops: 3 };
+  }
+}
+
 export async function generateAndRunProject(callChat: any, task: string, opts: any = {}): Promise<any> {
-  const maxBugFixLoops = opts.maxProjectLoops || 6;
-  const maxOracleLoops = opts.maxOracleLoops || 3;
-  const maxFeedbackLoops = opts.maxFeedbackLoops || 3;
   const thinkingDepth = opts.thinkingDepth ?? 2;
   const projectDir = path.join(os.tmpdir(), `project_gen_${tmpSuffix()}`);
 
   try {
+    // adaptive gate: pick pipeline depth before spending any generation calls
+    let plan: ReturnType<typeof pipelinePlan>;
+    if (opts.complexity) {
+      plan = pipelinePlan(opts.complexity);
+    } else {
+      const cls = await classifyTaskComplexity(callChat, task, opts);
+      plan = pipelinePlan(cls.level);
+      log({ level: 'info', source: 'codeGenerator', msg: `[GATE] complexity=${cls.level} (backend=${cls.backend}, frontend=${cls.frontend}, ${cls.packages.length} pkgs) — ${cls.reason} — plan: ${plan.deployment ? 'full' : plan.architecture ? 'medium' : 'small'} pipeline` });
+    }
+    const maxBugFixLoops = opts.maxProjectLoops || plan.maxBugLoops;
+    const maxOracleLoops = opts.maxOracleLoops || plan.maxOracleLoops;
+    const maxFeedbackLoops = opts.maxFeedbackLoops || plan.maxFeedbackLoops;
+
      log({ level: 'info', source: 'codeGenerator', msg: '[STEP 1] Requirement Expansion...' });
     const requirementsSpec = await requirementExpanderAgent(callChat, task, opts);
     const expandedTask = requirementsSpec.expandedSpec || task;
      log({ level: 'info', source: 'codeGenerator', msg: '[STEP 2] Architecture Planning...' });
     const packageList = await extractPackageList(callChat, expandedTask, requirementsSpec, opts);
     const allPackages = [...(packageList.dependencies || []), ...(packageList.devDependencies || [])];
-    const packageDocs = await fetchPackageDocumentation(callChat, allPackages, opts);
-    const architecture = await architectureAgent(callChat, expandedTask, requirementsSpec, packageDocs, opts);
-     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 3] Project Manager — Sprint Tickets...' });
-    const projectPlan = await projectManagerAgent(callChat, expandedTask, architecture, requirementsSpec, opts);
-    const tickets = projectPlan.tickets || architecture.tasksForWorkers || [];
+    const packageDocs = plan.docs ? await fetchPackageDocumentation(callChat, allPackages, opts) : {};
+    let architecture;
+    if (plan.architecture) {
+      architecture = await architectureAgent(callChat, expandedTask, requirementsSpec, packageDocs, opts);
+    } else {
+      log({ level: 'info', source: 'codeGenerator', msg: '[GATE] skipping architecture agent (small/medium pipeline)' });
+      architecture = { entryPoint: 'server.js', folderStructure: [], tasksForWorkers: [] };
+    }
+    let tickets: any[] = [];
+    if (plan.pm) {
+       log({ level: 'info', source: 'codeGenerator', msg: '[STEP 3] Project Manager — Sprint Tickets...' });
+      const projectPlan = await projectManagerAgent(callChat, expandedTask, architecture, requirementsSpec, opts);
+      tickets = projectPlan.tickets || architecture.tasksForWorkers || [];
+    } else {
+      log({ level: 'info', source: 'codeGenerator', msg: '[GATE] skipping project manager (small/medium pipeline)' });
+    }
      log({ level: 'info', source: 'codeGenerator', msg: '[STEP 4] Coder Workers — parallel file generation...' });
     let files: Record<string, string> = {};
     const workerGroups = [
@@ -721,18 +791,29 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
          log({ level: 'info', source: 'codeGenerator', msg: `[STEP 7] No critical errors on iteration ${bugIter}` });
         break;
       }
+      const before = JSON.stringify(files);
       files = await debuggingAgent(callChat, files, allErrors, expandedTask, opts);
       for (const [fname, fcontent] of Object.entries(files)) {
         const fp3 = path.join(projectDir, fname);
         fs.mkdirSync(path.dirname(fp3), { recursive: true });
         fs.writeFileSync(fp3, fcontent || '', 'utf-8');
       }
+      if (JSON.stringify(files) === before) {
+        log({ level: 'warn', source: 'codeGenerator', msg: `[STEP 7] debugger made no changes on iteration ${bugIter} — stopping loop (stuck)` });
+        break;
+      }
       staticIssues = await staticAnalysisAgent(callChat, files, expandedTask, opts);
     }
-     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 8] UX/Design Review...' });
-    const uxResult = await uxDesignAgent(callChat, files, expandedTask, requirementsSpec, opts);
-     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 9] Security + Performance Review...' });
-    const securityResult = await securityPerformanceAgent(callChat, files, expandedTask, opts);
+    let uxResult = null;
+    if (plan.ux) {
+       log({ level: 'info', source: 'codeGenerator', msg: '[STEP 8] UX/Design Review...' });
+      uxResult = await uxDesignAgent(callChat, files, expandedTask, requirementsSpec, opts);
+    }
+    let securityResult = null;
+    if (plan.security) {
+       log({ level: 'info', source: 'codeGenerator', msg: '[STEP 9] Security + Performance Review...' });
+      securityResult = await securityPerformanceAgent(callChat, files, expandedTask, opts);
+    }
     let automationTestResults = { passed: 0, failed: 0, errors: [] as string[] };
      log({ level: 'info', source: 'codeGenerator', msg: '[STEP 10b] Running full automation test suite...' });
     try {
@@ -755,13 +836,15 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
         automationTestResults = await runFullAutomationTests(projectDir, architecture.entryPoint || 'server.js', files, architecture, expandedTask, buildCmds, runCmds);
       } catch (e) { automationTestResults.errors.push((e as Error).message); }
     }
-     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 11] Deployment Artifacts...' });
-    const deployFiles = await deploymentAgent(callChat, files, expandedTask, projectDir, opts);
-    Object.assign(files, deployFiles);
-    for (const [fname, fcontent] of Object.entries(deployFiles)) {
-      const fp5 = path.join(projectDir, fname);
-      fs.mkdirSync(path.dirname(fp5), { recursive: true });
-      fs.writeFileSync(fp5, fcontent || '', 'utf-8');
+    if (plan.deployment) {
+       log({ level: 'info', source: 'codeGenerator', msg: '[STEP 11] Deployment Artifacts...' });
+      const deployFiles = await deploymentAgent(callChat, files, expandedTask, projectDir, opts);
+      Object.assign(files, deployFiles);
+      for (const [fname, fcontent] of Object.entries(deployFiles)) {
+        const fp5 = path.join(projectDir, fname);
+        fs.mkdirSync(path.dirname(fp5), { recursive: true });
+        fs.writeFileSync(fp5, fcontent || '', 'utf-8');
+      }
     }
      log({ level: 'info', source: 'codeGenerator', msg: '[STEP 12] Continuous Feedback Loop...' });
     for (let feedbackIter = 1; feedbackIter <= maxFeedbackLoops; feedbackIter++) {

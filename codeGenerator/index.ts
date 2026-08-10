@@ -23,4 +23,6 @@ export {
   staticAnalysisAgent,
   fetchPackageDocumentation,
   extractPackageList,
+  classifyTaskComplexity,
+  pipelinePlan,
 } from './run.js';

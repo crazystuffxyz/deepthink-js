@@ -1,7 +1,7 @@
 // public entry. re-exports from every subsystem.
 export { default as Deepthink, default } from './thinking/deepthink.js';
 export { default as runDeepResearch } from './thinking/researchAgent.js';
-export { generateAndRunCode, generateAndRunProject, staticAnalysisAgent, fetchPackageDocumentation, extractPackageList, compareResults } from './codeGenerator/index.js';
+export { generateAndRunCode, generateAndRunProject, staticAnalysisAgent, fetchPackageDocumentation, extractPackageList, classifyTaskComplexity, pipelinePlan, compareResults } from './codeGenerator/index.js';
 export { extractArticleText } from './internet/extractFromUrl.js';
 export { generateCitation } from './internet/extractCitation.js';
 export { selfConsistency, vote, sampleOnce } from './thinking/consistency.js';

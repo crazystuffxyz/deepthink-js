@@ -5,7 +5,20 @@ import { Ollama } from 'ollama';
 
 const ollama = 'https://ollama.com/api/web_search';
 const ollama1 = 3;
-const _ollamaClient = new Ollama();
+// same timeout-fetch trick as providers/index.ts — a hung search must die
+function makeTimeoutFetch(timeoutMs: number): typeof fetch {
+  return ((input: any, init: any) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const signal = init?.signal;
+    if (signal) {
+      if (signal.aborted) ctrl.abort();
+      else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+    }
+    return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  }) as typeof fetch;
+}
+const _ollamaClient = new Ollama({ fetch: makeTimeoutFetch(Number(process.env.OLLAMA_TIMEOUT_MS) || 60_000) });
 
 class Concurrency {
   _limit: number;

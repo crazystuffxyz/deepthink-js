@@ -35,6 +35,22 @@ const def = {
   lmstudio: 'http://localhost:1234'
 };
 
+// cloud-tier calls can hang forever with no timeout — wrap fetch so every
+// request (and its stream) dies after OLLAMA_TIMEOUT_MS (default 15 min).
+// legit generations finish in minutes; a hang is never legitimate.
+function makeTimeoutFetch(timeoutMs: number): typeof fetch {
+  return ((input: any, init: any) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const signal = init?.signal;
+    if (signal) {
+      if (signal.aborted) ctrl.abort();
+      else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+    }
+    return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  }) as typeof fetch;
+}
+
 function buildOllamaClient(opts: ProviderOpts, apiKey: string | null): ProviderClient {
   const host = (opts.host || process.env.OLLAMA_HOST || def.ollama).replace(/\/api\/?$/, '').replace(/\/+$/, '') || undefined;
   const hdrs: Record<string, string> = { ...(opts.headers || {}) };
@@ -42,6 +58,7 @@ function buildOllamaClient(opts: ProviderOpts, apiKey: string | null): ProviderC
   const cfg: Record<string, unknown> = {};
   if (host) cfg.host = host;
   if (Object.keys(hdrs).length) cfg.headers = hdrs;
+  cfg.fetch = makeTimeoutFetch(Number(process.env.OLLAMA_TIMEOUT_MS) || 900_000);
   const ollamaClient = new Ollama(cfg as ConstructorParameters<typeof Ollama>[0]);
   return {
     async chat(params) {

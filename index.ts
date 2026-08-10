@@ -1,5 +1,7 @@
 // public entry. re-exports from every subsystem.
 export { default as Deepthink, default } from './thinking/deepthink.js';
+export { TraceStore } from './thinking/trace.js';
+export { AdaptiveConcurrency, isRateLimitError, isTimeoutError } from './thinking/concurrency.js';
 export { default as runDeepResearch } from './thinking/researchAgent.js';
 export { generateAndRunCode, generateAndRunProject, staticAnalysisAgent, fetchPackageDocumentation, extractPackageList, classifyTaskComplexity, pipelinePlan, compareResults } from './codeGenerator/index.js';
 export { extractArticleText } from './internet/extractFromUrl.js';

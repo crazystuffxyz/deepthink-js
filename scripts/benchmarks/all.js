@@ -33,7 +33,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import PQueue from 'p-queue';
-import Deepthink from '../../dist/index.js';
+import Deepthink, { TraceStore } from '../../dist/index.js';
 import { verify } from './verify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -137,22 +137,23 @@ async function chatPlain(client, prompt) {
   return (r && r.content) || '';
 }
 
+// run with a caller-owned TraceStore so concurrent problems never race
+// on the shared dt._lastTrace. the store survives retries and is returned
+// for the telemetry writer.
 async function runOnce(dt, prompt) {
+  const myTrace = new TraceStore('flat', 500);
   const r = await withRetry(
-    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS }),
+    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS, _trace: myTrace }),
     'dt.generate'
   );
-  if (typeof r === 'string') return r;
-  if (r && typeof r === 'object') {
-    return r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r);
-  }
-  return String(r);
+  const answer = typeof r === 'string' ? r : (r && typeof r === 'object') ? (r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r)) : String(r);
+  return { answer, trace: myTrace };
 }
 
 // extract 4-dimension telemetry from a finished trace. returns zeros when
 // tracing is off or the run failed before any LLM call.
-function traceStats(dt) {
-  const t = dt._lastTrace;
+function traceStats(store) {
+  const t = store;
   if (!t || !t.size) {
     return { calls: 0, tokIn: 0, tokOut: 0, llmMs: 0, errors: 0, checks: 0, revisions: 0, phases: {} };
   }
@@ -191,25 +192,26 @@ async function processOne(plain, dt, plan, row) {
     pVerify = { ok: false, reason: e.message };
   }
 
-  // deepthink (with trace)
+  // deepthink (with caller-owned trace — concurrent problems don't race)
   let dtA = '';
   let dSec = 0;
   let dOk = 0;
   let dVerify = { ok: false, reason: 'no run' };
-  let tr = traceStats(dt);
+  let tr = traceStats(null);
   try {
     const t0 = Date.now();
-    dtA = await runOnce(dt, prompt);
+    const once = await runOnce(dt, prompt);
+    dtA = once.answer;
     dSec = (Date.now() - t0) / 1000;
     dVerify = verify({ row, modelText: dtA });
     dOk = dVerify.ok ? 1 : 0;
-    tr = traceStats(dt);
+    tr = traceStats(once.trace);
     // persist the raw trace for offline reasoning-quality scoring
-    if (dt._lastTrace && dt._lastTrace.size) {
+    if (once.trace && once.trace.size) {
       fs.mkdirSync(traceDir, { recursive: true });
       fs.writeFileSync(
         path.join(traceDir, `${plan.bench}_${row.id}.json`),
-        JSON.stringify({ row: { id: row.id, problem: row.problem }, answer: dtA, trace: dt._lastTrace.toJSON() }, null, 2),
+        JSON.stringify({ row: { id: row.id, problem: row.problem }, answer: dtA, trace: once.trace.toJSON() }, null, 2),
         'utf-8'
       );
     }
@@ -301,13 +303,14 @@ async function runCoding(dt, plain, opts = {}) {
 
   let dtHtml = '';
   let dSec = 0;
-  let tr = traceStats(dt);
+  let tr = traceStats(null);
   if (fs.existsSync(dtPath) && opts.htmlOnly) {
     dtHtml = fs.readFileSync(dtPath, 'utf-8');
     console.log(`  dt HTML: ${dtHtml.length} chars (cached)`);
   } else {
     console.log(`  generating deepthink HTML (d=${DEPTH} c=${CHECKS})...`);
     const t1 = Date.now();
+    const myTrace = new TraceStore('flat', 500);
     try {
       const out = await withRetry(
         () => dt.generate(specRow.spec + '\n\nOutput ONLY the complete HTML file in one code block.', {
@@ -315,6 +318,7 @@ async function runCoding(dt, plain, opts = {}) {
           checks: CHECKS,
           systemPrompt: HTML_SYS,
           autoSystemPrompt: true,
+          _trace: myTrace,
         }),
         'coding.dt.generate'
       );
@@ -323,11 +327,11 @@ async function runCoding(dt, plain, opts = {}) {
       dtHtml = `ERR: ${e.message}`;
     }
     dSec = (Date.now() - t1) / 1000;
-    tr = traceStats(dt);
-    if (dt._lastTrace && dt._lastTrace.size) {
+    tr = traceStats(myTrace);
+    if (myTrace.size) {
       const traceDir = path.join(RES, 'traces');
       fs.mkdirSync(traceDir, { recursive: true });
-      fs.writeFileSync(path.join(traceDir, 'coding.json'), JSON.stringify({ answer: dtHtml, trace: dt._lastTrace.toJSON() }, null, 2), 'utf-8');
+      fs.writeFileSync(path.join(traceDir, 'coding.json'), JSON.stringify({ answer: dtHtml, trace: myTrace.toJSON() }, null, 2), 'utf-8');
     }
     fs.writeFileSync(dtPath, dtHtml, 'utf-8');
     console.log(`  dt HTML: ${dtHtml.length} chars, ${dSec.toFixed(1)}s`);
@@ -513,7 +517,7 @@ async function main() {
   let coding;
   if (codingDone && !FRESH) {
     console.log('\n== Coding benchmark == (skipped — already in CSV)');
-    coding = { plain_bytes: 0, dt_bytes: 0, plain_seconds: 0, dt_seconds: 0, tr: traceStats(dt), critique: null };
+    coding = { plain_bytes: 0, dt_bytes: 0, plain_seconds: 0, dt_seconds: 0, tr: traceStats(null), critique: null };
   } else if (codingHtmlDone && !FRESH) {
     console.log('\n== Coding benchmark == (HTML exists, but no CSV row — running critique only)');
     coding = await runCoding(dt, plain, { htmlOnly: true });

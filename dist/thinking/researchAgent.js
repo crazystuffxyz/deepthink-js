@@ -49,6 +49,15 @@ const LOW_CREDIBILITY_SIGNALS = [
     /\bad\b/i, /advertis/i, /sponsored/i, /affiliate/i, /click.?here/i,
     /buy.?now/i, /free.?download/i, /casino/i, /forex/i, /crypto.?pump/i,
 ];
+// Q&A spam farms (zhihu, baidu-zhidao, zybang, etc.) surface constantly in
+// free-search fallbacks and never contain research-grade content — kill them
+// hard so a bad instance can't poison a run like it did in run 5.
+const QNA_SPAM_DOMAINS = new Set([
+    'zhihu.com', 'baidu.com', 'baiduzhidao.com', 'zhidao.baidu.com', 'zybang.com',
+    '360doc.com', 'wenku.baidu.com', 'jianshu.com', 'wukong.com', 'sohu.com',
+    'xueqiu.com', 'guba.eastmoney.com', 'taoguba.com.cn', '9gag.com',
+    'answers.yahoo.com', 'ask.fm', 'brainly.com', 'coursehero.com',
+]);
 const DEFAULT_NEGATIVE_URL_PATTERNS = [
     /\/students\//i, /\/login\b/i, /\/signup\b/i, /\/register\b/i,
     /\/docs\//i, /\/cart\b/i, /\/checkout\b/i, /\/account\b/i,
@@ -176,11 +185,18 @@ function scoreCredibility(result, opts = {}) {
             score += 30;
         else if (HIGH_CREDIBILITY_TLDS.has(tld1))
             score += 20;
+        if (QNA_SPAM_DOMAINS.has(hostname))
+            score -= 60;
     }
     catch {
         score -= 20;
     }
     const text = (snippet + ' ' + title).toLowerCase();
+    // CJK title/snippet = the fallback search instance returned a foreign
+    // Q&A page — dead weight for an English research query.
+    const cjkRatio = (text.match(/[一-鿿㐀-䶿]/g) || []).length / Math.max(1, text.length);
+    if (cjkRatio > 0.3)
+        score -= 45;
     const academicSignals = ['study', 'research', 'analysis', 'data', 'findings', 'published', 'journal', 'peer-reviewed', 'according to', 'evidence'];
     score += Math.min(academicSignals.filter(s => text.includes(s)).length * 3, 20);
     if (snippet.length > 200)
@@ -260,6 +276,14 @@ async function extractAndSummarize(callChat, source, topic, answerSpec, opts) {
         catch (e) {
             return { url, goal, summary: null, credibilityScore, error: e.message };
         }
+    }
+    // CJK spam guard (run 5): the fallback search instance returned Chinese
+    // Q&A pages (zhihu/baidu/zybang) that polluted the whole crawl. a page
+    // this CJK-heavy is not research evidence for an English query — reject
+    // before spending an extraction call on it.
+    const cjkChars = (rawContent.match(/[一-鿿㐀-䶿]/g) || []).length;
+    if (cjkChars / Math.max(1, rawContent.length) > 0.2) {
+        return { url, goal, summary: null, credibilityScore, error: 'Non-English (CJK) content' };
     }
     // context guard: a long article or a big local PDF would overflow the
     // extraction call. keep the head (where key facts live) plus the tail
@@ -1013,6 +1037,17 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
                 stepSummary.step3.localFiles = ok.length;
                 log({ level: 'info', msg: `[STEP 3] Injected ${ok.length} local file source(s) at max credibility`, source: 'researchAgent', ts: Date.now() });
             }
+        }
+        // spam quarantine retry (run 5): the crawl came back but every result was
+        // junk (Q&A spam, CJK pages) and got filtered out. one retry with the
+        // known spam domains excluded — cheap, and turns a dead run into a run.
+        if (verifiedSources.length === 0 && rawResults.length > 0) {
+            const exclusions = Array.from(QNA_SPAM_DOMAINS).map((d) => `-site:${d}`).join(' ');
+            const retryQueries = queries.map((q) => ({ ...q, query: `${q.query} ${exclusions}`.trim() }));
+            log({ level: 'info', msg: `[STEP 3] All ${rawResults.length} results filtered as low-credibility — retrying crawl with spam domains excluded`, source: 'researchAgent', ts: Date.now() });
+            const retryResults = await crawlerAgent(retryQueries, Math.max(2, opts.maxConcurrency ?? 5), opts);
+            verifiedSources = verificationAgent(retryResults, opts.credibilityThreshold ?? 35, opts);
+            stepSummary.step3 = { urlsAfterFilter: verifiedSources.length, retried: true };
         }
         if (verifiedSources.length === 0)
             return { report: `No credible sources found for: "${topic}". Try lowering credibilityThreshold or broadening queries.`, references: [], claimCount: 0, stepSummary, success: false };

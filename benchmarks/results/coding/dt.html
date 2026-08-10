@@ -1,0 +1,297 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2D Newtonian Gravity Sandbox</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #000;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  canvas { display: block; position: absolute; top: 0; left: 0; }
+  .panel {
+    position: fixed;
+    background: rgba(15,15,25,0.78);
+    color: #e8e8e8;
+    padding: 10px 14px;
+    border-radius: 6px;
+    z-index: 10;
+    user-select: none;
+    border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  }
+  #controls { top: 12px; left: 12px; min-width: 230px; }
+  #controls .row {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px; margin-bottom: 8px;
+  }
+  #controls .row:last-child { margin-bottom: 0; }
+  #controls input[type=range] { flex: 1; accent-color: #6aa9ff; }
+  #controls button {
+    background: #2a3a5a; color: #e8e8e8;
+    border: 1px solid #4a5a7a;
+    padding: 5px 12px; border-radius: 4px;
+    cursor: pointer; font-size: 12px; flex: 1;
+  }
+  #controls button:hover { background: #3a4a6a; }
+  #stats {
+    bottom: 12px; right: 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px; letter-spacing: 0.5px;
+  }
+  #hint {
+    top: 12px; right: 12px;
+    font-size: 11px; color: #b8b8b8;
+    max-width: 240px; line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="controls" class="panel">
+  <div class="row">
+    <span style="min-width:14px; font-weight:600;">G</span>
+    <input type="range" id="gs" min="0" max="5" step="0.01" value="1">
+    <span id="gv" style="min-width:34px; text-align:right; font-family:monospace;">1.00</span>
+  </div>
+  <div class="row">
+    <button id="reset">Reset</button>
+  </div>
+</div>
+
+<div id="hint" class="panel">
+  Click + drag to launch a planet
+</div>
+
+<div id="stats" class="panel">G = 1.00 &nbsp; N = 0</div>
+
+<script>
+(function() {
+  'use strict';
+
+  const canvas = document.getElementById('cv');
+  const ctx = canvas.getContext('2d');
+  const gSlider = document.getElementById('gs');
+  const gLabel  = document.getElementById('gv');
+  const resetBtn = document.getElementById('reset');
+  const stats   = document.getElementById('stats');
+
+  // --- Canvas sizing -----------------------------------------------------
+  let W = 0, H = 0;
+  function resize() {
+    W = Math.max(600, window.innerWidth);
+    H = Math.max(400, window.innerHeight);
+    canvas.width  = W;
+    canvas.height = H;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // --- Simulation parameters --------------------------------------------
+  let G = 1.0;                 // gravitational constant
+  const EPS  = 5.0;            // softening parameter
+  const EPS2 = EPS * EPS;
+  const TRAIL_LEN   = 200;     // positions stored per planet
+  const SPEED_SCALE = 1.0;     // 100 px drag => 100 units/s
+
+  // --- State -------------------------------------------------------------
+  const planets = [];
+  let dragging   = false;
+  let dragStartX = 0, dragStartY = 0;
+  let preview    = null;
+
+  // --- UI wiring ---------------------------------------------------------
+  function updateStats() {
+    stats.textContent = `G = ${G.toFixed(2)}  N = ${planets.length}`;
+  }
+  gSlider.addEventListener('input', () => {
+    G = parseFloat(gSlider.value);
+    gLabel.textContent = G.toFixed(2);
+    updateStats();
+  });
+  resetBtn.addEventListener('click', () => {
+    planets.length = 0;
+    updateStats();
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+  });
+
+  // --- Mouse handling ----------------------------------------------------
+  function getPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const p = getPos(e);
+    dragging = true;
+    dragStartX = p.x;
+    dragStartY = p.y;
+    // New planet at click position with mass 1 and zero velocity.
+    preview = { x: p.x, y: p.y, vx: 0, vy: 0, m: 1, trail: [] };
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging || !preview) return;
+    const p = getPos(e);
+    preview.vx = (p.x - dragStartX) * SPEED_SCALE;
+    preview.vy = (p.y - dragStartY) * SPEED_SCALE;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging || !preview) return;
+    planets.push(preview);
+    dragging = false;
+    preview = null;
+    updateStats();
+  });
+
+  // --- Physics: pairwise gravity, semi-implicit Euler --------------------
+  const ax = [], ay = [];
+  function step(dt) {
+    const n = planets.length;
+    if (n === 0) return;
+
+    ax.length = n; ay.length = n;
+    for (let i = 0; i < n; i++) { ax[i] = 0; ay[i] = 0; }
+
+    for (let i = 0; i < n; i++) {
+      const pi = planets[i];
+      for (let j = i + 1; j < n; j++) {
+        const pj = planets[j];
+        const dx = pj.x - pi.x;
+        const dy = pj.y - pi.y;
+        const r2  = dx * dx + dy * dy + EPS2;     // softened r^2
+        const invR = 1 / Math.sqrt(r2);
+        // F = G*m1*m2/r^2, with vector factor dx/r, dy/r
+        const k  = G * pi.m * pj.m * invR / r2;
+        const fx = k * dx;
+        const fy = k * dy;
+        ax[i] += fx / pi.m;
+        ay[i] += fy / pi.m;
+        ax[j] -= fx / pj.m;
+        ay[j] -= fy / pj.m;
+      }
+    }
+
+    for (let i = 0; i < n; i++) {
+      const p = planets[i];
+      p.vx += ax[i] * dt;
+      p.vy += ay[i] * dt;
+      p.x  += p.vx * dt;
+      p.y  += p.vy * dt;
+
+      p.trail.push(p.x, p.y);
+      const maxLen = TRAIL_LEN * 2;
+      if (p.trail.length > maxLen) {
+        p.trail.splice(0, p.trail.length - maxLen);
+      }
+    }
+  }
+
+  // --- Rendering ---------------------------------------------------------
+  function draw() {
+    // Alpha-blend a translucent black layer to fade the previous frame.
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Trails
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < planets.length; i++) {
+      const t = planets[i].trail;
+      if (t.length < 4) continue;
+      ctx.beginPath();
+      ctx.moveTo(t[0], t[1]);
+      for (let k = 2; k < t.length; k += 2) {
+        ctx.lineTo(t[k], t[k + 1]);
+      }
+      ctx.strokeStyle = 'rgba(140,200,255,0.75)';
+      ctx.stroke();
+    }
+
+    // Planets
+    for (let i = 0; i < planets.length; i++) {
+      const p = planets[i];
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+    }
+
+    // Preview (being dragged)
+    if (preview) {
+      const px = preview.x, py = preview.y;
+      const vx = preview.vx, vy = preview.vy;
+
+      // velocity vector line
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + vx, py + vy);
+      ctx.strokeStyle = '#ff6b6b';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // arrowhead
+      const v2 = vx * vx + vy * vy;
+      if (v2 > 1) {
+        const ang = Math.atan2(vy, vx);
+        const head = 7;
+        const tx = px + vx, ty = py + vy;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+        ctx.lineTo(tx - head * Math.cos(ang - 0.4),
+                   ty - head * Math.sin(ang - 0.4));
+        ctx.lineTo(tx - head * Math.cos(ang + 0.4),
+                   ty - head * Math.sin(ang + 0.4));
+        ctx.closePath();
+        ctx.fillStyle = '#ff6b6b';
+        ctx.fill();
+      }
+
+      // preview planet
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff6b6b';
+      ctx.fill();
+    }
+  }
+
+  // --- Main loop: fixed timestep with substep cap ------------------------
+  const FIXED_DT     = 1 / 60;
+  const MAX_SUBSTEPS = 4;
+  let acc  = 0;
+  let last = performance.now();
+
+  function loop(now) {
+    let frameDt = (now - last) / 1000;
+    last = now;
+    if (frameDt > 0.25) frameDt = 0.25;     // clamp big stalls
+    acc += frameDt;
+
+    let steps = 0;
+    while (acc >= FIXED_DT && steps < MAX_SUBSTEPS) {
+      step(FIXED_DT);
+      acc -= FIXED_DT;
+      steps++;
+    }
+    if (steps >= MAX_SUBSTEPS) acc = 0;     // avoid spiral of death
+
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  updateStats();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
+```

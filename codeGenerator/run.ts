@@ -17,13 +17,12 @@ const excluded1 = new Set(['.DS_Store', 'Thumbs.db', 'package-lock.json', 'yarn.
 
 function safeRmSync(dir: string): void {
   try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); }
-  catch (e) { /* eslint-disable-next-line no-console */ console.warn(`[CLEANUP] Could not remove ${dir}: ${(e as Error).message}`); }
+  catch (e) { log({ level: 'warn', source: 'codeGenerator', msg: `[CLEANUP] Could not remove ${dir}: ${(e as Error).message}` }); }
 }
 
 export async function fetchPackageDocumentation(callChat: any, packageNames: string[], opts: any = {}): Promise<Record<string, string>> {
   if (!packageNames || packageNames.length === 0) return {};
-  // eslint-disable-next-line no-console
-  console.log(`[PKG DOCS] Fetching documentation for ${packageNames.length} packages: ${packageNames.join(', ')}`);
+  log({ level: 'info', source: 'codeGenerator', msg: `[PKG DOCS] Fetching documentation for ${packageNames.length} packages: ${packageNames.join(', ')}` });
   const docs: Record<string, string> = {};
   for (const pkg of packageNames) {
     const npmUrl = `https://www.npmjs.com/package/${pkg}`;
@@ -32,14 +31,12 @@ export async function fetchPackageDocumentation(callChat: any, packageNames: str
     try {
       docText = await getFetchResults(npmUrl);
       if (!docText || docText.startsWith('Error:') || docText.length < 100) {
-        // eslint-disable-next-line no-console
-        console.warn(`[PKG DOCS] npm page fetch failed for ${pkg}, trying search`);
+        log({ level: 'warn', source: 'codeGenerator', msg: `[PKG DOCS] npm page fetch failed for ${pkg}, trying search` });
         const results = await getSearchResults(`${pkg} npm package documentation usage examples`, opts);
         if (results && results.length > 0) searchContext = results.slice(0, 3).map((r: any) => `${r.title}: ${r.snippet}`).join('\n');
       }
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn(`[PKG DOCS] Fetch error for ${pkg}: ${(e as Error).message}`);
+      log({ level: 'warn', source: 'codeGenerator', msg: `[PKG DOCS] Fetch error for ${pkg}: ${(e as Error).message}` });
       try {
         const results = await getSearchResults(`${pkg} npm usage api examples`, opts);
         if (results && results.length > 0) searchContext = results.slice(0, 3).map((r: any) => `${r.title}: ${r.snippet}`).join('\n');
@@ -60,8 +57,7 @@ export async function fetchPackageDocumentation(callChat: any, packageNames: str
     } else {
       docs[pkg] = `Package: ${pkg} — documentation unavailable, use standard API patterns.`;
     }
-    // eslint-disable-next-line no-console
-    console.log(`[PKG DOCS] ${pkg}: ${docs[pkg].length} chars of documentation`);
+    log({ level: 'info', source: 'codeGenerator', msg: `[PKG DOCS] ${pkg}: ${docs[pkg].length} chars of documentation` });
   }
   return docs;
 }
@@ -93,8 +89,7 @@ export async function extractPackageList(callChat: any, task: string, requiremen
 }
 
 async function requirementExpanderAgent(callChat: any, task: string, opts: any): Promise<any> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 1] Expanding requirements from vague prompt...');
+  log({ level: 'info', source: 'codeGenerator', msg: '[STEP 1] Expanding requirements from vague prompt...' });
   const r = await callChat(
     [{ role: 'system', content:
         'You are a Strategic Requirements Engineer. Your goal is to transform a vague user prompt into a high-fidelity technical specification that eliminates ambiguity for downstream agents.\n\n' +
@@ -127,12 +122,10 @@ async function requirementExpanderAgent(callChat: any, task: string, opts: any):
     const jsonEnd = cleaned.lastIndexOf('}');
     const jsonStr = jsonStart !== -1 && jsonEnd !== -1 ? cleaned.slice(jsonStart, jsonEnd + 1) : cleaned;
     const spec = JSON.parse(jsonStr);
-    // eslint-disable-next-line no-console
-    console.log(`[STEP 1] Features: ${spec.coreFeatures?.length ?? 0} core, ${spec.impliedFeatures?.length ?? 0} implied`);
+     log({ level: 'info', source: 'codeGenerator', msg: `[STEP 1] Features: ${spec.coreFeatures?.length ?? 0} core, ${spec.impliedFeatures?.length ?? 0} implied` });
     return spec;
   } catch {
-    // eslint-disable-next-line no-console
-    console.warn('[STEP 1] JSON parse failed — using raw task');
+     log({ level: 'warn', source: 'codeGenerator', msg: '[STEP 1] JSON parse failed — using raw task' });
     return {
       expandedSpec: task, targetAudience: 'general users', coreFeatures: [], impliedFeatures: [],
       techConstraints: ['Node.js backend', 'SVG-only graphics', 'fullstack'],
@@ -142,8 +135,7 @@ async function requirementExpanderAgent(callChat: any, task: string, opts: any):
 }
 
 async function architectureAgent(callChat: any, task: string, requirementsSpec: any, packageDocs: Record<string, string>, opts: any): Promise<any> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 2] Architecture planning...');
+log({ level: 'info', source: 'codeGenerator', msg: '[STEP 2] Architecture planning...' });
   const docsBlock = Object.keys(packageDocs).length
     ? `\nAvailable package documentation:\n${Object.entries(packageDocs).map(([k, v]) => `${k}:\n${v}`).join('\n\n---\n\n')}`
     : '';
@@ -185,12 +177,10 @@ async function architectureAgent(callChat: any, task: string, requirementsSpec: 
     const jsonEnd = cleaned.lastIndexOf('}');
     const jsonStr = jsonStart !== -1 && jsonEnd !== -1 ? cleaned.slice(jsonStart, jsonEnd + 1) : cleaned;
     const arch = JSON.parse(jsonStr);
-    // eslint-disable-next-line no-console
-    console.log(`[STEP 2] Architecture: ${arch.folderStructure?.length ?? 0} files planned, ${arch.tasksForWorkers?.length ?? 0} worker tasks`);
+     log({ level: 'info', source: 'codeGenerator', msg: `[STEP 2] Architecture: ${arch.folderStructure?.length ?? 0} files planned, ${arch.tasksForWorkers?.length ?? 0} worker tasks` });
     return arch;
   } catch {
-    // eslint-disable-next-line no-console
-    console.warn('[STEP 2] Architecture parse failed — using defaults');
+     log({ level: 'warn', source: 'codeGenerator', msg: '[STEP 2] Architecture parse failed — using defaults' });
     return {
       folderStructure: ['server.js', 'package.json', 'public/index.html', 'public/style.css', 'public/app.js'],
       entryPoint: 'server.js', apiRoutes: [], frontendPages: ['public/index.html'],
@@ -205,8 +195,7 @@ async function architectureAgent(callChat: any, task: string, requirementsSpec: 
 }
 
 async function projectManagerAgent(callChat: any, task: string, architecture: any, requirementsSpec: any, opts: any): Promise<any> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 3] Project Manager — breaking into worker tasks...');
+log({ level: 'info', source: 'codeGenerator', msg: '[STEP 3] Project Manager — breaking into worker tasks...' });
   const r = await callChat(
     [{ role: 'system', content:
         'You are a Strategic Project Manager and Technical Lead. Your goal is to translate a high-level architecture into a high-precision, dependency-aware execution roadmap.\n\n' +
@@ -231,8 +220,7 @@ async function projectManagerAgent(callChat: any, task: string, architecture: an
     const jsonEnd = cleaned.lastIndexOf('}');
     const jsonStr = jsonStart !== -1 && jsonEnd !== -1 ? cleaned.slice(jsonStart, jsonEnd + 1) : cleaned;
     const pm = JSON.parse(jsonStr);
-    // eslint-disable-next-line no-console
-    console.log(`[STEP 3] PM: ${pm.tickets?.length ?? 0} sprint tickets created`);
+     log({ level: 'info', source: 'codeGenerator', msg: `[STEP 3] PM: ${pm.tickets?.length ?? 0} sprint tickets created` });
     return pm;
   } catch {
     return { tickets: architecture.tasksForWorkers || [] };
@@ -241,8 +229,7 @@ async function projectManagerAgent(callChat: any, task: string, architecture: an
 
 async function coderWorkerAgent(callChat: any, task: string, ticket: any, existingFiles: Record<string, string>, architecture: any, requirementsSpec: any, packageDocs: Record<string, string>, opts: any): Promise<Record<string, string>> {
   const owner = ticket.owner || ticket.label || 'coder';
-  // eslint-disable-next-line no-console
-  console.log(`[STEP 4] Coder Worker [${owner}] — ticket: ${ticket.title || ticket.label}`);
+log({ level: 'info', source: 'codeGenerator', msg: `[STEP 4] Coder Worker [${owner}] — ticket: ${ticket.title || ticket.label}` });
   const existingContext = Object.entries(existingFiles)
     .filter(([f]) => ticket.files ? ticket.files.some((tf: string) => f.includes(path.basename(tf))) : true)
     .map(([f, c]) => `\n// ${f}\n${(c || '').slice(0, 2000)}\n`)
@@ -289,14 +276,12 @@ async function coderWorkerAgent(callChat: any, task: string, ticket: any, existi
   for (const [k, v] of Object.entries(newFiles)) {
     if (!(k in existingFiles) || newFiles[k] !== existingFiles[k]) onlyNew[k] = v;
   }
-  // eslint-disable-next-line no-console
-  console.log(`[STEP 4] Worker [${owner}] produced: ${Object.keys(onlyNew).join(', ') || 'no new files'}`);
+  log({ level: 'info', source: 'codeGenerator', msg: `[STEP 4] Worker [${owner}] produced: ${Object.keys(onlyNew).join(', ') || 'no new files'}` });
   return onlyNew;
 }
 
 export async function staticAnalysisAgent(_callChat: any, files: Record<string, string>, _task: string, _opts: any): Promise<Array<{ file: string; type: string; error?: string; ref?: string; match?: string }>> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 5] Static Analysis — linting and syntax checking...');
+log({ level: 'info', source: 'codeGenerator', msg: '[STEP 5] Static Analysis — linting and syntax checking...' });
   const issues: Array<{ file: string; type: string; error?: string; ref?: string; match?: string }> = [];
   for (const [fname, content] of Object.entries(files)) {
     const ext = path.extname(fname).toLowerCase();
@@ -318,18 +303,15 @@ export async function staticAnalysisAgent(_callChat: any, files: Record<string, 
   issues.push(...imgIssues.map(i => ({ ...i, type: `asset_${i.type}` })));
   issues.push(...linkIssues.map(i => ({ ...i, type: `link_${i.type}` })));
   if (issues.length > 0) {
-    // eslint-disable-next-line no-console
-    console.warn(`[STEP 5] Static analysis found ${issues.length} issues`);
+     log({ level: 'warn', source: 'codeGenerator', msg: `[STEP 5] Static analysis found ${issues.length} issues` });
   } else {
-    // eslint-disable-next-line no-console
-    console.log('[STEP 5] Static analysis passed');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 5] Static analysis passed' });
   }
   return issues;
 }
 
 async function testGenerationAgent(callChat: any, files: Record<string, string>, task: string, architecture: any, opts: any): Promise<{ testFile: string; testCode: string } | null> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 6] Test Generation — unit + integration + edge case tests...');
+log({ level: 'info', source: 'codeGenerator', msg: '[STEP 6] Test Generation — unit + integration + edge case tests...' });
   const filesSummary = Object.entries(files).map(([f, c]) => `// FILE: ${f}\n${(c || '').slice(0, 1500)}`).join('\n\n---\n\n');
   const apiRoutes = (Array.isArray(architecture.apiRoutes) ? architecture.apiRoutes : []).map((r: any) => `${r.method || 'GET'} ${r.path || '/'}: ${r.description || ''}`).join('\n');
   const r = await callChat(
@@ -367,8 +349,7 @@ async function testGenerationAgent(callChat: any, files: Record<string, string>,
 }
 
 async function debuggingAgent(callChat: any, files: Record<string, string>, errorLog: string[], task: string, opts: any): Promise<Record<string, string>> {
-  // eslint-disable-next-line no-console
-  console.log(`[STEP 7] Debugging Agent — analyzing ${errorLog.length} errors...`);
+log({ level: 'info', source: 'codeGenerator', msg: `[STEP 7] Debugging Agent — analyzing ${errorLog.length} errors...` });
   const currentFilesBlock = Object.entries(files).map(([fname, code]) => `\n${(code || '').slice(0, 3000)}\n`).join('\n\n');
   const r = await callChat(
     [{ role: 'system', content:
@@ -396,8 +377,7 @@ async function debuggingAgent(callChat: any, files: Record<string, string>, erro
 }
 
 async function uxDesignAgent(callChat: any, files: Record<string, string>, task: string, requirementsSpec: any, opts: any): Promise<any> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 8] UX/Design Agent — reviewing and improving aesthetics...');
+log({ level: 'info', source: 'codeGenerator', msg: '[STEP 8] UX/Design Agent — reviewing and improving aesthetics...' });
   const htmlCssFiles = Object.entries(files)
     .filter(([f]) => f.endsWith('.html') || f.endsWith('.css') || f.endsWith('.ejs'))
     .map(([f, c]) => `\n// FILE: ${f}\n${(c || '').slice(0, 3000)}\n`)
@@ -431,15 +411,13 @@ async function uxDesignAgent(callChat: any, files: Record<string, string>, task:
     const jsonEnd = cleaned.lastIndexOf('}');
     const jsonStr = jsonStart !== -1 && jsonEnd !== -1 ? cleaned.slice(jsonStart, jsonEnd + 1) : cleaned;
     const result = JSON.parse(jsonStr);
-    // eslint-disable-next-line no-console
-    console.log(`[STEP 8] UX: ${result.issues?.length ?? 0} issues, ${result.suggestions?.length ?? 0} suggestions, score=${result.score ?? 'N/A'}`);
+     log({ level: 'info', source: 'codeGenerator', msg: `[STEP 8] UX: ${result.issues?.length ?? 0} issues, ${result.suggestions?.length ?? 0} suggestions, score=${result.score ?? 'N/A'}` });
     return result;
   } catch { return null; }
 }
 
 async function securityPerformanceAgent(callChat: any, files: Record<string, string>, task: string, opts: any): Promise<any> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 9] Security + Performance Review...');
+log({ level: 'info', source: 'codeGenerator', msg: '[STEP 9] Security + Performance Review...' });
   const filesSummary = Object.entries(files).map(([f, c]) => `\n// ${f}\n${(c || '').slice(0, 2000)}\n`).join('\n\n');
   const r = await callChat(
     [{ role: 'system', content:
@@ -469,15 +447,13 @@ async function securityPerformanceAgent(callChat: any, files: Record<string, str
     const jsonStr = jsonStart !== -1 && jsonEnd !== -1 ? cleaned.slice(jsonStart, jsonEnd + 1) : cleaned;
     const result = JSON.parse(jsonStr);
     const criticalCount = result.criticalIssues?.length ?? 0;
-    // eslint-disable-next-line no-console
-    console.log(`[STEP 9] Security: ${criticalCount} critical | sec=${result.securityScore ?? 'N/A'} perf=${result.performanceScore ?? 'N/A'}`);
+     log({ level: 'info', source: 'codeGenerator', msg: `[STEP 9] Security: ${criticalCount} critical | sec=${result.securityScore ?? 'N/A'} perf=${result.performanceScore ?? 'N/A'}` });
     return result;
   } catch { return null; }
 }
 
 async function deploymentAgent(callChat: any, files: Record<string, string>, task: string, _projectDir: string, opts: any): Promise<Record<string, string>> {
-  // eslint-disable-next-line no-console
-  console.log('[STEP 11] Deployment Agent — generating deployment scripts...');
+log({ level: 'info', source: 'codeGenerator', msg: '[STEP 11] Deployment Agent — generating deployment scripts...' });
   const fileList = Object.keys(files).join(', ');
   const r = await callChat(
     [{ role: 'system', content:
@@ -499,14 +475,12 @@ async function deploymentAgent(callChat: any, files: Record<string, string>, tas
   );
   const responseContent = r.content || '';
   const deployFiles = parseFilesFromResponse(responseContent);
-  // eslint-disable-next-line no-console
-  console.log(`[STEP 11] Deployment: generated ${Object.keys(deployFiles).join(', ')}`);
+log({ level: 'info', source: 'codeGenerator', msg: `[STEP 11] Deployment: generated ${Object.keys(deployFiles).join(', ')}` });
   return deployFiles;
 }
 
 async function continuousFeedbackAgent(callChat: any, files: Record<string, string>, testResults: any, staticIssues: any[], securityResult: any, uxResult: any, userSimResult: any, task: string, iterationNumber: number, opts: any): Promise<{ files: Record<string, string>; done: boolean }> {
-  // eslint-disable-next-line no-console
-  console.log(`[STEP 12/FEEDBACK] Continuous feedback loop — iteration ${iterationNumber}...`);
+log({ level: 'info', source: 'codeGenerator', msg: `[STEP 12/FEEDBACK] Continuous feedback loop — iteration ${iterationNumber}...` });
   const allIssues: string[] = [];
   if (staticIssues && staticIssues.length > 0) allIssues.push(...staticIssues.map((i: any) => `[STATIC/${i.type?.toUpperCase()}] ${i.file}: ${i.error || i.ref || i.match}`));
   if (securityResult?.criticalIssues?.length) for (const issue of securityResult.criticalIssues) allIssues.push(`[SECURITY/${issue.type?.toUpperCase() ?? 'CRITICAL'}] ${issue.file}: ${issue.description} — Fix: ${issue.fix}`);
@@ -514,12 +488,10 @@ async function continuousFeedbackAgent(callChat: any, files: Record<string, stri
   if (userSimResult?.topBlockers?.length) for (const blocker of userSimResult.topBlockers) allIssues.push(`[USER_SIM_BLOCKER] ${blocker}`);
   if (testResults?.failed > 0 && testResults?.errors?.length) for (const err of testResults.errors) allIssues.push(`[TEST_FAIL] ${err}`);
   if (allIssues.length === 0) {
-    // eslint-disable-next-line no-console
-    console.log('[FEEDBACK] No issues remaining — project is ready');
+     log({ level: 'info', source: 'codeGenerator', msg: '[FEEDBACK] No issues remaining — project is ready' });
     return { files, done: true };
   }
-  // eslint-disable-next-line no-console
-  console.log(`[FEEDBACK] ${allIssues.length} issues to fix in iteration ${iterationNumber}`);
+log({ level: 'info', source: 'codeGenerator', msg: `[FEEDBACK] ${allIssues.length} issues to fix in iteration ${iterationNumber}` });
   const currentFilesBlock = Object.entries(files).map(([fname, code]) => `\n${(code || '').slice(0, 2000)}\n`).join('\n\n');
   const r = await callChat(
     [{ role: 'system', content:
@@ -577,12 +549,10 @@ async function runFullAutomationTests(projectDir: string, entryPoint: string, fi
     const failLines = testOutput.out.split('\n').filter(l => l.trim().startsWith('✗') || l.includes('FAIL [') || l.includes('TESTS FAILED'));
     results.errors.push(...failLines);
     if (testOutput.err) results.errors.push(`TEST RUNNER STDERR: ${testOutput.err.slice(0, 500)}`);
-    // eslint-disable-next-line no-console
-    console.log(`[AUTOMATION] Results: ${results.passed} passed, ${results.failed} failed`);
+     log({ level: 'info', source: 'codeGenerator', msg: `[AUTOMATION] Results: ${results.passed} passed, ${results.failed} failed` });
   } catch (e) {
     results.errors.push(`Automation runner error: ${(e as Error).message}`);
-    // eslint-disable-next-line no-console
-    console.warn(`[AUTOMATION] Runner error: ${(e as Error).message}`);
+     log({ level: 'warn', source: 'codeGenerator', msg: `[AUTOMATION] Runner error: ${(e as Error).message}` });
   } finally {
     if (serverProc && !serverProc.killed) {
       serverProc.kill('SIGTERM');
@@ -628,22 +598,18 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
   const projectDir = path.join(os.tmpdir(), `project_gen_${tmpSuffix()}`);
 
   try {
-    // eslint-disable-next-line no-console
-    console.log('[STEP 1] Requirement Expansion...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 1] Requirement Expansion...' });
     const requirementsSpec = await requirementExpanderAgent(callChat, task, opts);
     const expandedTask = requirementsSpec.expandedSpec || task;
-    // eslint-disable-next-line no-console
-    console.log('[STEP 2] Architecture Planning...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 2] Architecture Planning...' });
     const packageList = await extractPackageList(callChat, expandedTask, requirementsSpec, opts);
     const allPackages = [...(packageList.dependencies || []), ...(packageList.devDependencies || [])];
     const packageDocs = await fetchPackageDocumentation(callChat, allPackages, opts);
     const architecture = await architectureAgent(callChat, expandedTask, requirementsSpec, packageDocs, opts);
-    // eslint-disable-next-line no-console
-    console.log('[STEP 3] Project Manager — Sprint Tickets...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 3] Project Manager — Sprint Tickets...' });
     const projectPlan = await projectManagerAgent(callChat, expandedTask, architecture, requirementsSpec, opts);
     const tickets = projectPlan.tickets || architecture.tasksForWorkers || [];
-    // eslint-disable-next-line no-console
-    console.log('[STEP 4] Coder Workers — parallel file generation...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 4] Coder Workers — parallel file generation...' });
     let files: Record<string, string> = {};
     const workerGroups = [
       tickets.filter((t: any) => (t.owner || t.label || '').toLowerCase().includes('backend') || (t.owner || t.label || '').toLowerCase().includes('server')),
@@ -658,14 +624,13 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
       const groupResults = await Promise.all(
         group.map((ticket: any) =>
           coderWorkerAgent(callChat, expandedTask, ticket, files, architecture, requirementsSpec, packageDocs, opts)
-            .catch((e: Error) => { /* eslint-disable-next-line no-console */ console.warn(`[WORKER] Ticket ${ticket.id} failed: ${e.message}`); return {}; })
+            .catch((e: Error) => { /* eslint-disable-next-line no-console */ log({ level: 'warn', source: 'codeGenerator', msg: `[WORKER] Ticket ${ticket.id} failed: ${e.message}` }); return {}; })
         )
       );
       for (const result of groupResults) Object.assign(files, result);
     }
     if (Object.keys(files).length === 0) {
-      // eslint-disable-next-line no-console
-      console.warn('[STEP 4] No files from workers — falling back to single-pass generation');
+       log({ level: 'warn', source: 'codeGenerator', msg: '[STEP 4] No files from workers — falling back to single-pass generation' });
       const r = await callChat(
         [{ role: 'system', content: `You are a code generation engine. Generate a complete fullstack Node.js project.\n\n${FILE_BLOCK_PROMPT}\n\n` +
             `CONSTRAINTS:\n  - Node.js + Express.js backend\n  - All graphics must be inline SVG\n  - No external image URLs\n  - Must include package.json` },
@@ -695,26 +660,21 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, fcontent || '', 'utf-8');
     }
-    // eslint-disable-next-line no-console
-    console.log('[STEP 5] Static Analysis...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 5] Static Analysis...' });
     let staticIssues = await staticAnalysisAgent(callChat, files, expandedTask, opts);
-    // eslint-disable-next-line no-console
-    console.log('[STEP 5b] Installing dependencies...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 5b] Installing dependencies...' });
     try {
       if (fs.existsSync(path.join(projectDir, 'package.json'))) {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         require('child_process').execSync('npm install', { cwd: projectDir, stdio: 'pipe', timeout: 120_000 });
         buildCmds = 'npm install';
-        // eslint-disable-next-line no-console
-        console.log('[STEP 5b] npm install succeeded');
+         log({ level: 'info', source: 'codeGenerator', msg: '[STEP 5b] npm install succeeded' });
       }
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn(`[STEP 5b] npm install failed: ${(e as Error).message.slice(0, 200)}`);
+       log({ level: 'warn', source: 'codeGenerator', msg: `[STEP 5b] npm install failed: ${(e as Error).message.slice(0, 200)}` });
       staticIssues.push({ file: 'package.json', type: 'npm_install_error', error: (e as Error).message.slice(0, 200) });
     }
-    // eslint-disable-next-line no-console
-    console.log('[STEP 6] Test Generation...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 6] Test Generation...' });
     const testOracle = await testGenerationAgent(callChat, files, expandedTask, architecture, opts);
     if (testOracle?.testCode) {
       const testPath = path.join(projectDir, testOracle.testFile || '_tests.js');
@@ -736,8 +696,7 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
       if (!chk.valid) { syntaxPassed = false; execErrorMsg += `[Syntax Error in ${fname}]:\n${chk.error}\n\n`; }
     }
     if (!syntaxPassed) {
-      // eslint-disable-next-line no-console
-      console.warn('[STEP 5] Syntax errors — routing to debugger');
+       log({ level: 'warn', source: 'codeGenerator', msg: '[STEP 5] Syntax errors — routing to debugger' });
       files = await debuggingAgent(callChat, files, [execErrorMsg], expandedTask, opts);
       for (const [fname, fcontent] of Object.entries(files)) {
         const fp2 = path.join(projectDir, fname);
@@ -746,8 +705,7 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
       }
     }
     for (let bugIter = 1; bugIter <= maxBugFixLoops; bugIter++) {
-      // eslint-disable-next-line no-console
-      console.log(`[STEP 7] Bug Fix Loop ${bugIter}/${maxBugFixLoops}...`);
+       log({ level: 'info', source: 'codeGenerator', msg: `[STEP 7] Bug Fix Loop ${bugIter}/${maxBugFixLoops}...` });
       let runtimeErr = '';
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -760,8 +718,7 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
         ...(runtimeErr ? [`[RUNTIME] ${runtimeErr.slice(0, 500)}`] : []),
       ];
       if (allErrors.length === 0) {
-        // eslint-disable-next-line no-console
-        console.log(`[STEP 7] No critical errors on iteration ${bugIter}`);
+         log({ level: 'info', source: 'codeGenerator', msg: `[STEP 7] No critical errors on iteration ${bugIter}` });
         break;
       }
       files = await debuggingAgent(callChat, files, allErrors, expandedTask, opts);
@@ -772,26 +729,21 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
       }
       staticIssues = await staticAnalysisAgent(callChat, files, expandedTask, opts);
     }
-    // eslint-disable-next-line no-console
-    console.log('[STEP 8] UX/Design Review...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 8] UX/Design Review...' });
     const uxResult = await uxDesignAgent(callChat, files, expandedTask, requirementsSpec, opts);
-    // eslint-disable-next-line no-console
-    console.log('[STEP 9] Security + Performance Review...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 9] Security + Performance Review...' });
     const securityResult = await securityPerformanceAgent(callChat, files, expandedTask, opts);
     let automationTestResults = { passed: 0, failed: 0, errors: [] as string[] };
-    // eslint-disable-next-line no-console
-    console.log('[STEP 10b] Running full automation test suite...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 10b] Running full automation test suite...' });
     try {
       automationTestResults = await runFullAutomationTests(projectDir, architecture.entryPoint || 'server.js', files, architecture, expandedTask, buildCmds, runCmds);
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn(`[AUTOMATION] Test run error: ${(e as Error).message}`);
+       log({ level: 'warn', source: 'codeGenerator', msg: `[AUTOMATION] Test run error: ${(e as Error).message}` });
       automationTestResults.errors.push((e as Error).message);
     }
     for (let oracleIter = 0; oracleIter < maxOracleLoops; oracleIter++) {
       if (automationTestResults.failed === 0 && automationTestResults.errors.length === 0) break;
-      // eslint-disable-next-line no-console
-      console.log(`[STEP 6b] Oracle fix loop ${oracleIter + 1}/${maxOracleLoops}...`);
+       log({ level: 'info', source: 'codeGenerator', msg: `[STEP 6b] Oracle fix loop ${oracleIter + 1}/${maxOracleLoops}...` });
       files = await oracleFixLoop(callChat, files, automationTestResults.errors.join('\n'), opts);
       for (const [fname, fcontent] of Object.entries(files)) {
         if (fname === '_automation.js') continue;
@@ -803,8 +755,7 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
         automationTestResults = await runFullAutomationTests(projectDir, architecture.entryPoint || 'server.js', files, architecture, expandedTask, buildCmds, runCmds);
       } catch (e) { automationTestResults.errors.push((e as Error).message); }
     }
-    // eslint-disable-next-line no-console
-    console.log('[STEP 11] Deployment Artifacts...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 11] Deployment Artifacts...' });
     const deployFiles = await deploymentAgent(callChat, files, expandedTask, projectDir, opts);
     Object.assign(files, deployFiles);
     for (const [fname, fcontent] of Object.entries(deployFiles)) {
@@ -812,8 +763,7 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
       fs.mkdirSync(path.dirname(fp5), { recursive: true });
       fs.writeFileSync(fp5, fcontent || '', 'utf-8');
     }
-    // eslint-disable-next-line no-console
-    console.log('[STEP 12] Continuous Feedback Loop...');
+     log({ level: 'info', source: 'codeGenerator', msg: '[STEP 12] Continuous Feedback Loop...' });
     for (let feedbackIter = 1; feedbackIter <= maxFeedbackLoops; feedbackIter++) {
       const currentStaticIssues = await staticAnalysisAgent(callChat, files, expandedTask, opts);
       const { files: updatedFiles, done } = await continuousFeedbackAgent(callChat, files, automationTestResults, currentStaticIssues, securityResult, uxResult, null, expandedTask, feedbackIter, opts);
@@ -829,8 +779,7 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
     const finalStaticIssues = await staticAnalysisAgent(callChat, files, expandedTask, opts);
     const remainingImgIssues = finalStaticIssues.filter(i => i.type?.includes('asset'));
     if (remainingImgIssues.length > 0) {
-      // eslint-disable-next-line no-console
-      console.warn(`[FINAL] ${remainingImgIssues.length} asset issues remain — forcing SVG replacement`);
+      log({ level: 'warn', source: 'codeGenerator', msg: `[FINAL] ${remainingImgIssues.length} asset issues remain — forcing SVG replacement` });
       files = await debuggingAgent(callChat, files, remainingImgIssues.map(i => `[ASSET] ${i.file}: ${i.match || i.ref} — REPLACE WITH INLINE SVG`), expandedTask, opts);
       for (const [fname, fcontent] of Object.entries(files)) {
         if (fname === '_automation.js') continue;
@@ -839,8 +788,7 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
         fs.writeFileSync(fp7, fcontent || '', 'utf-8');
       }
     }
-    // eslint-disable-next-line no-console
-    console.log('[FINAL] Extracting artifacts...');
+    log({ level: 'info', source: 'codeGenerator', msg: '[FINAL] Extracting artifacts...' });
     const finalFilesMap: Record<string, string> = {};
     for (const [fname] of Object.entries(files)) {
       const parts = fname.split(/[/\\]/);
@@ -852,13 +800,11 @@ export async function generateAndRunProject(callChat: any, task: string, opts: a
       }
     }
     safeRmSync(projectDir);
-    // eslint-disable-next-line no-console
-    console.log('[FINAL] All 12 pipeline steps complete. Ephemeral sandbox wiped.');
+    log({ level: 'info', source: 'codeGenerator', msg: '[FINAL] All 12 pipeline steps complete. Ephemeral sandbox wiped.' });
     return { files: finalFilesMap, buildCommands: buildCmds || 'npm install', runCommands: runCmds, success: true, automationResults: automationTestResults };
   } catch (e) {
     safeRmSync(projectDir);
-    // eslint-disable-next-line no-console
-    console.error(`[CRITICAL] generateAndRunProject failed: ${(e as Error).message}\n${(e as Error).stack}`);
+    log({ level: 'error', source: 'codeGenerator', msg: `[CRITICAL] generateAndRunProject failed: ${(e as Error).message}\n${(e as Error).stack}` });
     return { success: false, error: (e as Error).message };
   }
 }

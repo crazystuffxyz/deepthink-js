@@ -1,0 +1,106 @@
+{
+  "model": "minimax-m3:cloud",
+  "critique_model": "gemma4:31b-cloud",
+  "depth": 2,
+  "checks": 2,
+  "rows": [
+    {
+      "bench": "aime-2024-I",
+      "label": "AIME 2024 I",
+      "total": 5,
+      "pOk": 4,
+      "dOk": 4,
+      "pExecOk": 4,
+      "dExecOk": 4
+    },
+    {
+      "bench": "aime-2024-II",
+      "label": "AIME 2024 II",
+      "total": 5,
+      "pOk": 2,
+      "dOk": 3,
+      "pExecOk": 2,
+      "dExecOk": 3
+    },
+    {
+      "bench": "aime-2023-I",
+      "label": "AIME 2023 I",
+      "total": 5,
+      "pOk": 3,
+      "dOk": 4,
+      "pExecOk": 3,
+      "dExecOk": 4
+    },
+    {
+      "bench": "usamo-2024",
+      "label": "USAMO 2024",
+      "total": 6,
+      "pOk": 1,
+      "dOk": 2,
+      "pExecOk": 1,
+      "dExecOk": 2
+    },
+    {
+      "bench": "imo-2024",
+      "label": "IMO 2024",
+      "total": 6,
+      "pOk": 4,
+      "dOk": 1,
+      "pExecOk": 4,
+      "dExecOk": 1
+    },
+    {
+      "bench": "integration-bee",
+      "label": "Integration Bee",
+      "total": 2,
+      "pOk": 1,
+      "dOk": 1,
+      "pExecOk": 1,
+      "dExecOk": 1
+    }
+  ],
+  "coding": {
+    "plain_bytes": 12004,
+    "dt_bytes": 8471,
+    "plain_seconds": 543.775,
+    "dt_seconds": 403.992,
+    "critique": {
+      "model": "minimax-m3:cloud",
+      "axes": [
+        "correctness",
+        "completeness",
+        "code_quality",
+        "ux",
+        "perf"
+      ],
+      "scores": {
+        "plain": {
+          "seconds": 11.6,
+          "raw": "{\"correctness\":9,\"completeness\":8,\"code_quality\":8,\"ux\":8,\"perf\":7,\"total\":40,\"notes\":\"Physics is correct (Newtonian gravity with softening, semi-implicit Euler, fixed-timestep accumulator with substep cap). Solid UX with drag-launch preview, speed label, glow, trails, and touch support. Perf: per-frame createLinearGradient and hexToRgba allocations plus O(n) trail splice could hurt with many planets; no object pooling.\"}",
+          "parsed": {
+            "correctness": 9,
+            "completeness": 8,
+            "code_quality": 8,
+            "ux": 8,
+            "perf": 7,
+            "total": 40,
+            "notes": "Physics is correct (Newtonian gravity with softening, semi-implicit Euler, fixed-timestep accumulator with substep cap). Solid UX with drag-launch preview, speed label, glow, trails, and touch support. Perf: per-frame createLinearGradient and hexToRgba allocations plus O(n) trail splice could hurt with many planets; no object pooling."
+          }
+        },
+        "dt": {
+          "seconds": 18.1,
+          "raw": "{\"correctness\":8,\"completeness\":7,\"code_quality\":8,\"ux\":7,\"perf\":8,\"total\":38,\"notes\":\"Physics (pairwise gravity with softening, semi-implicit Euler) and drag-to-launch mechanics are correctly implemented with good fixed-timestep loop. Missing common sandbox features: mass is hardcoded to 1 with no UI to change it, no way to delete individual planets, no presets/scenarios, and planets aren't rescaled on resize (can drift off-screen). Trail splice in hot path is capped so it's fine, overall perf is solid.\"}",
+          "parsed": {
+            "correctness": 8,
+            "completeness": 7,
+            "code_quality": 8,
+            "ux": 7,
+            "perf": 8,
+            "total": 38,
+            "notes": "Physics (pairwise gravity with softening, semi-implicit Euler) and drag-to-launch mechanics are correctly implemented with good fixed-timestep loop. Missing common sandbox features: mass is hardcoded to 1 with no UI to change it, no way to delete individual planets, no presets/scenarios, and planets aren't rescaled on resize (can drift off-screen). Trail splice in hot path is capped so it's fine, overall perf is solid."
+          }
+        }
+      }
+    }
+  }
+}

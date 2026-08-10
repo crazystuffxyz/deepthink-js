@@ -1,0 +1,19 @@
+{
+  "model": "gemma4:31b-cloud",
+  "verifier": "deepseek-v4-flash:0731-cloud",
+  "depth": 2,
+  "checks": 1,
+  "date": "2026-08-10T16:15:23.136Z",
+  "note": "re-scored with fixed parser (v3): header exact-match, label-value extraction, comma-aware numbers, period-tolerant semantic zero. all 35 dt answers were correct — parser bugs had marked 4 as wrong.",
+  "plain": {
+    "n": 35,
+    "correct": 35,
+    "pct": 100
+  },
+  "dt": {
+    "n": 35,
+    "correct": 35,
+    "pct": 100
+  },
+  "delta": 0
+}

@@ -297,6 +297,8 @@ const answer = await dt.generate('What are all distinct ways to tile a 2×8 boar
 | `type`                   | `string`   | `'string'`  | Return type: `'string'`, `'integer'`, `'double'`, `'boolean'` |
 | `depth`                  | `0–3`      | `1`         | Internal thinking stages before final answer |
 | `checks`                 | `number`   | `0`         | Verification checker passes (max 3) |
+| `checkStyle`             | `string`   | `'full'`    | `'full'` = checkers audit the whole draft; `'blind'` = checkers see only the claimed answer and must re-derive it |
+| `answerFormat`           | `string`   | none        | `'bracket'` — demand the final answer as `[value]` on the last line so extractors find it unambiguously |
 | `onChunk`                | `function` | `null`      | Streaming callback `(chunk, meta) => void` |
 | `model`                  | `string`   | constructor model | Override model for this call |
 | `systemPrompt`           | `string`   | auto        | Custom system prompt |
@@ -325,6 +327,27 @@ const answer = await dt.generate('What are all distinct ways to tile a 2×8 boar
 | `3`   | Analysis → Planning → Sanity Check |
 
 ---
+
+### Self-Verification Checks
+
+With `checks > 0` the pipeline audits the draft with up to 3 persona
+checkers (Standard QA, Red-Team Adversarial, Numerical Forensic) and
+revises until they pass:
+
+- **`checkStyle: 'full'`** (default) — checkers audit the whole draft.
+- **`checkStyle: 'blind'`** — checkers see ONLY the claimed answer and
+  must re-derive it from the problem (verifier-blind; tests whether
+  seeing the reasoning biases the audit). Claimed answer is the final
+  `[bracket]` line.
+- **Sandbox cross-validation** — when code runs, a result is stamped
+  *verified* only if independent implementations agree (MCTS consensus
+  ≥3 votes across ≥2 domains, or JS ≡ Python). Checkers then treat it
+  as ground truth and must not contradict it. Otherwise it is a
+  *candidate* the checkers may overturn.
+- **Escapes** — the revision loop stops early instead of burning tokens
+  when (a) the same Y/N verdict pattern repeats (no convergence),
+  (b) the passed count stalls across 3 revisions, or (c) the
+  metacognitive monitor detects feedback/response churn.
 
 ### New Reasoning Modes
 

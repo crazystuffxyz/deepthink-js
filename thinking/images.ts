@@ -82,5 +82,5 @@ export async function describeImages(callChat: any, images: string[], opts: any 
 // "describe".
 export function looksVisionCapable(model: string): boolean {
   const m = String(model || '').toLowerCase();
-  return /vision|vl|multimodal|gemma3|llava|qwen2?-?vl|gpt-4o|gpt-5|claude|gemini|pixtral/i.test(m);
+  return /vision|vl|multimodal|gemma3|llava|qwen2?-?vl|qwen3\.5|minimax-m3|gpt-4o|gpt-5|claude|gemini|pixtral/i.test(m);
 }

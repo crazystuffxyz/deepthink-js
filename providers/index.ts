@@ -46,9 +46,17 @@ function buildOllamaClient(opts: ProviderOpts, apiKey: string | null): ProviderC
   return {
     async chat(params) {
       const { model, messages, stream, options, think, format, keep_alive: keep, onChunk, ollamaOutput } = params;
+      // ollama's API wants raw base64 in images[], not data URIs — strip the
+      // prefix so vision models accept the payload
+      const ollamaMessages = (messages || []).map(m => {
+        if (Array.isArray(m.images) && m.images.length) {
+          return { ...m, images: m.images.map(img => String(img).replace(/^data:[^;]+;base64,/, '')) };
+        }
+        return m;
+      });
       const chatOpts: Record<string, unknown> = {
         model,
-        messages,
+        messages: ollamaMessages,
         stream: stream ?? false,
         options: options || {},
         ...(think !== undefined && { think }),

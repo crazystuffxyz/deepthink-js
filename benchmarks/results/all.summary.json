@@ -42,50 +42,65 @@
       "dtTok": 16942,
       "dtErrors": 0,
       "corrected": 0
+    },
+    {
+      "bench": "usamo-2024",
+      "label": "USAMO 2024",
+      "total": 6,
+      "pOk": 3,
+      "dOk": 3,
+      "pExecOk": 3,
+      "dExecOk": 3,
+      "dtCalls": 13,
+      "dtTok": 24823,
+      "dtErrors": 0,
+      "corrected": 3
+    },
+    {
+      "bench": "imo-2024",
+      "label": "IMO 2024",
+      "total": 6,
+      "pOk": 6,
+      "dOk": 6,
+      "pExecOk": 6,
+      "dExecOk": 6,
+      "dtCalls": 13,
+      "dtTok": 22719,
+      "dtErrors": 0,
+      "corrected": 6
+    },
+    {
+      "bench": "integration-bee",
+      "label": "Integration Bee",
+      "total": 2,
+      "pOk": 1,
+      "dOk": 1,
+      "pExecOk": 1,
+      "dExecOk": 1,
+      "dtCalls": 10,
+      "dtTok": 9698,
+      "dtErrors": 0,
+      "corrected": 0
+    },
+    {
+      "bench": "mbpp",
+      "label": "MBPP",
+      "total": 5,
+      "pOk": 4,
+      "dOk": 4,
+      "pExecOk": 4,
+      "dExecOk": 4,
+      "dtCalls": 9,
+      "dtTok": 5691,
+      "dtErrors": 0,
+      "corrected": 0
     }
   ],
   "coding": {
-    "plain_bytes": 9378,
-    "dt_bytes": 8364,
-    "plain_seconds": 11.974,
-    "dt_seconds": 62.363,
-    "critique": {
-      "model": "deepseek-v4-flash:0731-cloud",
-      "axes": [
-        "correctness",
-        "completeness",
-        "code_quality",
-        "ux",
-        "perf"
-      ],
-      "scores": {
-        "plain": {
-          "seconds": 19.2,
-          "raw": "{\"correctness\":8,\"completeness\":8,\"code_quality\":5,\"ux\":8,\"perf\":8,\"total\":37,\"notes\":\"Physics and UI work well, but dead code (Planet.updatePosition) and a trail alpha bug reduce code quality; trails don't fade as intended.\"}",
-          "parsed": {
-            "correctness": 8,
-            "completeness": 8,
-            "code_quality": 5,
-            "ux": 8,
-            "perf": 8,
-            "total": 37,
-            "notes": "Physics and UI work well, but dead code (Planet.updatePosition) and a trail alpha bug reduce code quality; trails don't fade as intended."
-          }
-        },
-        "dt": {
-          "seconds": 13.3,
-          "raw": "{\"correctness\":9,\"completeness\":9,\"code_quality\":8,\"ux\":7,\"perf\":8,\"total\":41,\"notes\":\"Physics is correct with semi-implicit Euler and softening. Trail alpha is set per segment but stroked once, so the intended fade effect doesn't work (uniform alpha instead). Minor lack of instructions and no mass control, but core sandbox features are complete.\"}",
-          "parsed": {
-            "correctness": 9,
-            "completeness": 9,
-            "code_quality": 8,
-            "ux": 7,
-            "perf": 8,
-            "total": 41,
-            "notes": "Physics is correct with semi-implicit Euler and softening. Trail alpha is set per segment but stroked once, so the intended fade effect doesn't work (uniform alpha instead). Minor lack of instructions and no mass control, but core sandbox features are complete."
-          }
-        }
-      }
-    }
+    "plain_bytes": 0,
+    "dt_bytes": 0,
+    "plain_seconds": 0,
+    "dt_seconds": 0,
+    "critique": null
   }
 }

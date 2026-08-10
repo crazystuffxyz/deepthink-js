@@ -88,5 +88,23 @@ await test('humanizeText: detector keeps flagging → max iterations, ok=false',
   if (r.history.length !== 2) throw new Error('history should have 2 entries');
 });
 
+await test('humanizeText: References section is never touched (run 10)', async () => {
+  // the humanizer would drop the whole References section; the split must
+  // keep it out of the loop entirely and re-attach it verbatim
+  const refs = '\n---\n## References\n\n[1] (2026). *NVDA Stock Price Today*. Tickzen. https://tickzen.app/stocks/nvda/overview\n[2] (2026). *NVIDIA Corporation (NVDA) Stock Price, News, Quote & History - Yahoo Finance*. Yahoo Finance. https://finance.yahoo.com/quote/NVDA/';
+  const body = 'Furthermore, revenue grew 12.5% in 2024 [Source 3].';
+  const callChat = makeFake({
+    humanize: 'Revenue grew 12.5% in 2024. That is a lot. [Source 3]',
+    integrity: '{"issues": [], "ok": true}',
+    fix: 'Revenue grew 12.5% in 2024. That is a lot. [Source 3]',
+    detect: '{"aiScore": 0, "tells": [], "verdict": "human"}'
+  });
+  const r = await humanizeText(callChat, body + refs, { maxIterations: 3 });
+  if (!r.text.includes('## References')) throw new Error('References section dropped');
+  if (!r.text.includes('https://tickzen.app/stocks/nvda/overview')) throw new Error('reference URL lost');
+  if (!r.text.includes('https://finance.yahoo.com/quote/NVDA/')) throw new Error('reference URL lost');
+  if (!r.text.includes('12.5%')) throw new Error('body number lost');
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

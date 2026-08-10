@@ -488,10 +488,32 @@ function buildCoverageGapsDisclaimer(plannedQueries, verifiedNodes) {
 // URLs so the writer cites both in ONE paragraph instead of repeating the
 // fact in separate sections. qualitative claims (no numbers) never merge.
 function mergeDuplicateClaims(nodes) {
-    // number normalization: "81.61 billion" and "$81.61B" must collide, so
-    // strip $/commas and fold billion/million/trillion into b/m/t suffixes.
-    const numKey = (t) => t.replace(/[\$,]/g, '').replace(/\s*(billion|million|trillion)\s*/g, (_m, w) => w[0]).replace(/\s+/g, '');
-    const numsOf = (s) => new Set((s.toLowerCase().match(/\$?[\d,]+(?:\.\d+)?\s*(?:billion|million|trillion|[bm%])?/gi) || []).map(numKey));
+    // number normalization so the same fact cited twice collides even when
+    // the phrasing differs: "$253.49B" == "253.49 billion" == "253.49b USD",
+    // and "6.53" ~ "6.54" (sources round differently). each token yields its
+    // exact key PLUS a 1-decimal-rounded key, so near-equal figures match.
+    // bare 4-digit years and bare single digits are NOT distinctive ("2026"
+    // appears in every claim; "5" in "5-year") and are dropped.
+    const numsOf = (s) => {
+        const out = new Set();
+        const toks = (s.toLowerCase().match(/\$?[\d,]+(?:\.\d+)?\s*(?:billion|million|trillion|[bm%])?/gi) || []);
+        for (const t of toks) {
+            const k = t.replace(/[\$,]/g, '').replace(/\s*(billion|million|trillion)\s*/g, (_m, w) => w[0]).replace(/\s+/g, '');
+            const m = k.match(/^(\d+)(?:\.(\d+))?([bm%])?$/);
+            if (!m)
+                continue;
+            const suffix = m[3] || '';
+            // drop bare years ("2026") and bare single digits ("5" in "5-year") —
+            // they are not distinctive. decimals like "6.53" keep their value.
+            if (!suffix && !m[2] && (m[1].length === 4 || m[1].length === 1))
+                continue;
+            out.add(k);
+            const rounded = Math.round(parseFloat(m[1] + (m[2] ? '.' + m[2] : '')) * 10) / 10;
+            if (!isNaN(rounded))
+                out.add(String(rounded) + suffix);
+        }
+        return out;
+    };
     const wordsOf = (s) => new Set((s.toLowerCase().match(/[a-z]{4,}/g) || []).slice(0, 12));
     const out = [];
     const used = new Set();
@@ -512,10 +534,13 @@ function mergeDuplicateClaims(nodes) {
                 continue;
             const wordsB = wordsOf(b.claim || '');
             const sharedWords = [...wordsA].filter((w) => wordsB.has(w)).length;
-            if (sharedWords >= 3) {
+            // same distinctive number twice (exact + rounded variants) is nearly
+            // proof of the same fact; one number + a shared content word also
+            // holds for "diluted EPS 6.53" vs "diluted EPS 6.54".
+            if (sharedNums >= 2 || (sharedNums >= 1 && sharedWords >= 1)) {
                 used.add(j);
                 merged.urls.push(b.url);
-                log({ level: 'info', msg: `[STEP 6] Merged duplicate claim (${sharedNums} shared numbers): "${(a.claim || '').slice(0, 60)}..." + "${(b.claim || '').slice(0, 60)}..."`, source: 'researchAgent', ts: Date.now() });
+                log({ level: 'info', msg: `[STEP 6] Merged duplicate claim (${sharedNums} shared nums, ${sharedWords} shared words): "${(a.claim || '').slice(0, 60)}..." + "${(b.claim || '').slice(0, 60)}..."`, source: 'researchAgent', ts: Date.now() });
             }
         }
         out.push(merged);
@@ -1018,4 +1043,4 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
         return { report: `Research failed: ${e.message}`, references: [], claimCount: 0, stepSummary, success: false };
     }
 }
-export { detectAnswerFormat, plannerAgent, crawlerAgent, verificationAgent, scoreCredibility, extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent, buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier, mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent, critiqueAndRepairLoop, isolatedCall, DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS, };
+export { detectAnswerFormat, plannerAgent, crawlerAgent, verificationAgent, scoreCredibility, extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent, buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier, mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent, critiqueAndRepairLoop, isolatedCall, mergeDuplicateClaims, DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS, };

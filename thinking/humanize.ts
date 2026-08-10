@@ -126,6 +126,14 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
   const threshold = opts.detectorThreshold ?? 0;
   const log = opts.log || (() => {});
   let current = String(text ?? '');
+  // the References section is metadata (titles, years, URLs) — the
+  // humanizer must never touch it. run 10: a rewrite dropped the whole
+  // References section and the integrity check only catches individual
+  // claims, so the report shipped without sources. split it off, humanize
+  // the body only, re-attach at the end.
+  const refIdx = current.search(/\n---\n## References|\n## References/i);
+  const refTail = refIdx > -1 ? current.slice(refIdx) : '';
+  if (refTail) current = current.slice(0, refIdx);
   const history: any[] = [];
 
   for (let iter = 1; iter <= maxIterations; iter++) {
@@ -185,7 +193,7 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
     current = rewritten;
     if (score <= threshold) {
       log({ level: 'success', msg: `[humanize] detector at ${score} <= ${threshold} — done after ${iter} iterations`, source: 'humanize', ts: Date.now() });
-      return { text: current, iterations: iter, finalScore: score, history, ok: true };
+      return { text: current + refTail, iterations: iter, finalScore: score, history, ok: true };
     }
     // plateau guard: if the score stopped improving two passes in a row,
     // more rewrites just burn calls — the tells feedback has converged.
@@ -193,11 +201,11 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
     const prev2 = history.at(-3)?.aiScore;
     if (prev != null && prev2 != null && score >= prev && prev >= prev2) {
       log({ level: 'warn', msg: `[humanize] score plateaued (${prev2} -> ${prev} -> ${score}) — stopping early`, source: 'humanize', ts: Date.now() });
-      return { text: current, iterations: iter, finalScore: score, history, ok: score <= threshold };
+      return { text: current + refTail, iterations: iter, finalScore: score, history, ok: score <= threshold };
     }
   }
   log({ level: 'warn', msg: `[humanize] hit max iterations (${maxIterations}) — final score ${history.at(-1)?.aiScore ?? '?'}`, source: 'humanize', ts: Date.now() });
-  return { text: current, iterations: maxIterations, finalScore: history.at(-1)?.aiScore ?? 100, history, ok: history.at(-1)?.aiScore <= threshold };
+  return { text: current + refTail, iterations: maxIterations, finalScore: history.at(-1)?.aiScore ?? 100, history, ok: history.at(-1)?.aiScore <= threshold };
 }
 
 export { AI_TELL_WORDS, extractClaims, claimsSurvived };

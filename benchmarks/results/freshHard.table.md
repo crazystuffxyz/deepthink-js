@@ -4,5 +4,5 @@ model: gemma4:31b-cloud | verifier: deepseek-v4-flash:0731-cloud | depth 2 check
 
 | kind | plain | dt | delta |
 |---|---|---|---|
-| math | 14/15 | 14/15 | +0 |
-| **total** | **14/15** | **14/15** | **+0** |
+| choice | 20/20 | 20/20 | +0 |
+| **total** | **20/20** | **20/20** | **+0** |

@@ -3,16 +3,16 @@
   "verifier": "deepseek-v4-flash:0731-cloud",
   "depth": 2,
   "checks": 1,
-  "date": "2026-08-10T16:28:49.308Z",
+  "date": "2026-08-10T17:45:28.581Z",
   "plain": {
-    "n": 15,
-    "correct": 14,
-    "pct": 93.3
+    "n": 20,
+    "correct": 20,
+    "pct": 100
   },
   "dt": {
-    "n": 15,
-    "correct": 14,
-    "pct": 93.3
+    "n": 20,
+    "correct": 20,
+    "pct": 100
   },
   "delta": 0
 }

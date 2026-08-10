@@ -32,9 +32,9 @@ const HUMANIZE = process.argv.includes('--humanize');
 const FILES = (arg('files', '') || '').split(',').map((s) => s.trim()).filter(Boolean);
 const TOPIC = arg('topic', '') || 'Explain how CRISPR-Cas9 gene editing works, what its current clinical applications are, and analyze the main ethical debates around germline editing. Cite every source.';
 
-let runN = 1;
-while (fs.existsSync(path.join(OUT, `test-${runN}.md`))) runN++;
 const EXT = FORMAT === 'html' ? 'html' : FORMAT === 'json' ? 'json' : FORMAT === 'plain' ? 'txt' : 'md';
+let runN = 1;
+while (fs.existsSync(path.join(OUT, `test-${runN}.${EXT}`))) runN++;
 const MD = path.join(OUT, `test-${runN}.${EXT}`);
 const META = path.join(OUT, `test-${runN}.meta.json`);
 

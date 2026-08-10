@@ -147,7 +147,7 @@ QUERY DESIGN RULES:
 1. Divergent Thinking: Do not simply paraphrase. Use different terminologies (e.g., academic vs. industry terms).
 2. Explicit Goals: Every query must have a clear "Information Objective" (e.g., "Find the specific 2023 revenue for X").
 3. Temporal Alignment: Embed dates/years directly into queries to match time constraints.
-4. Entity Targeting: Use queries that name-drop the predicted entity types.
+4. Entity Targeting: Use queries that name-drop the predicted entity types.${opts.mode === 'stock' && opts.ticker ? `\n5. STOCK MODE: one depth-1 query MUST fetch the CURRENT share price/quote of ${opts.ticker} (e.g. "${opts.ticker} stock price today").` : ''}
 
 Query budget: depth-0: ${d0count}, depth-1: ${d1count}, depth-2: ${d2count}
 
@@ -161,6 +161,14 @@ CRITICAL: Respond with RAW JSON ONLY. Start with '{' and end with '}'.` },
   if (parsed) {
     const total = d0count + d1count + d2count;
     const sliced = parsed.queries.slice(0, total);
+    // stock mode: a current-price query is non-negotiable — the quant
+    // engine dies without it. the planner may or may not have included one;
+    // make sure it exists deterministically instead of hoping (run 6 had 6
+    // queries, zero about the price, so the whole quant model fell over).
+    if (opts.mode === 'stock' && opts.ticker) {
+      const hasQuote = sliced.some((q: any) => /quote|current price|share price|stock price|trading at|trades at/i.test(q.query));
+      if (!hasQuote) sliced.unshift({ query: `${opts.ticker} stock price today current quote`, goal: 'Get the current market price of the stock', depth: 1, topic: 'current price' });
+    }
     log({ level: 'info', msg: `[STEP 1] Generated ${sliced.length} queries across 3 DAG depths`, source: 'researchAgent', ts: Date.now() });
     return sliced;
   }
@@ -963,15 +971,21 @@ function formatReport(report: string, opts: any, topic: string, answerSpec: any,
 // writer is forced into inventing numbers.
 async function recoverStockQuote(callChat: any, topic: string, opts: any = {}): Promise<any[]> {
   const ticker = opts.ticker || '';
-  const q = ticker ? `${ticker} stock price quote today` : `${topic} current price quote`;
-  log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl "${q}"`, source: 'researchAgent', ts: Date.now() });
+  // several phrasings — quote pages vary ("price", "quote", "live", "now")
+  // and the fallback search instance is literal; one phrasing can 404.
+  const queries = ticker
+    ? [`${ticker} stock price today`, `${ticker} current share price quote`, `${ticker} stock quote live now`, `${ticker} last close price`]
+    : [`${topic} current price quote`];
+  log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl (${queries.length} phrasings)`, source: 'researchAgent', ts: Date.now() });
   try {
-    const results = await crawlerAgent([q], 2, opts);
-    const credible = verificationAgent(results, 30, opts).slice(0, 4);
+    const results = await crawlerAgent(queries, 2, opts);
+    // quote aggregators are low-DA pages — threshold 25 instead of 30 so
+    // stockanalysis/marketwatch/yahoo actually make it through
+    const credible = verificationAgent(results, 25, opts).slice(0, 6);
     if (!credible.length) return [];
-    const sums = await extractWithFallback(callChat, credible, [], topic, { requiredFields: ['current stock price', 'EPS', 'beta', 'revenue growth'] }, { ...opts, maxSummaries: 2 });
+    const sums = await extractWithFallback(callChat, credible, [], topic, { requiredFields: ['current stock price', 'EPS', 'beta', 'revenue growth'] }, { ...opts, maxSummaries: 3 });
     if (!sums.length) return [];
-    return await factVerificationLoop(callChat, sums.slice(0, 2), topic, opts);
+    return await factVerificationLoop(callChat, sums.slice(0, 3), topic, opts);
   } catch (e) {
     log({ level: 'warn', msg: `[QUANT] Quote recovery failed: ${(e as Error).message}`, source: 'researchAgent', ts: Date.now() });
     return [];
@@ -1080,6 +1094,26 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
         reportLengthDelta: finalReport.length - initialReport.length,
       };
       log({ level: 'success', msg: `[STEP 9] Critique loop complete — ${critiqueHistory.length} loops, final report: ${finalReport.length} chars`, source: 'researchAgent', ts: Date.now() });
+    }
+    // invented-math purge (run 6): when the quant engine could NOT compute,
+    // the writer sometimes fabricates GBM/VaR/Sharpe numbers anyway — the
+    // anti-hallucination note is a prompt, not a guarantee. after the
+    // critics have had their say, strip any model-math claims with one
+    // strict repair pass so the shipped report never carries invented math.
+    if (quantModel && !quantModel.ok && opts.mode === 'stock') {
+      const MATH_TOKENS = [/Sharpe/i, /\bVaR\b/i, /Geometric Brownian/i, /\bGBM\b/i, /Ito'?s|Itô|Ito lemma/i, /drift correction/i, /volatility drag/i, /Monte Carlo/i, /jump[- ]diffusion/i, /Black[- ]Scholes/i, /implied volatility/i, /\bCAPM\b/i, /cost of equity/i, /intrinsic value/i, /discounted cash flow/i, /\bDCF\b/i, /expected log-return/i, /risk-adjusted/i];
+      const mathHits = MATH_TOKENS.filter((t) => t.test(finalReport));
+      if (mathHits.length) {
+        log({ level: 'warn', msg: `[QUANT] Report carries ${mathHits.length} model-math claims with no computable model — running purge repair`, source: 'researchAgent', ts: Date.now() });
+        const purgeR = await callChat(
+          [{ role: 'system', content: `You are a strict quantitative-claims editor. The research pipeline could NOT compute a quantitative finance model for this report (missing price/EPS/beta in the verified sources — a separate "Quantitative Model" section will explain why).\n\nREWRITE THE REPORT SO THAT:\n1. EVERY quantitative-finance claim is REMOVED — invented expected returns, Sharpe ratios, VaR figures, GBM/Ito derivations, drift corrections, volatility drags, DCF/intrinsic-value numbers, Monte Carlo, jump-diffusion, CAPM/cost-of-equity figures, implied volatility. These were fabricated.\n2. Where a paragraph depended on such math, replace the math sentence with: "A full quantitative model could not be computed from the verified sources; see the Quantitative Model section below."\n3. KEEP every other sentence, figure, citation tag ([Source N]), section heading, and the entire References section EXACTLY as-is.\n4. Do not add new analysis. Do not invent sources. Output ONLY the rewritten report — nothing else.` },
+           { role: 'user', content: `REPORT:\n${finalReport}` }],
+          false, null, { ...opts, think: false, samplingProfile: 'reasoning' });
+        const purged = (purgeR.content || '').trim();
+        if (purged.length > finalReport.length * 0.5) finalReport = purged;
+        const remaining = MATH_TOKENS.filter((t) => t.test(finalReport));
+        log({ level: remaining.length ? 'warn' : 'success', msg: `[QUANT] Purge repair ${remaining.length ? `incomplete — ${remaining.length} tokens remain` : 'clean'}`, source: 'researchAgent', ts: Date.now() });
+      }
     }
     // the computed quant section is appended AFTER the critique loop so no
     // critic/repair pass can rewrite code-computed math — it lands between

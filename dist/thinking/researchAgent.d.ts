@@ -22,7 +22,8 @@ declare function domainExpertCritic(callChat: any, report: string, domainInfo: a
 declare function adversarialCritic(callChat: any, report: string, topic: string, opts?: any): Promise<any>;
 declare function constrainedRepairAgent(callChat: any, report: string, allIssues: any[], topic: string, opts?: any): Promise<string>;
 declare function critiqueAndRepairLoop(callChat: any, report: string, verifiedNodes: any[], topic: string, opts?: any, quantModel?: any): Promise<any>;
+declare function quantConformanceRepair(report: string, quantModel: any): string;
 declare function recoverStockQuote(callChat: any, topic: string, opts?: any): Promise<any[]>;
 export default function runDeepResearch(callChat: any, topic: string, opts?: any): Promise<any>;
-export { detectAnswerFormat, plannerAgent, crawlerAgent, verificationAgent, scoreCredibility, extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent, buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier, mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent, critiqueAndRepairLoop, isolatedCall, mergeDuplicateClaims, recoverStockQuote, DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS, };
+export { detectAnswerFormat, plannerAgent, crawlerAgent, verificationAgent, scoreCredibility, extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent, buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier, mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent, critiqueAndRepairLoop, quantConformanceRepair, isolatedCall, mergeDuplicateClaims, recoverStockQuote, DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS, };
 //# sourceMappingURL=researchAgent.d.ts.map

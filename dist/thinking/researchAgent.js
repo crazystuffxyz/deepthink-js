@@ -974,15 +974,30 @@ function quantConformanceRepair(report, quantModel) {
     // banned words disqualify a match: "price target of $180" is never the
     // current price, "volatility drag" is a different metric, and quarterly
     // EPS must never be rewritten to the annual figure.
-    const PRICE_BAN = ['target', 'forecast', 'guidance', 'projection', 'estimate', 'expect', 'range', 'high', 'low'];
+    const PRICE_BAN = ['target', 'forecast', 'guidance', 'projection', 'estimate', 'expect', 'range', 'high', 'low', 'week', 'year'];
     const EPS_BAN = ['q1', 'q2', 'q3', 'q4', 'quarter', 'quarterly'];
     const rules = [
-        // current/market/share/stock price — the consensus quote, never a target
-        { re: /(?:current|market|share|stock|trading|last)\s+price[^$\n]{0,40}?\$([\d,]+\.?\d*)/gi, banned: PRICE_BAN, fn: (_m, n) => R(q.price) && n !== R(q.price) ? R(q.price) : null },
+        // current/market/share/stock price — the consensus quote, never a target.
+        // $ is optional ("trading at a current price of 218.14 USD"); the trailing
+        // window pulls the %-and-banned-word context ("fell 5% to $210", "closed
+        // at 52-week high of $150") INTO the match so the guards can see it; the
+        // strict decimal capture stops "2021." from swallowing the sentence
+        // period; the year-guard keeps years.
+        { re: /(?:current|market|share|stock|trading|last)\s+price[^$\n]{0,40}?\$?([\d,]+(?:\.\d+)?)[^$\n]{0,15}/gi, banned: PRICE_BAN, fn: (m, n) => {
+                const i = m.indexOf(n);
+                return (i > -1 && m[i + n.length] === '%') || /^(19|20)\d{2}$/.test(n) ? null : (R(q.price) && n !== R(q.price) ? R(q.price) : null);
+            } },
         // price actions ("closed at $217.55", "trades at $150.42")
-        { re: /(?:trades? at|trading at|closed at|currently trading at|currently sits at|quoted at|price (?:is|of))[^$\n]{0,30}?\$([\d,]+\.?\d*)/gi, banned: PRICE_BAN, fn: (_m, n) => R(q.price) && n !== R(q.price) ? R(q.price) : null },
-        // EPS — trailing context so "EPS of $1.30 for Q3" is caught by the ban
-        { re: /(?:EPS|earnings per share)[^$\n]{0,40}?\$?([\d,]+\.\d{2})[^$\n]{0,25}/gi, banned: EPS_BAN, fn: (_m, n) => R(q.eps) && n !== R(q.eps) ? R(q.eps) : null },
+        { re: /(?:trades? at|trading at|closed at|currently trading at|currently sits at|quoted at|price (?:is|of))[^$\n]{0,30}?\$?([\d,]+(?:\.\d+)?)[^$\n]{0,15}/gi, banned: PRICE_BAN, fn: (m, n) => {
+                const i = m.indexOf(n);
+                return (i > -1 && m[i + n.length] === '%') || /^(19|20)\d{2}$/.test(n) ? null : (R(q.price) && n !== R(q.price) ? R(q.price) : null);
+            } },
+        // EPS — trailing context so "EPS of $1.30 for Q3" is caught by the ban;
+        // %-guard stops "EPS growth of 5%" from grabbing the growth number
+        { re: /(?:EPS|earnings per share)[^$\n]{0,40}?\$?([\d,]+\.\d{2})[^$\n]{0,25}/gi, banned: EPS_BAN, fn: (m, n) => {
+                const i = m.indexOf(n);
+                return (i > -1 && m[i + n.length] === '%') || /^(19|20)\d{2}$/.test(n) ? null : (R(q.eps) && n !== R(q.eps) ? R(q.eps) : null);
+            } },
         // beta (same windowed anchors as the engine)
         { re: /(?:beta|Beta)\s+(?:of|at|is|:|=)\s*([\d.]+)/gi, banned: [], fn: (_m, n) => R(q.beta) && n !== R(q.beta) ? R(q.beta) : null },
         { re: /(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/gi, banned: [], fn: (_m, n) => R(q.beta) && n !== R(q.beta) ? R(q.beta) : null },
@@ -993,8 +1008,12 @@ function quantConformanceRepair(report, quantModel) {
         { re: /(?:cost of equity|discount rate|WACC)[^%0-9]{0,40}?([\d.]+)\s*%/gi, banned: [], fn: (_m, n) => Rpc(q.costOfEquity, 2) && n !== Rpc(q.costOfEquity, 2) ? Rpc(q.costOfEquity, 2) : null },
         // intrinsic value (DCF output)
         { re: /intrinsic value[^$\n]{0,40}?\$([\d,]+\.?\d*)/gi, banned: [], fn: (_m, n) => R(q.intrinsicValue) && n !== R(q.intrinsicValue) ? R(q.intrinsicValue) : null },
-        // forward price E[S_T] — "expected price of $X in one year"
-        { re: /expected price[^$\n]{0,40}?\$([\d,]+\.?\d*)/gi, banned: ['target'], fn: (_m, n) => R(q.expectedPrice) && n !== R(q.expectedPrice) ? R(q.expectedPrice) : null },
+        // forward price E[S_T] — "expected price of $X in one year" (run 8's
+        // writer said "expected MEAN price of $217.55" — S0 instead of E[S_T])
+        { re: /expected (?:mean )?price[^$\n]{0,40}?\$?([\d,]+(?:\.\d+)?)/gi, banned: ['target'], fn: (m, n) => {
+                const i = m.indexOf(n);
+                return (i > -1 && m[i + n.length] === '%') || /^(19|20)\d{2}$/.test(n) ? null : (R(q.expectedPrice) && n !== R(q.expectedPrice) ? R(q.expectedPrice) : null);
+            } },
         // expected returns — log-return FIRST (its own rule), then plain μ
         { re: /expected log-return[^%0-9]{0,30}?([\d.]+)\s*%/gi, banned: [], fn: (_m, n) => Rpc(q.expectedLogReturn, 1) && n !== Rpc(q.expectedLogReturn, 1) ? Rpc(q.expectedLogReturn, 1) : null },
         { re: /expected (?:annual )?return[^%0-9]{0,30}?([\d.]+)\s*%/gi, banned: [], fn: (_m, n) => Rpc(q.expectedReturn, 1) && n !== Rpc(q.expectedReturn, 1) ? Rpc(q.expectedReturn, 1) : null },

@@ -31,7 +31,10 @@ function yearLike(v) {
 // for fiscal 2026 was $150.42"): walk each anchor hit and scan forward,
 // skipping year-like numbers ("2026") and %-moves ("up 5% to $150") until
 // a real price appears. returns EVERY hit — the caller picks the mode.
+// banned words are checked BOTH before the anchor ("after-hours current
+// price") and between the anchor and the number ("price target of $180").
 const PRICE_ANCHORS = ['current price', 'market price', 'last price', 'share price', 'stock price', 'price per share'];
+const PRICE_BANNED_WORDS = ['target', 'forecast', 'guidance', 'projection', 'estimate', 'after-hours', 'after hours', 'afterhours'];
 function scanPriceForwardAll(text) {
     const out = [];
     for (const anchor of PRICE_ANCHORS) {
@@ -40,11 +43,14 @@ function scanPriceForwardAll(text) {
             const hit = g.exec(text);
             if (!hit)
                 break;
+            const pre = text.slice(Math.max(0, hit.index - 25), hit.index).toLowerCase();
+            if (PRICE_BANNED_WORDS.some((w) => pre.includes(w)))
+                continue;
             const slice = text.slice(hit.index + hit[0].length, hit.index + hit[0].length + 60);
             // a banned word between the anchor and the first number means this
             // hit is about a target/forecast, not the current price — reject it
             const before = slice.split(/\d/)[0].toLowerCase();
-            if (['target', 'forecast', 'guidance', 'projection', 'estimate'].some((w) => before.includes(w)))
+            if (PRICE_BANNED_WORDS.some((w) => before.includes(w)))
                 continue;
             for (const nm of slice.matchAll(/\$?([\d,]+\.?\d*)\s*%?/g)) {
                 const v = parseFloat(nm[1].replace(/[,$]/g, ''));
@@ -65,7 +71,8 @@ function harvest(text, anchors, fallbackPattern, banned = []) {
             const mm = g.exec(text);
             if (!mm)
                 break;
-            if (banned.some((w) => mm[0].toLowerCase().includes(w)))
+            const ctx = text.slice(Math.max(0, mm.index - 25), mm.index + mm[0].length).toLowerCase();
+            if (banned.some((w) => ctx.includes(w)))
                 continue;
             const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
             if (!isNaN(v) && !yearLike(v))
@@ -86,10 +93,12 @@ function harvest(text, anchors, fallbackPattern, banned = []) {
     return null;
 }
 // harvestAll — like harvest() but collects EVERY match instead of the first.
-// the caller pools candidates and takes the MODE: sources disagree on the
-// exact quote ($217.55 vs $223.96), and the value the most sources state is
-// the one the writer sees cited most — so the engine and the report prose
-// converge on the same number instead of fighting each other.
+// the caller pools candidates and picks the consensus: sources disagree on
+// the exact quote ($217.55 vs $223.96), and the value the most sources state
+// is the one the writer sees cited most — so the engine and the report
+// prose converge on the same number instead of fighting each other.
+// the banned check also looks 25 chars BEFORE the match: "after-hours price
+// of NVDA is $8.00" starts at "price of", and the qualifier sits outside it.
 function harvestAll(text, anchors, fallbackPattern, banned = []) {
     const out = [];
     const tryMatch = (a) => {
@@ -98,7 +107,8 @@ function harvestAll(text, anchors, fallbackPattern, banned = []) {
             const mm = g.exec(text);
             if (!mm)
                 break;
-            if (banned.some((w) => mm[0].toLowerCase().includes(w)))
+            const ctx = text.slice(Math.max(0, mm.index - 25), mm.index + mm[0].length).toLowerCase();
+            if (banned.some((w) => ctx.includes(w)))
                 continue;
             const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
             if (!isNaN(v) && !yearLike(v))
@@ -129,6 +139,30 @@ function modePick(vals) {
         }
     return best;
 }
+// clusterPick — run 9: a glitched quote page claimed "current price $8.00"
+// while every other source said ~$217. plain mode picked the bogus $8.00
+// (it was repeated across claims). group candidates into clusters (a value
+// joins the current cluster if within 25% of its last member), take the
+// LARGEST cluster, then the mode within it. a genuinely cheap stock
+// clusters at its own level — no arbitrary "plausible price" threshold.
+function clusterPick(vals) {
+    if (!vals.length)
+        return null;
+    const sorted = [...vals].sort((a, b) => a - b);
+    const clusters = [];
+    for (const v of sorted) {
+        const c = clusters[clusters.length - 1];
+        if (c && v <= c[c.length - 1] * 1.25)
+            c.push(v);
+        else
+            clusters.push([v]);
+    }
+    let best = clusters[0];
+    for (const c of clusters)
+        if (c.length > best.length)
+            best = c;
+    return modePick(best);
+}
 function pct(m, group = 1) {
     if (!m)
         return null;
@@ -142,13 +176,12 @@ export function runQuantModel(claims) {
     // stood at $1.30") — [^0-9]{0,N} died on quarter numbers and years. the
     // yearLike guard in harvest() keeps years out of the capture, and banned
     // words keep price TARGETS out of the price slot.
-    const PRICE_BANNED = ['target', 'forecast', 'guidance', 'projection', 'estimate'];
-    const price = modePick([
+    const price = clusterPick([
         ...harvestAll(text, [
             /(?:trading at|currently at|closed at|trades at|price is|price of|sits at|traded at|quoted at)\s*\$?([\d,]+\.?\d*)/i,
             /(?:trades|trading|closed|sits|quoted)\s+(?:\w+\s+){0,2}(?:around|near|about|for|at)\s*\$?([\d,]+\.?\d*)/i,
             /\$([\d,]+\.\d{2})\s*(?:USD|per share|US\$)/i,
-        ], undefined, PRICE_BANNED),
+        ], undefined, PRICE_BANNED_WORDS),
         ...scanPriceForwardAll(text),
     ]);
     // EPS must be fractional (6.53) — a bare "2026" after "EPS" is a fiscal
@@ -196,7 +229,7 @@ export function runQuantModel(claims) {
     // skip parenthesized qualifiers like "Beta (5Y Monthly) is 2.21" — the
     // naive [^0-9] window would grab the "5" from "(5Y Monthly)". beta can
     // conflict across sources too, so take the consensus value like price.
-    const beta = modePick(harvestAll(text, [
+    const beta = clusterPick(harvestAll(text, [
         /(?:beta|Beta)\s+(?:of|at|is|:|=)\s*([\d.]+)/i,
         /(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i,
     ]));

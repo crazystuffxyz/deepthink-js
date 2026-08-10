@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.1
+
+### Fixed
+- **Cluster-based price/beta consensus** — run 9: a glitched quote page claimed "current price $8.00 (Closed)" and repeated it across claims, and plain plurality picked the bogus $8.00 over the real ~$217 cluster. Candidates are now grouped into clusters (values within 25% of each other), the LARGEST cluster wins, and the mode within it is the price. A genuinely cheap stock still clusters at its own level — no arbitrary "plausible price" threshold. Applied to beta too.
+- **After-hours quote ban** — "after-hours price of NVDA is $8.00" is not the current price, but the qualifier sat *before* the anchor match, so the banned-word check never saw it. The banned check now also looks 25 chars before the match (both `harvest`/`harvestAll` and `scanPriceForwardAll`).
+
 ## v1.8.0
 
 ### Added

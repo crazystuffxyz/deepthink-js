@@ -220,8 +220,9 @@ export function runQuantModel(claims: string[]): QuantModel {
   ]);
   let priceSource = 'quoted price';
   if (price != null && impliedPrice != null && (price < impliedPrice * 0.5 || price > impliedPrice * 2)) {
+    const orig = price;
     price = impliedPrice;
-    priceSource = `implied from market cap ÷ shares (quote $${price.toFixed(2)} rejected as implausible)`;
+    priceSource = `implied from market cap ÷ shares (quote $${orig.toFixed(2)} rejected as implausible)`;
   } else if (price == null && impliedPrice != null) {
     price = impliedPrice;
     priceSource = 'implied from market cap ÷ shares';

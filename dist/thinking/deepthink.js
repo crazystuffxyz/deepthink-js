@@ -710,6 +710,20 @@ export class Deepthink extends EventEmitter {
         if (brain)
             brain.add('input', inputText, 9);
         let finalMessages = baseMessages.map(cloneMessage);
+        // evolvedApply in the FULL pipeline: the trained prompt rides as thinking
+        // guidance for the final answer (and every check-loop revision), instead
+        // of short-circuiting to a plain-mode answer. the caller's format prompt
+        // (ANSWER: etc.) still wins — it is injected later and merged last.
+        if (mergedOpts.evolvedApply) {
+            try {
+                const best = loadBest(mergedOpts.evolvedApply);
+                finalMessages = insertSystemPrompt(finalMessages, best.systemPrompt);
+                this._log('info', 'evolved', `evolvedApply: ${best.id} (fitness ${(best.fitness ?? 0).toFixed(3)}) injected into pipeline`);
+            }
+            catch (e) {
+                this._log('warn', 'evolved', `evolvedApply failed: ${e.message}`);
+            }
+        }
         if (mergedOpts.images && Array.isArray(mergedOpts.images)) {
             const lastUserMsg = finalMessages.slice().reverse().find(m => m.role === 'user');
             const images = await loadImages(mergedOpts.images);

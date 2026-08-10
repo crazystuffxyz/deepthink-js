@@ -92,7 +92,7 @@ function traceStats(store) {
 
 async function runOnce(dt, prompt, mode) {
   const myTrace = new TraceStore('flat', 500);
-  const r = await withRetry(() => dt.generate(prompt, { depth: DEPTH, checks: mode.checks, checkStyle: mode.checkStyle, _trace: myTrace }), `dt.generate(${mode.name})`);
+  const r = await withRetry(() => dt.generate(prompt, { depth: DEPTH, checks: mode.checks, checkStyle: mode.checkStyle, answerFormat: 'bracket', _trace: myTrace }), `dt.generate(${mode.name})`);
   const answer = typeof r === 'string' ? r : (r && typeof r === 'object') ? (r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r)) : String(r);
   return { answer, trace: myTrace };
 }

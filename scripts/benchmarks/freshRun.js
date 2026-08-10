@@ -190,15 +190,15 @@ function loadDone() {
   let plainOk = 0, dtOk = 0, plainN = 0, dtN = 0;
 
   const tasks = selected.map((item) => queue.add(async () => {
-    const out = { id: item.id, kind: item.kind, gold: item.answer };
+    const out = { id: item.id, kind: item.kind, gold: item.reference ?? item.answer };
     if (!PLAIN_ONLY && !done.has(item.id + '|plain')) {
       try {
         const p = await runPlain(dt, item);
         out.plain = p;
-        out.plainOk = answersMatch(p.candidates ?? p.answer, item.answer);
+        out.plainOk = answersMatch(p.candidates ?? p.answer, item.reference ?? item.answer);
         if (out.plainOk) plainOk++;
         plainN++;
-        process.stdout.write(`[${SET}] ${item.id} plain: ${out.plainOk ? 'OK' : 'X'} got=${p.answer} gold=${item.answer} (${p.ms}ms)\n`);
+        process.stdout.write(`[${SET}] ${item.id} plain: ${out.plainOk ? 'OK' : 'X'} got=${p.answer} gold=${item.reference ?? item.answer} (${p.ms}ms)\n`);
       } catch (e) {
         out.plain = { error: e.message };
         process.stdout.write(`[${SET}] ${item.id} plain ERR: ${e.message}\n`);
@@ -208,10 +208,10 @@ function loadDone() {
       try {
         const d = await runDeepThink(dt, item);
         out.dt = d;
-        out.dtOk = answersMatch(d.candidates ?? d.answer, item.answer);
+        out.dtOk = answersMatch(d.candidates ?? d.answer, item.reference ?? item.answer);
         if (out.dtOk) dtOk++;
         dtN++;
-        process.stdout.write(`[${SET}] ${item.id} dt: ${out.dtOk ? 'OK' : 'X'} got=${d.answer} gold=${item.answer} (${d.ms}ms, ${d.calls} calls, ${d.tokens} tok)\n`);
+        process.stdout.write(`[${SET}] ${item.id} dt: ${out.dtOk ? 'OK' : 'X'} got=${d.answer} gold=${item.reference ?? item.answer} (${d.ms}ms, ${d.calls} calls, ${d.tokens} tok)\n`);
       } catch (e) {
         out.dt = { error: e.message };
         process.stdout.write(`[${SET}] ${item.id} dt ERR: ${e.message}\n`);

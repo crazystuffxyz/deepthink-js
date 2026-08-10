@@ -50,6 +50,7 @@ const MODEL = arg('model', process.env.BENCH_MODEL || 'gemma4:31b-cloud');
 const CRITIQUE_MODEL = arg('verifier', process.env.BENCH_VERIFIER || 'deepseek-v4-flash:0731-cloud');
 const DEPTH = Number(arg('depth', process.env.BENCH_DEPTH || '2'));
 const CHECKS = Number(arg('checks', process.env.BENCH_CHECKS || '2'));
+const CHECK_STYLE = arg('checkStyle', 'full');
 const CONCURRENCY = Number(arg('concurrency', process.env.BENCH_CONCURRENCY || '2'));
 const LIMIT = Number(arg('limit', '0'));
 const PLAN_FILTER = arg('plan', '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -143,7 +144,7 @@ async function chatPlain(client, prompt) {
 async function runOnce(dt, prompt) {
   const myTrace = new TraceStore('flat', 500);
   const r = await withRetry(
-    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS, _trace: myTrace }),
+    () => dt.generate(prompt, { depth: DEPTH, checks: CHECKS, checkStyle: CHECK_STYLE, _trace: myTrace }),
     'dt.generate'
   );
   const answer = typeof r === 'string' ? r : (r && typeof r === 'object') ? (r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r)) : String(r);
@@ -239,7 +240,7 @@ function k(n) {
 
 function renderTable(perBench, coding, critique) {
   const lines = [];
-  lines.push(`# Deepthink vs Plain Ollama — ${MODEL} (deepthink d=${DEPTH}, c=${CHECKS}, verifier=${CRITIQUE_MODEL})`);
+  lines.push(`# Deepthink vs Plain Ollama — ${MODEL} (deepthink d=${DEPTH}, c=${CHECKS}, checks=${CHECK_STYLE}, verifier=${CRITIQUE_MODEL})`);
   lines.push('');
   lines.push('| Benchmark | n | Plain | Deepthink | Δ | dt calls (tok) | dt errors | self-corrected |');
   lines.push('|---|---:|---:|---:|---:|---:|---:|---:|');
@@ -316,6 +317,7 @@ async function runCoding(dt, plain, opts = {}) {
         () => dt.generate(specRow.spec + '\n\nOutput ONLY the complete HTML file in one code block.', {
           depth: DEPTH,
           checks: CHECKS,
+          checkStyle: CHECK_STYLE,
           systemPrompt: HTML_SYS,
           autoSystemPrompt: true,
           _trace: myTrace,

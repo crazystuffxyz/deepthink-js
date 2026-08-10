@@ -538,7 +538,10 @@ function mergeDuplicateClaims(nodes: any[]): any[] {
     const a = nodes[i];
     const numsA = numsOf(a.claim || '');
     const wordsA = wordsOf(a.claim || '');
-    const merged = { ...a, urls: [a.url] };
+    // srcMeta keeps each source's own title/citation — a merged claim cites
+    // 4 URLs, and each reference must carry ITS page's metadata, not the
+    // first source's (run 7: 4 refs all titled "NVDA Stock Beta History").
+    const merged = { ...a, urls: [a.url], srcMeta: [{ url: a.url, title: a.title, citation: a.citation, publicationDate: a.publicationDate }] };
     for (let j = i + 1; j < nodes.length; j++) {
       if (used.has(j)) continue;
       const b = nodes[j];
@@ -553,6 +556,7 @@ function mergeDuplicateClaims(nodes: any[]): any[] {
       if (sharedNums >= 2 || (sharedNums >= 1 && sharedWords >= 1)) {
         used.add(j);
         merged.urls.push(b.url);
+        merged.srcMeta.push({ url: b.url, title: b.title, citation: b.citation, publicationDate: b.publicationDate });
         log({ level: 'info', msg: `[STEP 6] Merged duplicate claim (${sharedNums} shared nums, ${sharedWords} shared words): "${(a.claim || '').slice(0, 60)}..." + "${(b.claim || '').slice(0, 60)}..."`, source: 'researchAgent', ts: Date.now() });
       }
     }
@@ -571,12 +575,17 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
   if (deduped.length < verifiedNodes.length) log({ level: 'info', msg: `[STEP 6] Claim dedup: ${verifiedNodes.length} -> ${deduped.length}`, source: 'researchAgent', ts: Date.now() });
   const refMap = new Map<string, any>();
   for (const node of deduped) {
-    for (const u of node.urls || [node.url]) {
-      if (!refMap.has(u)) {
-        const cData = node.citation?.data || {};
-        const siteFallback = (() => { try { const h = new URL(u).hostname; return h || (u.startsWith('file://') ? node.title : u); } catch { return u; } })();
-        refMap.set(u, { id: refMap.size + 1, url: u, title: cData.title || node.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || node.publicationDate || 'n.d.', site: cData.site || siteFallback });
-      }
+    // merged claims carry per-URL metadata (srcMeta); everything else uses
+    // the node's own. each URL gets ITS page's title/citation in the
+    // References section — never a neighbor's.
+    const metas: any[] = node.srcMeta && node.srcMeta.length
+      ? node.srcMeta
+      : (node.urls || [node.url]).map((u: string) => ({ url: u, title: node.title, citation: node.citation, publicationDate: node.publicationDate }));
+    for (const m of metas) {
+      if (refMap.has(m.url)) continue;
+      const cData = m.citation?.data || {};
+      const siteFallback = (() => { try { const h = new URL(m.url).hostname; return h || (m.url.startsWith('file://') ? m.title : m.url); } catch { return m.url; } })();
+      refMap.set(m.url, { id: refMap.size + 1, url: m.url, title: cData.title || m.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || m.publicationDate || 'n.d.', site: cData.site || siteFallback });
     }
   }
   for (const [, ref] of refMap) ref.apa = buildAPACitation(ref);
@@ -845,6 +854,11 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
   const severityWeights: Record<string, number> = { critical: 3, major: 2, minor: 1 };
   const domainInfo = await detectResearchDomain(callChat, topic, opts);
   let currentReport = report;
+  // best-report tracking: repair passes can REGRESS (run 7: 54 -> 28 -> 39
+  // — the third pass made things worse). keep the best-scoring version and
+  // restore it when the loop stalls or the cap is hit.
+  let bestReport = report;
+  let bestScore = Infinity;
   const critiqueHistory: any[] = [];
   for (let loop = 1; loop <= maxLoops; loop++) {
     log({ level: 'info', msg: `[CRITIQUE LOOP ${loop}/${maxLoops}] Running all critics in parallel...`, source: 'researchAgent', ts: Date.now() });
@@ -872,16 +886,20 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
     const expertCritic = critics.find((c: any) => c.agent === 'domainExpert');
     if (expertCritic?.overallAssessment) log({ level: 'info', msg: `[CRITIQUE LOOP ${loop}] Expert assessment: ${expertCritic.overallAssessment}`, source: 'researchAgent', ts: Date.now() });
     critiqueHistory.push({ loop, issueCount: allIssues.length, issueScore, criticalCount, expertAssessment: expertCritic?.overallAssessment });
+    if (issueScore < bestScore) { bestScore = issueScore; bestReport = currentReport; }
     if (issueScore < issueThreshold && criticalCount === 0) {
       log({ level: 'success', msg: `[CRITIQUE LOOP ${loop}] Issue score below threshold (${issueScore} < ${issueThreshold}) — report accepted`, source: 'researchAgent', ts: Date.now() });
       break;
     }
     // convergence guard: if the last repair pass barely moved the score
     // (<20% improvement), more loops just burn calls — the report has
-    // reached what this model can fix.
+    // reached what this model can fix. a REGRESSION (score went up) means
+    // the pass made it worse: restore the best-scoring version, don't ship
+    // the damage.
     const prevScore = critiqueHistory.length > 1 ? critiqueHistory[critiqueHistory.length - 2].issueScore : null;
     if (prevScore != null && issueScore >= prevScore * 0.8) {
-      log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair converged (score ${prevScore} -> ${issueScore}, <20% improvement) — stopping`, source: 'researchAgent', ts: Date.now() });
+      log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair converged or regressed (score ${prevScore} -> ${issueScore}, <20% improvement) — restoring best report (score ${bestScore})`, source: 'researchAgent', ts: Date.now() });
+      currentReport = bestReport;
       break;
     }
     allIssues.sort((a: any, b: any) => (severityWeights[b.severity] || 1) - (severityWeights[a.severity] || 1));
@@ -905,7 +923,81 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
       break;
     }
   }
+  // loop cap hit with a regressed final pass — ship the best version seen.
+  const lastScore = critiqueHistory.at(-1)?.issueScore ?? Infinity;
+  if (lastScore > bestScore) {
+    log({ level: 'warn', msg: `[CRITIQUE LOOP] Loop cap reached with regression (final ${lastScore} vs best ${bestScore}) — shipping best report`, source: 'researchAgent', ts: Date.now() });
+    currentReport = bestReport;
+  }
   return { report: currentReport, critiqueHistory };
+}
+
+// quantConformanceRepair — deterministic numeric-alignment sweep (run 8).
+// the quant verifier flags prose numbers that contradict the engine, but
+// LLM repair oscillates (run 7: 54 -> 28 -> 39) instead of converging to
+// the ground truth. when the engine computed a model, the pipeline ENFORCES
+// its numbers: every metric-anchored number in the report gets replaced
+// with the engine's value. zero LLM in this step — code-computed truth,
+// code-enforced. runs before the critique loop (critics verify the aligned
+// report) and once more after it (repair may re-introduce divergence).
+function quantConformanceRepair(report: string, quantModel: any): string {
+  if (!quantModel || !quantModel.ok) return report;
+  const q = quantModel;
+  const R = (v: number | null, d = 2): string | null => v != null ? v.toFixed(d) : null;
+  // Rpc — the engine stores rates as decimals (0.1449 = 14.49%), prose uses %
+  const Rpc = (v: number | null, d = 1): string | null => v != null ? (v * 100).toFixed(d) : null;
+  // banned words disqualify a match: "price target of $180" is never the
+  // current price, "volatility drag" is a different metric, and quarterly
+  // EPS must never be rewritten to the annual figure.
+  const PRICE_BAN = ['target', 'forecast', 'guidance', 'projection', 'estimate', 'expect', 'range', 'high', 'low'];
+  const EPS_BAN = ['q1', 'q2', 'q3', 'q4', 'quarter', 'quarterly'];
+  const rules: { re: RegExp; banned?: string[]; fn: (m: string, num: string) => string | null }[] = [
+    // current/market/share/stock price — the consensus quote, never a target
+    { re: /(?:current|market|share|stock|trading|last)\s+price[^$\n]{0,40}?\$([\d,]+\.?\d*)/gi, banned: PRICE_BAN, fn: (_m, n) => R(q.price) && n !== R(q.price) ? R(q.price)! : null },
+    // price actions ("closed at $217.55", "trades at $150.42")
+    { re: /(?:trades? at|trading at|closed at|currently trading at|currently sits at|quoted at|price (?:is|of))[^$\n]{0,30}?\$([\d,]+\.?\d*)/gi, banned: PRICE_BAN, fn: (_m, n) => R(q.price) && n !== R(q.price) ? R(q.price)! : null },
+    // EPS — trailing context so "EPS of $1.30 for Q3" is caught by the ban
+    { re: /(?:EPS|earnings per share)[^$\n]{0,40}?\$?([\d,]+\.\d{2})[^$\n]{0,25}/gi, banned: EPS_BAN, fn: (_m, n) => R(q.eps) && n !== R(q.eps) ? R(q.eps)! : null },
+    // beta (same windowed anchors as the engine)
+    { re: /(?:beta|Beta)\s+(?:of|at|is|:|=)\s*([\d.]+)/gi, banned: [], fn: (_m, n) => R(q.beta) && n !== R(q.beta) ? R(q.beta)! : null },
+    { re: /(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/gi, banned: [], fn: (_m, n) => R(q.beta) && n !== R(q.beta) ? R(q.beta)! : null },
+    // volatility — "volatility drag" is σ²/2, a different engine metric.
+    // capture excludes the trailing %, so fn returns the bare number.
+    { re: /(?:volatility|annualized volatility)[^%0-9]{0,40}?([\d.]+)\s*%/gi, banned: ['drag'], fn: (_m, n) => Rpc(q.sigma, 1) && n !== Rpc(q.sigma, 1) ? Rpc(q.sigma, 1)! : null },
+    // cost of equity / discount rate / WACC — the DCF discount rate is Re
+    { re: /(?:cost of equity|discount rate|WACC)[^%0-9]{0,40}?([\d.]+)\s*%/gi, banned: [], fn: (_m, n) => Rpc(q.costOfEquity, 2) && n !== Rpc(q.costOfEquity, 2) ? Rpc(q.costOfEquity, 2)! : null },
+    // intrinsic value (DCF output)
+    { re: /intrinsic value[^$\n]{0,40}?\$([\d,]+\.?\d*)/gi, banned: [], fn: (_m, n) => R(q.intrinsicValue) && n !== R(q.intrinsicValue) ? R(q.intrinsicValue)! : null },
+    // forward price E[S_T] — "expected price of $X in one year"
+    { re: /expected price[^$\n]{0,40}?\$([\d,]+\.?\d*)/gi, banned: ['target'], fn: (_m, n) => R(q.expectedPrice) && n !== R(q.expectedPrice) ? R(q.expectedPrice)! : null },
+    // expected returns — log-return FIRST (its own rule), then plain μ
+    { re: /expected log-return[^%0-9]{0,30}?([\d.]+)\s*%/gi, banned: [], fn: (_m, n) => Rpc(q.expectedLogReturn, 1) && n !== Rpc(q.expectedLogReturn, 1) ? Rpc(q.expectedLogReturn, 1)! : null },
+    { re: /expected (?:annual )?return[^%0-9]{0,30}?([\d.]+)\s*%/gi, banned: [], fn: (_m, n) => Rpc(q.expectedReturn, 1) && n !== Rpc(q.expectedReturn, 1) ? Rpc(q.expectedReturn, 1)! : null },
+    // Sharpe
+    { re: /Sharpe[^0-9]{0,30}?([\d.]+)/gi, banned: [], fn: (_m, n) => R(q.sharpe) && n !== R(q.sharpe) ? R(q.sharpe)! : null },
+    // VaR — specific horizons first, then bare VaR. the bare rule's negative
+    // lookbehinds skip VaRs already qualified by a horizon, and the optional
+    // trailing parens ("VaR of $12.05 (1-day 99%)") carry the qualifier the
+    // sniff needs — a greedy trailing window would drag in the NEXT VaR
+    // phrase and mis-target (run 8: "$12.05 ... 1-year ..." -> 135.24).
+    { re: /1-day\s*95\s*%?\s*VaR[^$\n]{0,30}?\$([\d,]+\.?\d*)/gi, banned: [], fn: (_m, n) => R(q.var95_1d) && n !== R(q.var95_1d) ? R(q.var95_1d)! : null },
+    { re: /1-day\s*99\s*%?\s*VaR[^$\n]{0,30}?\$([\d,]+\.?\d*)/gi, banned: [], fn: (_m, n) => R(q.var99_1d) && n !== R(q.var99_1d) ? R(q.var99_1d)! : null },
+    { re: /1-year\s*95\s*%?\s*VaR[^$\n]{0,30}?\$([\d,]+\.?\d*)/gi, banned: [], fn: (_m, n) => R(q.var95_1y) && n !== R(q.var95_1y) ? R(q.var95_1y)! : null },
+    { re: /(?<!1-day\s*(?:95|99)\s*%?\s*)(?<!1-year\s*95\s*%?\s*)\bVaR\b[^$\n]{0,30}?\$([\d,]+\.?\d*)(?:\s*\(([^)]*)\))?/gi, banned: [], fn: (m, n) => {
+        const ctx = m.toLowerCase();
+        const target = /99/.test(ctx) ? q.var99_1d : /year|1y/.test(ctx) ? q.var95_1y : q.var95_1d;
+        const s = R(target);
+        return s && n !== s ? s : null;
+      } },
+  ];
+  for (const rule of rules) {
+    report = report.replace(rule.re, (m: string, num: string) => {
+      if (rule.banned?.some((w) => m.toLowerCase().includes(w))) return m;
+      const rep = rule.fn(m.toLowerCase(), num.replace(/,/g, ''));
+      return rep != null ? m.replace(num, rep) : m;
+    });
+  }
+  return report;
 }
 
 // ---- output format conversion ----
@@ -1087,8 +1179,17 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
       };
       log({ level: quantModel.ok ? 'success' : 'warn', msg: `[QUANT] ${quantModel.ok ? 'Computed' : 'Partial'} model — IV $${quantModel.intrinsicValue?.toFixed(2) ?? 'n/a'}/share, Re ${quantModel.costOfEquity != null ? (quantModel.costOfEquity * 100).toFixed(2) + '%' : 'n/a'}, Sharpe ${quantModel.sharpe?.toFixed(2) ?? 'n/a'}`, source: 'researchAgent', ts: Date.now() });
     }
-    const { report: initialReport, references, claimCount } = await reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opts, queries, quantModel);
+    let { report: initialReport, references, claimCount } = await reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opts, queries, quantModel);
     stepSummary.step6 = { reportLength: initialReport.length, uniqueSources: references.length };
+    // quant conformance (pre-critique): align the writer's prose numbers
+    // with the computed model BEFORE the critics see the report, so the
+    // critique loop verifies the aligned version instead of flagging the
+    // divergence. deterministic — no LLM.
+    if (opts.mode === 'stock' && quantModel && quantModel.ok) {
+      const aligned = quantConformanceRepair(initialReport, quantModel);
+      if (aligned !== initialReport) log({ level: 'warn', msg: '[QUANT] Pre-critique conformance sweep aligned prose numbers with the computed model', source: 'researchAgent', ts: Date.now() });
+      initialReport = aligned;
+    }
     let finalReport = initialReport;
     let critiqueHistory: any[] = [];
     if (opts.enableCritique !== false) {
@@ -1103,6 +1204,14 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
         reportLengthDelta: finalReport.length - initialReport.length,
       };
       log({ level: 'success', msg: `[STEP 9] Critique loop complete — ${critiqueHistory.length} loops, final report: ${finalReport.length} chars`, source: 'researchAgent', ts: Date.now() });
+    }
+    // quant conformance (post-critique): repair passes can re-introduce
+    // writer-style numbers — one final deterministic sweep locks the engine's
+    // values into the shipped report.
+    if (opts.mode === 'stock' && quantModel && quantModel.ok) {
+      const aligned = quantConformanceRepair(finalReport, quantModel);
+      if (aligned !== finalReport) log({ level: 'warn', msg: '[QUANT] Post-critique conformance sweep realigned prose numbers', source: 'researchAgent', ts: Date.now() });
+      finalReport = aligned;
     }
     // invented-math purge (run 6): when the quant engine could NOT compute,
     // the writer sometimes fabricates GBM/VaR/Sharpe numbers anyway — the
@@ -1157,6 +1266,6 @@ export {
   extractAndSummarize, extractWithFallback, applyMMR, factVerificationLoop, reportWriterAgent,
   buildAPACitation, buildCoverageGapsDisclaimer, detectResearchDomain, sourceFidelityVerifier,
   mathLogicVerifier, domainExpertCritic, adversarialCritic, constrainedRepairAgent,
-  critiqueAndRepairLoop, isolatedCall, mergeDuplicateClaims, recoverStockQuote,
+  critiqueAndRepairLoop, quantConformanceRepair, isolatedCall, mergeDuplicateClaims, recoverStockQuote,
   DEFAULT_ACADEMIC_WHITELIST, DEFAULT_ACADEMIC_BLACKLIST, DEFAULT_NEGATIVE_URL_PATTERNS,
 };

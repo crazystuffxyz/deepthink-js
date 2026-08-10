@@ -27,12 +27,13 @@ const HORIZON_YRS = 10;
 function yearLike(v) {
     return v >= 1900 && v <= 2099 && Number.isInteger(v);
 }
-// scanPriceForward — last resort for wordy price phrasings ("share price
+// scanPriceForwardAll — last resort for wordy price phrasings ("share price
 // for fiscal 2026 was $150.42"): walk each anchor hit and scan forward,
 // skipping year-like numbers ("2026") and %-moves ("up 5% to $150") until
-// a real price appears.
+// a real price appears. returns EVERY hit — the caller picks the mode.
 const PRICE_ANCHORS = ['current price', 'market price', 'last price', 'share price', 'stock price', 'price per share'];
-function scanPriceForward(text) {
+function scanPriceForwardAll(text) {
+    const out = [];
     for (const anchor of PRICE_ANCHORS) {
         const g = new RegExp(anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
         while (true) {
@@ -48,11 +49,11 @@ function scanPriceForward(text) {
             for (const nm of slice.matchAll(/\$?([\d,]+\.?\d*)\s*%?/g)) {
                 const v = parseFloat(nm[1].replace(/[,$]/g, ''));
                 if (!isNaN(v) && !yearLike(v) && !nm[0].includes('%'))
-                    return v;
+                    out.push(v);
             }
         }
     }
-    return null;
+    return out;
 }
 // tryMatch walks every match of the anchor: a year-like capture ("share
 // price for fiscal 2026 was $150.42" → 2026) must not kill the anchor —
@@ -84,6 +85,50 @@ function harvest(text, anchors, fallbackPattern, banned = []) {
     }
     return null;
 }
+// harvestAll — like harvest() but collects EVERY match instead of the first.
+// the caller pools candidates and takes the MODE: sources disagree on the
+// exact quote ($217.55 vs $223.96), and the value the most sources state is
+// the one the writer sees cited most — so the engine and the report prose
+// converge on the same number instead of fighting each other.
+function harvestAll(text, anchors, fallbackPattern, banned = []) {
+    const out = [];
+    const tryMatch = (a) => {
+        const g = new RegExp(a.source, a.flags.replace('g', '') + 'g');
+        while (true) {
+            const mm = g.exec(text);
+            if (!mm)
+                break;
+            if (banned.some((w) => mm[0].toLowerCase().includes(w)))
+                continue;
+            const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
+            if (!isNaN(v) && !yearLike(v))
+                out.push(v);
+        }
+    };
+    for (const a of anchors)
+        tryMatch(a);
+    if (fallbackPattern)
+        tryMatch(fallbackPattern);
+    return out;
+}
+// modePick — most-frequent value wins (rounded to cents so $223.96 and
+// $223.956 fold together). ties fall back to first-seen order.
+function modePick(vals) {
+    if (!vals.length)
+        return null;
+    const f = new Map();
+    for (const v of vals) {
+        const k = Math.round(v * 100) / 100;
+        f.set(k, (f.get(k) || 0) + 1);
+    }
+    let best = null, n = 0;
+    for (const [k, c] of f)
+        if (c > n) {
+            best = k;
+            n = c;
+        }
+    return best;
+}
 function pct(m, group = 1) {
     if (!m)
         return null;
@@ -97,13 +142,15 @@ export function runQuantModel(claims) {
     // stood at $1.30") — [^0-9]{0,N} died on quarter numbers and years. the
     // yearLike guard in harvest() keeps years out of the capture, and banned
     // words keep price TARGETS out of the price slot.
-    let price = harvest(text, [
-        /(?:trading at|currently at|closed at|trades at|price is|price of|sits at|traded at|quoted at)\s*\$?([\d,]+\.?\d*)/i,
-        /(?:trades|trading|closed|sits|quoted)\s+(?:\w+\s+){0,2}(?:around|near|about|for|at)\s*\$?([\d,]+\.?\d*)/i,
-        /\$([\d,]+\.\d{2})\s*(?:USD|per share|US\$)/i,
-    ], undefined, ['target', 'forecast', 'guidance', 'projection', 'estimate']);
-    if (price == null)
-        price = scanPriceForward(text);
+    const PRICE_BANNED = ['target', 'forecast', 'guidance', 'projection', 'estimate'];
+    const price = modePick([
+        ...harvestAll(text, [
+            /(?:trading at|currently at|closed at|trades at|price is|price of|sits at|traded at|quoted at)\s*\$?([\d,]+\.?\d*)/i,
+            /(?:trades|trading|closed|sits|quoted)\s+(?:\w+\s+){0,2}(?:around|near|about|for|at)\s*\$?([\d,]+\.?\d*)/i,
+            /\$([\d,]+\.\d{2})\s*(?:USD|per share|US\$)/i,
+        ], undefined, PRICE_BANNED),
+        ...scanPriceForwardAll(text),
+    ]);
     // EPS must be fractional (6.53) — a bare "2026" after "EPS" is a fiscal
     // year, not earnings per share. requiring the decimal kills that grab,
     // and yearLike() kills "EPS $2026.00" artifacts. quarterly EPS ("Q3
@@ -147,11 +194,12 @@ export function runQuantModel(claims) {
         }
     }
     // skip parenthesized qualifiers like "Beta (5Y Monthly) is 2.21" — the
-    // naive [^0-9] window would grab the "5" from "(5Y Monthly)".
-    const beta = harvest(text, [
+    // naive [^0-9] window would grab the "5" from "(5Y Monthly)". beta can
+    // conflict across sources too, so take the consensus value like price.
+    const beta = modePick(harvestAll(text, [
         /(?:beta|Beta)\s+(?:of|at|is|:|=)\s*([\d.]+)/i,
         /(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i,
-    ]);
+    ]));
     const sigma = pct(text.match(/(?:volatility|annualized volatility|vol(?!ume))[\s\S]{0,40}?([\d.]+)\s*%/i));
     const rf = pct(text.match(/(?:risk[- ]free rate|Rf|treasury)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? RF_DEFAULT;
     const erp = pct(text.match(/(?:equity risk premium|ERP|market risk premium)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? ERP_DEFAULT;

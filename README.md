@@ -312,6 +312,7 @@ const answer = await dt.generate('What are all distinct ways to tile a 2×8 boar
 | `analytical`             | `boolean`  | `false`     | Multi-agent analytical decomposition mode |
 | `humanBrain`             | `boolean`  | `false`     | Attach a `BrainMemory` (working + semantic) |
 | `maxCheckIterations`     | `number`   | `10`        | Max self-verification repair iterations |
+| `finalConsistency`       | `boolean`  | `true`      | After checks pass, one independent blind re-derivation; reconciles on mismatch (skipped when the sandbox machine-verified the answer) |
 | `monitorWindowSize`      | `number`   | `5`         | MetacognitiveMonitor response history window |
 | `images`                 | `string[]` | `[]`        | Base64 image strings for multimodal input |
 | `options`                | `object`   | `{}`        | Raw provider sampling params (temperature, top_p, etc.) |
@@ -523,6 +524,7 @@ const result = await runDeepResearch(
     outputFormat:         'markdown', // markdown | plain | json | html
     humanize:             false,      // true = rewrite until the AI-detector says 0%
     mode:                 'general',  // 'stock' = quant-finance answer spec (Ito/GBM, VaR, Sharpe)
+    files:                [],         // local PDFs/docx/xlsx/pptx/csv/epub/rtf/odt/md → converted to markdown and injected as max-credibility evidence
   }
 );
 
@@ -555,6 +557,7 @@ and `[Source N]` tag survives each rewrite.
 | — | Citation Integrity | `enforceCitations` restores dropped `[Source N]` tags after every repair pass |
 | — | Humanize Loop | `humanize: true` — rewrite → integrity check → fix → detect, until 0% AI-ness |
 | — | Format Conversion | `outputFormat` — mechanical markdown → plain/json/html (never touches citations) |
+| — | Local Files | `files: [...]` — PDFs and other document types converted to markdown and injected as max-credibility evidence sources |
 
 ---
 

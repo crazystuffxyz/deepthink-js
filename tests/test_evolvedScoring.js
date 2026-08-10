@@ -133,6 +133,36 @@ await test('OOD math item (fair-share) now scores multi-number ref', async () =>
   const r = await scoreOne(fakeCallChat, 'A: 11.5625, B: 16.5625, C: 16.875', item, {});
   if (r.score < 0.9) throw new Error(`score: ${r.score}`);
 });
+await test('scoreOne: choice item, ANSWER: line wins', async () => {
+  const item = { id: 'x1', kind: 'choice', prompt: 'q', reference: 2 };
+  const r = await scoreOne(fakeCallChat, 'The sequence is 4,9,16,25,36 so the next is 49. ANSWER: 2', item, {});
+  if (r.score !== 1) throw new Error(`score: ${r.score}`);
+});
+await test('scoreOne: choice item, wrong choice', async () => {
+  const item = { id: 'x2', kind: 'choice', prompt: 'q', reference: 2 };
+  const r = await scoreOne(fakeCallChat, 'ANSWER: 3', item, {});
+  if (r.score !== 0) throw new Error(`score: ${r.score}`);
+});
+await test('scoreOne: choice item, no ANSWER line falls back to last number', async () => {
+  const item = { id: 'x3', kind: 'choice', prompt: 'q', reference: 4 };
+  const r = await scoreOne(fakeCallChat, 'I pick option 4.', item, {});
+  if (r.score !== 1) throw new Error(`score: ${r.score}`);
+});
+await test('scoreOne: letter item exact match', async () => {
+  const item = { id: 'x4', kind: 'letter', prompt: 'q', reference: 'C' };
+  const r = await scoreOne(fakeCallChat, 'ANSWER: C', item, {});
+  if (r.score !== 1) throw new Error(`score: ${r.score}`);
+});
+await test('scoreOne: letter item wrong letter', async () => {
+  const item = { id: 'x5', kind: 'letter', prompt: 'q', reference: 'N' };
+  const r = await scoreOne(fakeCallChat, 'ANSWER: M', item, {});
+  if (r.score !== 0) throw new Error(`score: ${r.score}`);
+});
+await test('scoreOne: math fraction answer matches decimal ref', async () => {
+  const item = { id: 'x6', kind: 'math', prompt: 'q', reference: 0.375, numericTolerance: 0.01 };
+  const r = await scoreOne(fakeCallChat, 'ANSWER: 3/8', item, {});
+  if (r.score < 0.9) throw new Error(`score: ${r.score}`);
+});
 
 console.log(`\n  ${pass} pass, ${fail} fail`);
 process.exit(fail === 0 ? 0 : 1);

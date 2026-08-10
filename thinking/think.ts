@@ -9,6 +9,14 @@
 // research basis: on equal token budgets, independent sampling (parallel
 // probes) scales better than dependent sampling (sequential chain); and
 // cache-friendly prompts cut input cost ~5x and wall time dramatically.
+//
+// probe set (v2, 2026-08): added the techniques that measurably move hard
+// reasoning — explicit heuristic strategy selection (Engel/Tao taxonomy),
+// backward verification (RCoT: reconstruct the problem from the solution and
+// diff against the original — catches misread constraints), and a structured
+// scratchpad with explicit state (known facts / current state / goal /
+// constraints). the synthesis pass now scores each probe for soundness and
+// weights the final doc toward the sound passes (verifier-weighted voting).
 
 import type { Message } from './types.js';
 
@@ -23,6 +31,27 @@ const THINK_SYS =
   'You are performing INTERNAL REASONING ONLY. Do NOT answer the prompt. ' +
   'Do NOT produce any code or final deliverable. Be short and concise.';
 
+const STRATEGY_BODY =
+  'Name 3 candidate strategies from this taxonomy: invariants/monovariants, extremal principle, ' +
+  'working backwards, extreme/special cases, symmetry, pigeonhole, coloring/parity, reformulation, ' +
+  'induction, contradiction, case analysis, approximation-and-refine. ' +
+  'Pick the most promising one for THIS problem and outline how it applies. ' +
+  'If the problem is computational, name the algorithm class (DP, greedy, search, number theory, etc.).';
+
+const BACKWARD_BODY =
+  'BACKWARD VERIFICATION: reconstruct the original problem from the solution you derived, ' +
+  'then diff it against the actual problem statement. Identify every constraint you misread, ' +
+  'missed, or added. Check: did you answer the question that was actually asked? ' +
+  'Did you use every given condition? Are there edge cases (zero, negatives, boundaries) the solution ignores?';
+
+const SCRATCHPAD_BODY =
+  'Work through the problem using a structured scratchpad with explicit state:\n' +
+  'KNOWN FACTS: [every given condition, restated precisely]\n' +
+  'GOAL: [what must be found, exactly]\n' +
+  'CONSTRAINTS: [boundaries, domains, edge cases]\n' +
+  'STEPS: [numbered computation, showing the actual arithmetic]\n' +
+  'Then verify the result against every constraint.';
+
 // each probe: distinct lens on the same problem. same prefix, independent
 // sampling (temp 0.7 gives path diversity; the synthesis repairs gaps).
 const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> = {
@@ -35,9 +64,14 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
       fmt: 'ANALYSIS:\n[3-6 bullet points max, no prose preamble]'
     },
     {
-      tag: 'intent',
-      body: 'Identify the core intent, emotional subtext, ambiguities, and technical requirements.',
-      fmt: 'I need to:\n1. [step]\n2. [step]\n3. [step]'
+      tag: 'strategy',
+      body: STRATEGY_BODY,
+      fmt: 'STRATEGY:\n1. [candidate strategy]\n2. [candidate strategy]\n3. [candidate strategy]\nPICK: [chosen strategy + why]'
+    },
+    {
+      tag: 'working',
+      body: SCRATCHPAD_BODY,
+      fmt: 'KNOWN FACTS:\nGOAL:\nCONSTRAINTS:\nSTEPS:\n1. [step]\n2. [step]'
     }
   ],
   2: [
@@ -49,16 +83,19 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
       fmt: 'ANALYSIS:\n[3-6 bullet points max, no prose preamble]'
     },
     {
-      tag: 'plan',
-      body: 'Generate an optimal computational strategy. Formulate a proof-sketch or step-by-step algorithm. ' +
-        'Ensure that your plan defines a strict loop-invariant and verify that each step is constructively justified. ' +
-        'Avoid non-constructive assertions.',
-      fmt: '**Plan:**\n[concise plan — max 5 steps]'
+      tag: 'strategy',
+      body: STRATEGY_BODY,
+      fmt: 'STRATEGY:\n1. [candidate strategy]\n2. [candidate strategy]\n3. [candidate strategy]\nPICK: [chosen strategy + why]'
     },
     {
       tag: 'working',
-      body: 'Work through the problem systematically using numbered steps and sub-bullets. Show the actual computation.',
-      fmt: 'WORKING:\n1. [step]\n   - [sub-detail]\n2. [step]'
+      body: SCRATCHPAD_BODY,
+      fmt: 'KNOWN FACTS:\nGOAL:\nCONSTRAINTS:\nSTEPS:\n1. [step]\n   - [sub-detail]\n2. [step]'
+    },
+    {
+      tag: 'backward',
+      body: BACKWARD_BODY,
+      fmt: 'RECONSTRUCTED PROBLEM:\n[restate the problem as the solution implies it]\nDIFF:\n- [constraint misread/missed/added]\n- [edge case ignored]'
     },
     {
       tag: 'structure',
@@ -75,16 +112,19 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
       fmt: 'ANALYSIS:\n[3-6 bullet points max, no prose preamble]'
     },
     {
-      tag: 'plan',
-      body: 'Generate an optimal computational strategy. Formulate a proof-sketch or step-by-step algorithm. ' +
-        'Ensure that your plan defines a strict loop-invariant and verify that each step is constructively justified. ' +
-        'Avoid non-constructive assertions.',
-      fmt: '**Plan:**\n[concise plan — max 5 steps]'
+      tag: 'strategy',
+      body: STRATEGY_BODY,
+      fmt: 'STRATEGY:\n1. [candidate strategy]\n2. [candidate strategy]\n3. [candidate strategy]\nPICK: [chosen strategy + why]'
     },
     {
       tag: 'working',
-      body: 'Work through the problem systematically using numbered steps and sub-bullets. Show the actual computation.',
-      fmt: 'WORKING:\n1. [step]\n   - [sub-detail]\n2. [step]'
+      body: SCRATCHPAD_BODY,
+      fmt: 'KNOWN FACTS:\nGOAL:\nCONSTRAINTS:\nSTEPS:\n1. [step]\n   - [sub-detail]\n2. [step]'
+    },
+    {
+      tag: 'backward',
+      body: BACKWARD_BODY,
+      fmt: 'RECONSTRUCTED PROBLEM:\n[restate the problem as the solution implies it]\nDIFF:\n- [constraint misread/missed/added]\n- [edge case ignored]'
     },
     {
       tag: 'sanity',
@@ -103,8 +143,10 @@ const PROBES: Record<number, Array<{ tag: string; body: string; fmt: string }>> 
 
 const SYNTH_SYS =
   'You are the internal reasoning coordinator. Below are independent analyses of the same problem, ' +
-  'each produced by a separate reasoning pass. Consolidate them into ONE coherent reasoning document: ' +
-  'keep the strongest working, merge distinct insights, and explicitly resolve any conflicts between passes. ' +
+  'each produced by a separate reasoning pass. Consolidate them into ONE coherent reasoning document.\n\n' +
+  'SCORING: for each pass, judge whether its reasoning is sound (correct math, no misread constraints, ' +
+  'no logical leaps). Base the final document on the SOUND passes. Explicitly flag or discard unsound ones ' +
+  'and say why. If passes disagree on a number, recompute the disputed step yourself and keep the correct value.\n\n' +
   'Be concise — no preamble, no repetition of what the passes already agree on.';
 
 async function probe(

@@ -210,10 +210,25 @@ async function scoreOne(callChat: CallChat, output: string, item: BenchItem, opt
         out.extracted = { matched: m.matched, total: m.total, numbers: extractAllNumbers(text) };
         break;
       }
-      const num = extractNumber(text);
+      // whole-answer fraction ("3/8" or "ANSWER: 3/8") → decimal, so it
+      // matches a numeric ref. strip the ANSWER: prefix before matching.
+      const t = norm(text);
+      const ans = t.match(/ANSWER:\s*(.+)$/i)?.[1] || t;
+      const frac = ans.match(/^(\d+)\s*\/\s*(\d+)$/);
+      const num = frac ? parseInt(frac[1], 10) / parseInt(frac[2], 10) : extractNumber(text);
       out.components.numeric = numericScore(num, item.reference as number, item.numericTolerance || 0.01);
       out.score = out.components.numeric as number;
       out.extracted = { number: num };
+      break;
+    }
+    case 'letter': {
+      // single-letter answers ("ANSWER: C"): exact match on the letter.
+      const t = norm(text);
+      const m = t.match(/ANSWER:\s*([A-Za-z]+)/i);
+      const got = m ? m[1].toUpperCase() : (t.match(/[A-Za-z]+/)?.[0] || '').toUpperCase();
+      out.components.letter = got === String(item.reference).toUpperCase() ? 1 : 0;
+      out.score = out.components.letter as number;
+      out.extracted = { letter: got };
       break;
     }
     case 'probability': {
@@ -251,6 +266,18 @@ async function scoreOne(callChat: CallChat, output: string, item: BenchItem, opt
       out.components.code = r && r.total ? r.passed / r.total : 0;
       out.score = out.components.code as number;
       out.extracted = r || {};
+      break;
+    }
+    case 'choice': {
+      // multiple-choice IQ items: reference is the 1-based choice index,
+      // model answers "ANSWER: <n>". prefer the ANSWER: line, else last number.
+      const t = norm(text);
+      const m = t.match(/ANSWER:\s*(\d+)/i);
+      const num = m ? parseInt(m[1], 10) : extractNumber(text);
+      const ref = Number(item.reference);
+      out.components.choice = isFinite(num) && num === ref ? 1 : 0;
+      out.score = out.components.choice as number;
+      out.extracted = { choice: num };
       break;
     }
     case 'paradox':

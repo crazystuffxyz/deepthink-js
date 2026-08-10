@@ -23,6 +23,7 @@ import { compareResults } from '../codeGenerator/run.js';
 import { globalEmitter } from './events.js';
 import { TraceStore } from './trace.js';
 import { AdaptiveConcurrency, isRateLimitError, isTimeoutError } from './concurrency.js';
+import { loadImages, describeImages, looksVisionCapable } from './images.js';
 
 const SAMPLING = {
   creative: { temperature: 0.7, top_p: 0.9, top_k: 40 },
@@ -616,7 +617,14 @@ export class Deepthink extends EventEmitter {
         : blind
           ? `You are a Numerical Verifier. Recompute the claimed answer yourself. Any rounding error, sign flip, or missing digit means the claim is wrong — return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
           : `You are a Numerical Forensic Analyst. Audit every number and calculation in the response. Check for internal consistency, order-of-magnitude errors, and precision loss. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
-    }].slice(0, Math.min(checksCount, 3));
+    }, {
+      label: 'Backward',
+      system: gtVal
+        ? `You are a Backward Verifier. The verified answer is [${gtVal}]. Reconstruct the original problem from the response, then diff it against the actual input. Flag any constraint the response misread, missed, or added, and any edge case ignored. If the response's reasoning contradicts the verified value, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+        : blind
+          ? `You are a Backward Verifier. You see ONLY the claimed answer. Reconstruct the problem that would produce this answer, then compare against the actual input. If the claimed answer implies a different problem than the one asked, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+          : `You are a Backward Verifier. Reconstruct the original problem from the response, then diff it against the actual input. Flag every constraint the response misread, missed, or added, and every edge case ignored. If the response solved a different problem than the one asked, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
+    }].slice(0, Math.min(checksCount, 4));
 
     const shown = claimed ? `<claimed answer>\n${claimed}\n</claimed answer>` : response;
 
@@ -792,10 +800,22 @@ export class Deepthink extends EventEmitter {
     let finalMessages = baseMessages.map(cloneMessage as (m: ChatMessage) => ChatMessage);
     if (mergedOpts.images && Array.isArray(mergedOpts.images)) {
       const lastUserMsg = finalMessages.slice().reverse().find(m => m.role === 'user');
-      if (lastUserMsg) {
-        lastUserMsg.images = mergedOpts.images;
-      } else {
-        finalMessages.push({ role: 'user', content: 'Attached image.', images: mergedOpts.images });
+      const images = await loadImages(mergedOpts.images);
+      // text-only model fallback: describe with a vision model, inject as text
+      const wantDescribe = mergedOpts.describeImages === true
+        || (mergedOpts.visionModel && !looksVisionCapable(this.model));
+      if (wantDescribe && images.length) {
+        this._log('info', 'images', `describing ${images.length} image(s) via vision model — main model is text-only`);
+        const desc = await describeImages(this.callChat.bind(this), images, mergedOpts);
+        const imgNote = `\n\n[ATTACHED IMAGE${images.length > 1 ? 'S' : ''} — DESCRIBED BY VISION MODEL]\n${desc}\n[/END IMAGE DESCRIPTION]`;
+        if (lastUserMsg) lastUserMsg.content += imgNote;
+        else finalMessages.push({ role: 'user', content: 'Attached image.' + imgNote });
+      } else if (images.length) {
+        if (lastUserMsg) {
+          lastUserMsg.images = images;
+        } else {
+          finalMessages.push({ role: 'user', content: 'Attached image.', images });
+        }
       }
     }
     let thinkCtxMsg: ChatMessage | null = null;

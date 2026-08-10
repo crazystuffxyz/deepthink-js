@@ -2,7 +2,10 @@
 import { getSearchResults, getFetchResults } from '../internet/interactWithInternet.js';
 import { generateCitation } from '../internet/extractCitation.js';
 import { runCognitiveFlow } from './cognitive.js';
+import { humanizeText } from './humanize.js';
+import { enforceCitations, checkReferencesSection } from './citationIntegrity.js';
 import { tryParseJsonSafe as parseJsonSafe } from '../parse/json.js';
+import { z } from 'zod';
 import { log } from './events.js';
 import {
   AnswerFormatSpecSchema,
@@ -16,6 +19,39 @@ import {
   ExpertCritiqueSchema,
   AdversarialSchema,
 } from '../parse/llmSchemas.js';
+
+// stock-research mode: the answer spec is fixed so every investment report
+// carries the same rigorous skeleton — quant math (Ito/GBM), fundamentals,
+// industry status quo, valuation, risks, dated recommendation.
+const STOCK_SPEC = {
+  answerType: 'recommendation',
+  requiredFields: [
+    'ticker and company name',
+    'current price and the date it was observed',
+    'price target with a time horizon',
+    'valuation method (DCF, multiples, comparables) with the actual numbers',
+    'key financials: revenue, EPS, margins, debt, free cash flow',
+    'volatility and risk metrics (annualized volatility, beta, VaR)',
+    'quantitative analysis: expected return and risk-adjusted return (Sharpe)',
+    'industry status quo and competitive position',
+    'moat and competitive advantages',
+    'catalysts',
+    'risks',
+    'recommendation: buy/hold/sell with conviction level',
+  ],
+  timeConstraints: ['current date: 2026-08-10', 'use the most recent financial data available'],
+  entityTypes: ['company name', 'stock ticker', 'industry peers', 'financial metrics'],
+  queryHints: [
+    '<company> latest quarterly results revenue EPS guidance',
+    '<company> balance sheet debt free cash flow 10-K',
+    '<company> industry competitive landscape market share',
+    '<company> analyst price target consensus',
+    '<industry> sector outlook 2026',
+    '<company> historical returns volatility beta',
+    '<company> valuation DCF multiples vs peers',
+  ],
+  directAnswerTemplate: 'A clear buy/hold/sell recommendation for TICKER with a price target, backed by quantitative analysis (Ito/GBM-based expected return and risk) and company/industry research.',
+};
 
 const HIGH_CREDIBILITY_TLDS = new Set(['.edu', '.gov', '.org', '.ac.uk', '.ac.au', '.ac.nz']);
 const LOW_CREDIBILITY_SIGNALS = [
@@ -439,8 +475,24 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
   const conclusion = (conclusionR.content || '').trim();
   const refsSection = '\n\n---\n## References\n\n' + [...refMap.values()].sort((a: any, b: any) => a.id - b.id).map((ref: any) => `[${ref.id}] ${ref.apa}`).join('\n');
   const preamble = coverageGaps ? coverageGaps : '';
-  const fullReport = preamble + concatenated + '\n\n---\n## Conclusion\n\n' + conclusion + refsSection;
-  log({ level: 'success', msg: `[STEP 6] Report done — ${fullReport.length} chars, ${refMap.size} sources`, source: 'researchAgent', ts: Date.now() });
+  let fullReport = preamble + concatenated + '\n\n---\n## Conclusion\n\n' + conclusion + refsSection;
+  // citation integrity: every source must be cited in the body, every tag must
+  // resolve, and the References section must list every source. the writer is
+  // told to keep tags — this makes sure it actually did.
+  const claimsByRef = new Map<number, string[]>();
+  for (const node of verifiedNodes) {
+    const id = refMap.get(node.url)?.id;
+    if (id == null) continue;
+    if (!claimsByRef.has(id)) claimsByRef.set(id, []);
+    claimsByRef.get(id)!.push(node.claim);
+  }
+  const integrity = await enforceCitations(callChat, fullReport, refMap.size, claimsByRef, opts);
+  fullReport = integrity.report;
+  if (integrity.restored.length) log({ level: 'warn', msg: `[STEP 6] Citation integrity: restored ${integrity.restored.length} missing tags: [Source ${integrity.restored.join('], [Source ')}]`, source: 'researchAgent', ts: Date.now() });
+  if (integrity.orphans.length) log({ level: 'warn', msg: `[STEP 6] Citation integrity: ${integrity.orphans.length} orphan tags removed: ${integrity.orphans.slice(0, 5).join(', ')}`, source: 'researchAgent', ts: Date.now() });
+  const refCheck = checkReferencesSection(fullReport, refMap.size);
+  if (!refCheck.ok) log({ level: 'warn', msg: `[STEP 6] References section missing entries: [${refCheck.missingRefs.join('], [')}]`, source: 'researchAgent', ts: Date.now() });
+  log({ level: 'success', msg: `[STEP 6] Report done — ${fullReport.length} chars, ${refMap.size} sources, ${integrity.restored.length} citations restored`, source: 'researchAgent', ts: Date.now() });
   return { report: fullReport, references: [...refMap.values()], claimCount: verifiedNodes.length };
 }
 
@@ -489,6 +541,40 @@ async function mathLogicVerifier(callChat: any, report: string, domain: any, opt
   }
   log({ level: 'warn', msg: '[STEP 8B] Math/Logic parse failed', source: 'researchAgent', ts: Date.now() });
   return { agent: 'mathLogic', issues: [], hasMathContent: false, mathRigorScore: 100 };
+}
+
+async function quantFinanceVerifier(callChat: any, report: string, opts: any = {}): Promise<any> {
+  log({ level: 'info', msg: '[STEP 8E] Quant Finance Verifier starting...', source: 'researchAgent', ts: Date.now() });
+  const r = await isolatedCall(callChat,
+    `You are a Quantitative Finance Auditor. You re-derive every quantitative claim in an investment report from first principles.
+
+MATH YOU MUST CHECK:
+  1. Geometric Brownian motion: dS = μS dt + σS dW. Expected return over horizon T under GBM: E[S_T] = S_0 * e^(μT). Log-return variance: σ²T.
+  2. Ito's lemma applications: for f(S) = ln S, df = (μ - σ²/2)dt + σ dW — the drift correction -σ²/2 must appear in any log-return derivation.
+  3. Sharpe ratio: (R_p - R_f) / σ_p. Check the numbers actually divide correctly.
+  4. VaR: z_α * σ * P * sqrt(T) for normal returns (z_0.95 = 1.645, z_0.99 = 2.326). Check the z-value matches the confidence level.
+  5. DCF: PV = Σ CF_t / (1+r)^t. Check discount rates, growth rates, and terminal value math.
+  6. Multiples: P/E, EV/EBITDA — check the numbers are consistent (price / EPS, etc.).
+  7. Annualization: daily vol * sqrt(252) = annual vol. Monthly * sqrt(12).
+
+For every quantitative claim: state the formula, plug in the report's numbers, recompute, and compare. Flag any arithmetic error, wrong formula, wrong z-value, or missing drift correction.
+
+Output ONLY valid JSON — no markdown fences, no prose:
+{"issues": [{"location": "exact text segment", "severity": "critical|major|minor", "type": "arithmetic_error|wrong_formula|missing_drift|wrong_z_value|unit_error|unsupported", "description": "...", "correction": "..."}], "quantScore": 0, "hasQuantContent": true}
+If no quantitative content is present, return {"issues": [], "quantScore": 100, "hasQuantContent": false}.`,
+    `REPORT TO VERIFY:\n\n${report}`,
+    { ...opts, samplingProfile: 'verify' });
+  const parsed = parseJsonSafe(r.content || '', z.object({
+    issues: z.array(z.object({ location: z.string().optional(), severity: z.string().optional(), type: z.string().optional(), description: z.string().optional(), correction: z.string().optional() })).optional(),
+    quantScore: z.number().optional(),
+    hasQuantContent: z.boolean().optional(),
+  }));
+  if (parsed) {
+    log({ level: 'info', msg: `[STEP 8E] Quant: ${parsed.issues?.length ?? 0} issues found, score=${parsed.quantScore ?? 'N/A'}`, source: 'researchAgent', ts: Date.now() });
+    return { agent: 'quantFinance', ...parsed };
+  }
+  log({ level: 'warn', msg: '[STEP 8E] Quant parse failed', source: 'researchAgent', ts: Date.now() });
+  return { agent: 'quantFinance', issues: [], quantScore: 100, hasQuantContent: false };
 }
 
 async function domainExpertCritic(callChat: any, report: string, domainInfo: any, opts: any = {}): Promise<any> {
@@ -557,13 +643,15 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
   const critiqueHistory: any[] = [];
   for (let loop = 1; loop <= maxLoops; loop++) {
     log({ level: 'info', msg: `[CRITIQUE LOOP ${loop}/${maxLoops}] Running all critics in parallel...`, source: 'researchAgent', ts: Date.now() });
-    const [fidelityResult, mathResult, expertResult, adversarialResult] = await Promise.allSettled([
+    const criticTasks = [
       sourceFidelityVerifier(callChat, currentReport, verifiedNodes, opts),
       mathLogicVerifier(callChat, currentReport, domainInfo, opts),
       domainExpertCritic(callChat, currentReport, domainInfo, opts),
       adversarialCritic(callChat, currentReport, topic, opts),
-    ]);
-    const critics = [fidelityResult, mathResult, expertResult, adversarialResult].filter((r: any) => r.status === 'fulfilled').map((r: any) => r.value);
+    ];
+    if (opts.mode === 'stock') criticTasks.push(quantFinanceVerifier(callChat, currentReport, opts));
+    const settledCritics = await Promise.allSettled(criticTasks);
+    const critics = settledCritics.filter((r: any) => r.status === 'fulfilled').map((r: any) => r.value);
     const allIssues: any[] = [];
     for (const critic of critics) {
       for (const issue of critic.issues || []) allIssues.push({ ...issue, agent: critic.agent });
@@ -585,6 +673,20 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
     }
     allIssues.sort((a: any, b: any) => (severityWeights[b.severity] || 1) - (severityWeights[a.severity] || 1));
     currentReport = await constrainedRepairAgent(callChat, currentReport, allIssues, topic, opts);
+    // repair agents are told to keep [Source N] tags — enforce it
+    const refCount = new Set(verifiedNodes.map((n: any) => n.url)).size;
+    const claimsByRef = new Map<number, string[]>();
+    const urlToId = new Map<string, number>();
+    let nextId = 1;
+    for (const node of verifiedNodes) {
+      if (!urlToId.has(node.url)) urlToId.set(node.url, nextId++);
+      const id = urlToId.get(node.url)!;
+      if (!claimsByRef.has(id)) claimsByRef.set(id, []);
+      claimsByRef.get(id)!.push(node.claim);
+    }
+    const integrity = await enforceCitations(callChat, currentReport, refCount, claimsByRef, opts);
+    if (integrity.restored.length) log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair dropped ${integrity.restored.length} citations — restored: [Source ${integrity.restored.join('], [Source ')}]`, source: 'researchAgent', ts: Date.now() });
+    currentReport = integrity.report;
     if (expertCritic?.overallAssessment === 'accept') {
       log({ level: 'success', msg: `[CRITIQUE LOOP ${loop}] Expert accepts report — stopping critique loop`, source: 'researchAgent', ts: Date.now() });
       break;
@@ -600,7 +702,11 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
   if (opts.academicFilter) log({ level: 'info', msg: '[CONFIG] Academic filter: ON', source: 'researchAgent', ts: Date.now() });
   if (opts.enableCritique !== false) log({ level: 'info', msg: '[CONFIG] Critique loop: ON', source: 'researchAgent', ts: Date.now() });
   try {
-    const answerSpec = await detectAnswerFormat(callChat, topic, opts);
+    let answerSpec = await detectAnswerFormat(callChat, topic, opts);
+    if (opts.mode === 'stock') {
+      answerSpec = { ...answerSpec, ...STOCK_SPEC };
+      log({ level: 'info', msg: '[CONFIG] Stock research mode: fixed quant+fundamentals answer spec', source: 'researchAgent', ts: Date.now() });
+    }
     stepSummary.step0 = { answerType: answerSpec.answerType, requiredFields: answerSpec.requiredFields };
     const queries = await plannerAgent(callChat, topic, answerSpec, opts);
     stepSummary.step1 = { queriesGenerated: queries.length };
@@ -635,6 +741,15 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
         reportLengthDelta: finalReport.length - initialReport.length,
       };
       log({ level: 'success', msg: `[STEP 9] Critique loop complete — ${critiqueHistory.length} loops, final report: ${finalReport.length} chars`, source: 'researchAgent', ts: Date.now() });
+    }
+    // humanize flag: rewrite until the detector says 0% AI-ness, fixing any
+    // damage each rewrite causes, looping until clean.
+    if (opts.humanize) {
+      log({ level: 'info', msg: '[HUMANIZE] Running humanize loop on final report...', source: 'researchAgent', ts: Date.now() });
+      const h = await humanizeText(callChat, finalReport, opts);
+      finalReport = h.text;
+      stepSummary.humanize = { iterations: h.iterations, finalScore: h.finalScore, ok: h.ok };
+      log({ level: 'success', msg: `[HUMANIZE] Done — ${h.iterations} iterations, detector score ${h.finalScore}`, source: 'researchAgent', ts: Date.now() });
     }
     log({ level: 'success', msg: '[DONE] Research complete. Final report delivered.', source: 'researchAgent', ts: Date.now() });
     return { report: finalReport, references, claimCount, stepSummary, critiqueHistory, success: true };

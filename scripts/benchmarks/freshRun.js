@@ -137,8 +137,10 @@ function loadDone() {
   await queue.onIdle();
 
   // write csv (append mode, resume-safe). error rows are NOT written so a
-  // transient provider error retries on the next run.
-  const lines = [csvHeader];
+  // transient provider error retries on the next run. header only when the
+  // file is new — a re-run appends rows to an existing header, and a second
+  // header line would be parsed as a bogus data row (kind="kind").
+  const lines = fs.existsSync(CSV) && fs.readFileSync(CSV, 'utf-8').trim() ? [] : [csvHeader];
   for (const r of rows) {
     if (r.plain && !r.plain.error && !done.has(r.id + '|plain')) lines.push([r.id, r.kind, 'plain', csvEscape(r.plain.answer), csvEscape(r.gold), r.plainOk ? 1 : 0, r.plain.ms, r.plain.tokens, r.plain.calls ?? 1, csvEscape(r.plain.raw)].join(','));
     if (r.dt && !r.dt.error && !done.has(r.id + '|dt')) lines.push([r.id, r.kind, 'dt', csvEscape(r.dt.answer), csvEscape(r.gold), r.dtOk ? 1 : 0, r.dt.ms, r.dt.tokens, r.dt.calls ?? 1, csvEscape(r.dt.raw)].join(','));

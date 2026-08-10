@@ -778,7 +778,7 @@ export class Deepthink extends EventEmitter {
       const fmtDirective = mergedOpts.answerFormat === 'bracket' && type !== 'json'
         ? ' End with the final answer in square brackets on the last line, e.g. [42]. Nothing after the closing bracket.'
         : /ANSWER\s*:/.test(typeof mergedOpts.systemPrompt === 'string' ? mergedOpts.systemPrompt : '')
-          ? ' End with the final answer on a line starting with "ANSWER: ", e.g. "ANSWER: 3". Nothing after that line.'
+          ? ' End with the final answer on a line starting with "ANSWER: ". If the problem lists numbered choices, answer with the choice NUMBER only (e.g. "ANSWER: 3" for choice 3) — never the value itself. Nothing after that line.'
           : '';
       const preFinal: ChatMessage[] = [
         { role: 'system', content: `Extract the final verified answer from this cognitive process log. Match the requested data type: ${mergedOpts.type}. Output ONLY the final answer.${fmtDirective}` },
@@ -893,11 +893,14 @@ export class Deepthink extends EventEmitter {
     // caller's system prompt demands an "ANSWER: X" line (benchmarks, tools):
     // reinforce it in the final call — the model drifts to prose otherwise.
     // same ride-in-system-messages trick so check-loop revisions keep it.
+    // if the problem lists numbered choices, the answer must be the choice
+    // NUMBER, not the value — models otherwise write "ANSWER: 31" when the
+    // gold is the index "3" (the value is right, the format is wrong).
     const sysText = typeof mergedOpts.systemPrompt === 'string' ? mergedOpts.systemPrompt : '';
     if (/ANSWER\s*:/.test(sysText) && type !== 'json') {
       finalMessages = insertSystemPrompt(
         finalMessages,
-        'OUTPUT FORMAT: end your response with the final answer on a line starting with "ANSWER: " — e.g. "ANSWER: 3". Nothing after that line.'
+        'OUTPUT FORMAT: end your response with the final answer on a line starting with "ANSWER: ". If the problem lists numbered choices, answer with the choice NUMBER only (e.g. "ANSWER: 3" for choice 3) — never the value itself. Nothing after that line.'
       );
     }
     const preFinal = consolidateSystemMessages(finalMessages);

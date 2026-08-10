@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.5
+
+### Fixed
+- **PEG/forward-P/E parenthetical capture** — run 12: "PEG Ratio (5yr expected): 0.55" — the lazy `[^0-9]{0,40}` window stopped at the "5" in "(5yr", so growth derived as 4.6% (22.88 ÷ 5) instead of 41.6% (22.88 ÷ 0.55). Both regexes now use the parenthetical-skip pattern `(?:\s*\([^)]*\)|[^0-9]){0,40}` the beta regex already had.
+- **Implied-price cross-check (market cap ÷ shares)** — runs 9/12: the Yahoo quote page glitched to "$8.00" and every claim repeated it, so cluster consensus had nothing sane to cluster against. The engine now also harvests market capitalization and shares outstanding and computes the implied price (4.86T ÷ 24.2B = $200.83). A harvested quote more than 2× off the implied price is rejected as implausible; a missing quote is filled by the implied price. A sane quote within 2× is kept.
+
 ## v1.8.4
 
 ### Fixed

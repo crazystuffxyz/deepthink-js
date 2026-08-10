@@ -961,6 +961,12 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
 function quantConformanceRepair(report, quantModel) {
     if (!quantModel || !quantModel.ok)
         return report;
+    // the References section is METADATA (titles, years, URLs) — never sweep
+    // it. run 8: the beta rule matched "beta" inside a URL and rewrote "[5]"
+    // into "[2.21]". split there and only touch the body.
+    const refIdx = report.search(/\n---\n## References|\n## References/i);
+    let head = refIdx > -1 ? report.slice(0, refIdx) : report;
+    const tail = refIdx > -1 ? report.slice(refIdx) : '';
     const q = quantModel;
     const R = (v, d = 2) => v != null ? v.toFixed(d) : null;
     // Rpc — the engine stores rates as decimals (0.1449 = 14.49%), prose uses %
@@ -1010,14 +1016,15 @@ function quantConformanceRepair(report, quantModel) {
             } },
     ];
     for (const rule of rules) {
-        report = report.replace(rule.re, (m, num) => {
+        // run against head only — the references tail never passes a rule
+        head = head.replace(rule.re, (m, num) => {
             if (rule.banned?.some((w) => m.toLowerCase().includes(w)))
                 return m;
             const rep = rule.fn(m.toLowerCase(), num.replace(/,/g, ''));
             return rep != null ? m.replace(num, rep) : m;
         });
     }
-    return report;
+    return head + tail;
 }
 // ---- output format conversion ----
 // the report is authored as markdown; outputFormat converts it at the end so

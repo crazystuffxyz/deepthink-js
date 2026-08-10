@@ -93,6 +93,27 @@ function loadBench(name) {
     .map((l) => JSON.parse(l));
 }
 
+// quote-aware csv line split — model answers are prose and contain commas,
+// so naive split() misaligns columns (broke resumed-row aggregates).
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQ = false;
+      } else cur += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === ',') { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
 function csvEscape(s) {
   if (s === null || s === undefined) return '';
   const t = String(s).replace(/\r?\n/g, ' ').slice(0, 4000);
@@ -507,7 +528,7 @@ async function main() {
         if (!done.has(key)) continue;
         const prev = fs.readFileSync(csvPath, 'utf-8').split('\n').find((l) => l.startsWith(`${plan.bench},${row.id},`));
         if (!prev) continue;
-        const c = prev.split(',');
+        const c = parseCsvLine(prev);
         if (c[4] === '1') pOk++;
         if (c[6] === '1') dOk++;
         if (c[7] === '1') pExec++;

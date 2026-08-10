@@ -6,6 +6,7 @@ import { generateCitation } from '../internet/extractCitation.js';
 import path from 'node:path';
 import { runCognitiveFlow } from './cognitive.js';
 import { humanizeText } from './humanize.js';
+import { runQuantModel } from './quantEngine.js';
 import { enforceCitations, checkReferencesSection } from './citationIntegrity.js';
 import { tryParseJsonSafe as parseJsonSafe } from '../parse/json.js';
 import { z } from 'zod';
@@ -487,7 +488,10 @@ function buildCoverageGapsDisclaimer(plannedQueries, verifiedNodes) {
 // URLs so the writer cites both in ONE paragraph instead of repeating the
 // fact in separate sections. qualitative claims (no numbers) never merge.
 function mergeDuplicateClaims(nodes) {
-    const numsOf = (s) => new Set((s.match(/\$?\d+(?:\.\d+)?[bm%]?/gi) || []).map((x) => x.toLowerCase()));
+    // number normalization: "81.61 billion" and "$81.61B" must collide, so
+    // strip $/commas and fold billion/million/trillion into b/m/t suffixes.
+    const numKey = (t) => t.replace(/[\$,]/g, '').replace(/\s*(billion|million|trillion)\s*/g, (_m, w) => w[0]).replace(/\s+/g, '');
+    const numsOf = (s) => new Set((s.toLowerCase().match(/\$?[\d,]+(?:\.\d+)?\s*(?:billion|million|trillion|[bm%])?/gi) || []).map(numKey));
     const wordsOf = (s) => new Set((s.toLowerCase().match(/[a-z]{4,}/g) || []).slice(0, 12));
     const out = [];
     const used = new Set();
@@ -518,7 +522,7 @@ function mergeDuplicateClaims(nodes) {
     }
     return out;
 }
-async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opts, plannedQueries = []) {
+async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opts, plannedQueries = [], quantModel = null) {
     log({ level: 'info', msg: `[STEP 6] Report Writer — ${verifiedNodes.length} verified claims, ${plannedQueries.length} planned queries`, source: 'researchAgent', ts: Date.now() });
     const chunk = opts.chunkSize ?? 20;
     const tail = opts.tailChars ?? 1500;
@@ -557,8 +561,24 @@ async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opt
     // stock mode: the report must actually DO the math, not just claim it.
     // a DCF without a stated intrinsic value, or an Ito mention without an
     // applied derivation, reads as hand-waving — the quant verifier flags it.
+    // when the quant engine ran, the pipeline already computed the real math
+    // from the verified claims — the writer must adopt those exact numbers,
+    // not invent its own, so the report's numbers are code-computed truth.
+    let quantNote = '';
+    if (quantModel && quantModel.ok) {
+        quantNote = `\n\nTHE PIPELINE COMPUTED THESE VALUES FROM YOUR VERIFIED CLAIMS (deterministic code, not LLM estimates). USE THESE EXACT NUMBERS in your prose — do NOT invent different ones:\n` +
+            `  - Cost of equity (CAPM): ${(quantModel.costOfEquity * 100).toFixed(2)}%\n` +
+            `  - Intrinsic value from 10-year DCF: $${quantModel.intrinsicValue.toFixed(2)}/share (${(quantModel.upside >= 0 ? '+' : '') + (quantModel.upside * 100).toFixed(1)}% vs current price)\n` +
+            `  - Expected annual return (GBM drift μ): ${(quantModel.expectedReturn * 100).toFixed(1)}%\n` +
+            `  - Expected log-return, Ito drift correction (μ - σ²/2): ${(quantModel.expectedLogReturn * 100).toFixed(1)}% (volatility drag σ²/2 = ${((quantModel.sigma * quantModel.sigma / 2) * 100).toFixed(1)}%)\n` +
+            `  - Annualized volatility σ: ${(quantModel.sigma * 100).toFixed(1)}%\n` +
+            `  - Sharpe ratio: ${quantModel.sharpe.toFixed(2)}\n` +
+            `  - 1-day 95% VaR: $${quantModel.var95_1d.toFixed(2)} (${((quantModel.var95_1d / quantModel.price) * 100).toFixed(2)}%)\n` +
+            `  - Expected price in one year E[S_T] = S₀e^{μT}: $${quantModel.expectedPrice.toFixed(2)}\n` +
+            `  - A "## Quantitative Model" section with full derivations is appended automatically — write prose consistent with it.`;
+    }
     const stockNote = opts.mode === 'stock'
-        ? `\n\nSTOCK REPORT REQUIREMENTS (non-negotiable):\n  - If you run a DCF or Monte Carlo, STATE the resulting intrinsic value estimate in dollars per share.\n  - Apply Ito's lemma concretely: derive the expected log-return (μ - σ²/2)T and use it in your expected-return math. Do not just name-drop the equation.\n  - Every risk metric (VaR, Sharpe) must be consistent with the stated volatility: 1-day 95% VaR = 1.645 * σ / sqrt(252).\n  - State the expected return over your target horizon and the volatility that justifies the recommendation.`
+        ? `\n\nSTOCK REPORT REQUIREMENTS (non-negotiable):\n  - If you run a DCF or Monte Carlo, STATE the resulting intrinsic value estimate in dollars per share.\n  - Apply Ito's lemma concretely: derive the expected log-return (μ - σ²/2)T and use it in your expected-return math. Do not just name-drop the equation.\n  - Every risk metric (VaR, Sharpe) must be consistent with the stated volatility: 1-day 95% VaR = 1.645 * σ / sqrt(252).\n  - State the expected return over your target horizon and the volatility that justifies the recommendation.${quantNote}`
         : '';
     for (let ci = 0; ci < chunks.length; ci++) {
         const chunkSlice = chunks[ci];
@@ -938,7 +958,20 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
         stepSummary.step5 = { verifiedClaims: verifiedNodes.length };
         if (verifiedNodes.length === 0)
             return { report: `All extracted claims failed factual verification for: "${topic}".`, references: [], claimCount: 0, stepSummary, success: false };
-        const { report: initialReport, references, claimCount } = await reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opts, queries);
+        // stock mode: compute the real quant model from the verified claims so
+        // the report's DCF/GBM/VaR numbers are code-computed, not LLM-asserted.
+        let quantModel = null;
+        if (opts.mode === 'stock') {
+            quantModel = runQuantModel(verifiedNodes.map((n) => n.claim));
+            stepSummary.quant = {
+                ok: quantModel.ok, intrinsicValue: quantModel.intrinsicValue,
+                costOfEquity: quantModel.costOfEquity, sharpe: quantModel.sharpe,
+                var95_1d: quantModel.var95_1d, expectedLogReturn: quantModel.expectedLogReturn,
+                inputs: quantModel.inputs,
+            };
+            log({ level: quantModel.ok ? 'success' : 'warn', msg: `[QUANT] ${quantModel.ok ? 'Computed' : 'Partial'} model — IV $${quantModel.intrinsicValue?.toFixed(2) ?? 'n/a'}/share, Re ${quantModel.costOfEquity != null ? (quantModel.costOfEquity * 100).toFixed(2) + '%' : 'n/a'}, Sharpe ${quantModel.sharpe?.toFixed(2) ?? 'n/a'}`, source: 'researchAgent', ts: Date.now() });
+        }
+        const { report: initialReport, references, claimCount } = await reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opts, queries, quantModel);
         stepSummary.step6 = { reportLength: initialReport.length, uniqueSources: references.length };
         let finalReport = initialReport;
         let critiqueHistory = [];
@@ -954,6 +987,18 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
                 reportLengthDelta: finalReport.length - initialReport.length,
             };
             log({ level: 'success', msg: `[STEP 9] Critique loop complete — ${critiqueHistory.length} loops, final report: ${finalReport.length} chars`, source: 'researchAgent', ts: Date.now() });
+        }
+        // the computed quant section is appended AFTER the critique loop so no
+        // critic/repair pass can rewrite code-computed math — it lands between
+        // the conclusion and references as a modeling appendix.
+        if (quantModel && quantModel.section) {
+            const refIdx = finalReport.lastIndexOf('\n---\n## References');
+            if (refIdx > -1)
+                finalReport = finalReport.slice(0, refIdx) + '\n\n' + quantModel.section + finalReport.slice(refIdx);
+            else
+                finalReport += '\n\n' + quantModel.section;
+            stepSummary.quant.injected = true;
+            log({ level: 'success', msg: '[QUANT] Injected computed quantitative model section', source: 'researchAgent', ts: Date.now() });
         }
         // humanize flag: rewrite until the detector says 0% AI-ness, fixing any
         // damage each rewrite causes, looping until clean.

@@ -192,6 +192,35 @@ function looksComputational(inputText) {
     return (/\d/.test(inputText) ||
         /calculate|compute|solve|evaluate|sum|difference|product|quotient|multiply|divide|add |subtract|count|convert|parse|fibonacci|prime|factorial|greatest|least common|probability|integral|derivative|generate a (list|table|sequence)|sort |sorting|matrix|equation/i.test(inputText));
 }
+/** pull the answer value out of a formatted response: the "ANSWER: X" line,
+ *  or [X] on the last line, else the whole trimmed text. */
+function extractAnswerValue(text) {
+    if (!text)
+        return '';
+    const m = text.match(/ANSWER\s*:\s*([^\n]+)/i);
+    if (m)
+        return m[1].trim();
+    const b = text.match(/\[([^\]]+)\]\s*$/m);
+    if (b)
+        return b[1].trim();
+    return text.trim();
+}
+/** loose equality for answer comparison: case, whitespace, trailing period */
+function normAnswer(s) {
+    return String(s).trim().toLowerCase().replace(/[.\s]+$/g, '').replace(/\s+/g, ' ');
+}
+/** the OUTPUT FORMAT directive for the caller's requested answer shape —
+ *  shared by the final call and the independent self-consistency sample. */
+function buildFormatDirective(mergedOpts, type) {
+    if (mergedOpts.answerFormat === 'bracket' && type !== 'json') {
+        return 'OUTPUT FORMAT: end your response with the final answer alone on the last line, in square brackets - e.g. [42] or [sqrt(2)/3]. Nothing may follow the closing bracket.';
+    }
+    const sysText = typeof mergedOpts.systemPrompt === 'string' ? mergedOpts.systemPrompt : '';
+    if (/ANSWER\s*:/.test(sysText) && type !== 'json') {
+        return 'OUTPUT FORMAT: end your response with the final answer on a line starting with "ANSWER: ". If the problem lists numbered choices, answer with the choice NUMBER only (e.g. "ANSWER: 3" for choice 3) — never the value itself. Nothing after that line.';
+    }
+    return '';
+}
 /** pull a Retry-After hint out of an error message if the server sent one */
 function parseRetryAfter(err) {
     const m = String(err?.message || '');
@@ -818,22 +847,14 @@ export class Deepthink extends EventEmitter {
                 }
             }
         }
-        // answerFormat: 'bracket' — same deal as the cognitiveFlow branch:
-        // the final answer must end as [value] on the last line. rides in the
-        // system messages so every revision pass keeps seeing it.
-        if (mergedOpts.answerFormat === 'bracket' && type !== 'json') {
-            finalMessages = insertSystemPrompt(finalMessages, 'OUTPUT FORMAT: end your response with the final answer alone on the last line, in square brackets - e.g. [42] or [sqrt(2)/3]. Nothing may follow the closing bracket.');
-        }
-        // caller's system prompt demands an "ANSWER: X" line (benchmarks, tools):
-        // reinforce it in the final call — the model drifts to prose otherwise.
-        // same ride-in-system-messages trick so check-loop revisions keep it.
-        // if the problem lists numbered choices, the answer must be the choice
-        // NUMBER, not the value — models otherwise write "ANSWER: 31" when the
-        // gold is the index "3" (the value is right, the format is wrong).
-        const sysText = typeof mergedOpts.systemPrompt === 'string' ? mergedOpts.systemPrompt : '';
-        if (/ANSWER\s*:/.test(sysText) && type !== 'json') {
-            finalMessages = insertSystemPrompt(finalMessages, 'OUTPUT FORMAT: end your response with the final answer on a line starting with "ANSWER: ". If the problem lists numbered choices, answer with the choice NUMBER only (e.g. "ANSWER: 3" for choice 3) — never the value itself. Nothing after that line.');
-        }
+        // answerFormat: 'bracket' / "ANSWER: X" — the final answer must land in
+        // the requested shape. rides in the system messages so every revision
+        // pass keeps seeing it. if the problem lists numbered choices, the
+        // answer must be the choice NUMBER, not the value — models otherwise
+        // write "ANSWER: 31" when the gold is the index "3".
+        const fmtDirective = buildFormatDirective(mergedOpts, type);
+        if (fmtDirective)
+            finalMessages = insertSystemPrompt(finalMessages, fmtDirective);
         const preFinal = consolidateSystemMessages(finalMessages);
         const isStream = typeof onChunk === 'function';
         const finalSamplingProfile = mergedOpts.samplingProfile || (type !== 'string' ? 'verify' : 'creative');
@@ -907,6 +928,38 @@ export class Deepthink extends EventEmitter {
                         rawText += `\n\n**Verified Answer: ${gtv}**`;
                 }
                 convo = [...convo, { role: 'assistant', content: rawText }];
+            }
+            // final self-consistency: one independent blind re-derivation of the
+            // answer. the checkers audit the draft and can be anchored to its
+            // reasoning; a fresh sample from the ORIGINAL input only catches
+            // "confident but wrong" answers the checkers rubber-stamp. on
+            // mismatch, reconcile once and re-check. skipped when the sandbox
+            // already machine-verified the answer (machine > model sample).
+            if (mergedOpts.finalConsistency !== false && !codeExec?.sandboxValidated) {
+                const fmtDir = buildFormatDirective(mergedOpts, type);
+                const mine = extractAnswerValue(rawText);
+                if (fmtDir && mine && mine.length <= 60) {
+                    try {
+                        const indep = await this.callChat([{ role: 'system', content: `Solve the problem independently from scratch. Do not assume any prior work exists. ${fmtDir}` }, { role: 'user', content: inputText }], false, null, { ...mergedOpts, think: true, samplingProfile: 'verify', _phase: 'consistency', _depth: 2 });
+                        const theirs = extractAnswerValue(stripThinkBlocks(indep.content || ''));
+                        if (theirs && normAnswer(theirs) !== normAnswer(mine)) {
+                            this.emit('log', { level: 'warn', msg: `[SELF-CONSISTENCY] independent re-derivation [${theirs}] ≠ pipeline [${mine}] — reconciling`, source: 'checks', ts: Date.now() });
+                            const reconcileMsg = `An independent re-derivation of the problem produced the answer [${theirs}], but your answer is [${mine}]. At most one is right. Re-derive carefully, find the error, and give the final answer.`;
+                            convo = [...convo, { role: 'user', content: reconcileMsg }];
+                            result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream, isStream ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3 });
+                            rawText = stripThinkBlocks(result.content || '');
+                            const recheck = await this.runChecks(input, rawText, checks, mergedOpts, gt, sandboxPrefix);
+                            const passed2 = recheck.filter(r => r.correct).length;
+                            this.emit('log', { level: 'info', msg: `[SELF-CONSISTENCY] reconciled answer passed ${passed2}/${checks} checks`, source: 'checks', ts: Date.now() });
+                        }
+                        else {
+                            this.emit('log', { level: 'info', msg: `[SELF-CONSISTENCY] independent re-derivation confirmed [${theirs}]`, source: 'checks', ts: Date.now() });
+                        }
+                    }
+                    catch (e) {
+                        this.emit('log', { level: 'warn', msg: `[SELF-CONSISTENCY] sample failed: ${e.message}`, source: 'checks', ts: Date.now() });
+                    }
+                }
             }
         }
         if (brain)

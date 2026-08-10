@@ -21,6 +21,8 @@ import { generateAndRunCode } from '../codeGenerator/index.js';
 import { PYTHON_BIN } from '../codeGenerator/python.js';
 import { compareResults } from '../codeGenerator/run.js';
 import { globalEmitter } from './events.js';
+import { TraceStore } from './trace.js';
+import { AdaptiveConcurrency, isRateLimitError, isTimeoutError } from './concurrency.js';
 
 const SAMPLING = {
   creative: { temperature: 0.7, top_p: 0.9, top_k: 40 },
@@ -44,7 +46,7 @@ type CheckResult = Check;
 
 type ChatMessage = { role: string; content: string; images?: string[]; name?: string };
 type ChatParams = { model?: string; messages: ChatMessage[]; stream?: boolean; options?: Record<string, unknown>; think?: boolean | string; format?: string | object; keep_alive?: string; max_tokens?: number; onChunk?: ((chunk: string, meta: { kind: 'content' | 'thinking' }) => void) | null; ollamaOutput?: boolean };
-type ChatResult = { content: string; thinking?: string };
+type ChatResult = { content: string; thinking?: string; promptTokens?: number | null; responseTokens?: number | null; latencyMs?: number | null };
 
 type ProviderClient = { chat: (p: ChatParams) => Promise<ChatResult> };
 
@@ -103,6 +105,11 @@ type DeepthinkOptions = {
   _truncatableMessages?: ChatMessage[];
   verbose?: boolean;
   provider?: string;
+  // trace plumbing — set by generate(), read by callChat
+  _trace?: TraceStore;
+  _phase?: string;
+  _depth?: number;
+  _parentCallId?: number | null;
   [k: string]: unknown;
 };
 
@@ -244,6 +251,38 @@ function insertSystemPrompt(messages: ChatMessage[], sys: string): ChatMessage[]
   return [{ role: 'system', content: sys }, ...messages.map(cloneMessage as (m: ChatMessage) => ChatMessage)];
 }
 
+/** serialize messages for the trace log — images replaced with a marker so
+ *  base64 blobs never blow up the audit trail. */
+function tracePrompt(messages: ChatMessage[]): string {
+  const redacted = messages.map(m => {
+    if (Array.isArray(m.images) && m.images.length) {
+      return { ...m, images: [`<${m.images.length} image(s) redacted>`] };
+    }
+    return m;
+  });
+  const txt = JSON.stringify(redacted);
+  return txt.length > 8000 ? txt.slice(0, 8000) + '…[truncated]' : txt;
+}
+
+/** cheap guard: does this input look computational at all? skips the
+ *  detectComputeNeeds LLM call for pure-prose requests. */
+function looksComputational(inputText: string): boolean {
+  return (
+    /\d/.test(inputText) ||
+    /calculate|compute|solve|evaluate|sum|difference|product|quotient|multiply|divide|add |subtract|count|convert|parse|fibonacci|prime|factorial|greatest|least common|probability|integral|derivative|generate a (list|table|sequence)|sort |sorting|matrix|equation/i.test(inputText)
+  );
+}
+
+/** pull a Retry-After hint out of an error message if the server sent one */
+function parseRetryAfter(err: unknown): number | null {
+  const m = String((err as Error)?.message || '');
+  const hit = m.match(/retry[- ]?after[:\s]+(\d+)/i);
+  if (hit) return Math.min(Number(hit[1]) * 1000, 60_000);
+  return null;
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
 export class Deepthink extends EventEmitter {
   model: string;
   auditModel: string;
@@ -251,18 +290,41 @@ export class Deepthink extends EventEmitter {
   currentKeyIndex: number;
   clientOptions: Record<string, unknown>;
   limiter: PQueue;
+  concurrencyScaler: AdaptiveConcurrency | null;
+  traceMode: string;
   _keyFailures: Map<string, { count: number; quarantineUntil: number }>;
   _keyMutex: Async;
   _globalLogBridge: (e: LogEvent) => void;
+  // trace + batch accounting
+  _lastTrace: TraceStore | null;
+  _activeCalls: number;
+  _batch: { calls: number; errors: number; rateLimited: number; timeouts: number; latencies: number[] };
 
-  constructor(model?: string, apiKeys: string[] = [], clientOptions: Record<string, unknown> = {}, concurrency: number = Infinity, auditModel: string | null = null) {
+  constructor(model?: string, apiKeys: string[] = [], clientOptions: Record<string, unknown> = {}, concurrency: number = Infinity, auditModel: string | null = null, extra: { adaptiveConcurrency?: boolean; traceMode?: string; maxConcurrency?: number } = {}) {
     super();
     this.model = model || process.env.OLLAMA_MODEL || 'llama3.1';
     this.auditModel = auditModel || this.model;
     this.apiKeys = Array.isArray(apiKeys) ? apiKeys.map(k => String(k).trim()).filter(Boolean) : [];
     this.currentKeyIndex = 0;
     this.clientOptions = clientOptions || {};
-    this.limiter = new PQueue({ concurrency: concurrency === Infinity ? Infinity : concurrency });
+    this.traceMode = extra.traceMode ?? 'flat';
+    this._lastTrace = null;
+    this._activeCalls = 0;
+    this._batch = { calls: 0, errors: 0, rateLimited: 0, timeouts: 0, latencies: [] };
+    // adaptive concurrency: on unless the caller pinned a finite level
+    const adaptive = extra.adaptiveConcurrency ?? true;
+    if (adaptive && (concurrency === Infinity || concurrency > 0)) {
+      this.concurrencyScaler = new AdaptiveConcurrency({
+        model: this.model,
+        start: concurrency === Infinity ? 2 : concurrency,
+        max: extra.maxConcurrency ?? 32,
+        onEvent: (m) => this._log('info', 'concurrency', m)
+      });
+      this.limiter = new PQueue({ concurrency: this.concurrencyScaler.current });
+    } else {
+      this.concurrencyScaler = null;
+      this.limiter = new PQueue({ concurrency: concurrency === Infinity ? Infinity : concurrency });
+    }
     this._keyFailures = new Map();
     this._keyMutex = new Async();
     // bridge module-level events onto this instance's emitter
@@ -275,10 +337,41 @@ export class Deepthink extends EventEmitter {
    */
   destroy(): void {
     globalEmitter.off('log', this._globalLogBridge);
+    this.concurrencyScaler?.save();
     this.removeAllListeners();
   }
   _log(level: LogLevel, source: string, msg: string): void {
     this.emit('log', { level, source, msg, ts: Date.now() } as LogEvent);
+  }
+
+  _syncConcurrency(): void {
+    if (this.concurrencyScaler) {
+      this.limiter.concurrency = this.concurrencyScaler.current;
+    }
+  }
+
+  /** accumulate per-call stats (attempts that hit the wire) */
+  _recordBatchCall(ok: boolean, rateLimited: boolean, timedOut: boolean, latencyMs: number): void {
+    this._batch.calls++;
+    if (!ok) this._batch.errors++;
+    if (rateLimited) this._batch.rateLimited++;
+    if (timedOut) this._batch.timeouts++;
+    if (latencyMs > 0) this._batch.latencies.push(latencyMs);
+  }
+
+  /** when all in-flight work drains, hand the batch to the scaler so it
+   *  can double/hold/halve. */
+  _maybeFlushBatch(): void {
+    if (this._activeCalls > 0) return;
+    const b = this._batch;
+    if (b.calls === 0) return;
+    this._batch = { calls: 0, errors: 0, rateLimited: 0, timeouts: 0, latencies: [] };
+    const sorted = [...b.latencies].sort((x, y) => x - y);
+    const avg = b.latencies.length ? b.latencies.reduce((a, x) => a + x, 0) / b.latencies.length : 0;
+    const p95 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] : 0;
+    this.concurrencyScaler?.onBatch({ calls: b.calls, errors: b.errors, rateLimited: b.rateLimited, timeouts: b.timeouts, avgLatencyMs: avg, p95LatencyMs: p95 });
+    this._syncConcurrency();
+    this._log('info', 'concurrency', `batch: ${b.calls} calls, avg ${avg.toFixed(0)}ms, p95 ${p95.toFixed(0)}ms, ${b.errors} errors, ${b.rateLimited} rate-limited → concurrency ${this.concurrencyScaler?.current ?? this.limiter.concurrency}`);
   }
 
   async getNextApiKey(): Promise<string | null> {
@@ -336,10 +429,12 @@ export class Deepthink extends EventEmitter {
 
   async callChat(messages: ChatMessage[], stream: boolean = false, onChunk: ((chunk: string, meta: { kind: 'content' | 'thinking' }) => void) | null = null, opts: DeepthinkOptions = {}): Promise<ChatResult> {
     if (opts.autoChoose) {
+      // hyperparameter tuner: bounded — falls back to defaults instead of
+      // looping forever if the model refuses to emit JSON.
       let validSettings: { temperature: number; top_p: number; top_k: number } | null = null;
-      while (!validSettings) {
+      for (let tries = 0; tries < 3 && !validSettings; tries++) {
         try {
-          const metaOpts: DeepthinkOptions = { ...opts, autoChoose: false, think: false, format: 'json' };
+          const metaOpts: DeepthinkOptions = { ...opts, autoChoose: false, think: false, format: 'json', _phase: 'meta', _depth: 1 };
           const sysPrompt = 'You are a hyperparameter tuner for LLM inference. ' +
             'Select the optimal sampling parameters for the task type described.\n\n' +
             'PARAMETER GUIDE:\n' +
@@ -363,11 +458,15 @@ export class Deepthink extends EventEmitter {
             }
           }
         } catch {
-          // retry
+          // retry, then fall through to defaults
         }
       }
-      opts = { ...opts, autoChoose: false };
-      opts.options = { ...(opts.options || {}), ...validSettings };
+      if (validSettings) {
+        opts = { ...opts, autoChoose: false };
+        opts.options = { ...(opts.options || {}), ...validSettings };
+      } else {
+        opts = { ...opts, autoChoose: false };
+      }
     }
 
     if (opts._globalBudget) {
@@ -377,46 +476,87 @@ export class Deepthink extends EventEmitter {
       }
     }
 
+    // trace: record every call with full prompt/response + timing
+    const trace = opts._trace ?? null;
+    const phase = opts._phase || 'unknown';
+    const t0 = Date.now();
+    this._activeCalls++;
+    const callId = trace
+      ? trace.begin({ phase, model: (opts.model || this.model) as string, prompt: tracePrompt(messages), concurrency: this._activeCalls, parentCallId: opts._parentCallId ?? trace.parentCallId, depth: opts._depth ?? trace.depth })
+      : null;
+
     const maxAttempts = 3;
-    const DELAYS = [500, 1000, 2000];
     let useStream = opts.forceStream !== false;
     let lastErr: Error | undefined;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const key = (await this.getNextApiKey()) || process.env.OLLAMA_API_KEY || null;
-      const client = this.buildClient(key);
-      const samplingProfile = SAMPLING[opts.samplingProfile || 'creative'] || {};
-      const mergedOptions: Record<string, unknown> = {
-        ...qwen,
-        ...samplingProfile,
-        ...(opts.options || {})
-      };
-      try {
-        const result = await this.limiter.add(() => client.chat({
-          model: opts.model || this.model,
-          messages: consolidateSystemMessages(messages),
-          stream: useStream,
-          options: mergedOptions,
-          think: opts.think,
-          format: opts.format,
-          keep_alive: opts.keep_alive,
-          max_tokens: opts.max_tokens,
-          onChunk: stream && typeof onChunk === 'function' ? onChunk : null,
-          ollamaOutput: opts.ollamaOutput
-        }));
-        this._markKeySuccess(key);
-        return result as ChatResult;
-      } catch (err: unknown) {
-        lastErr = err as Error;
-        this._markKeyFailure(key);
-        if (attempt === 0 && /stream|chunked/i.test(lastErr.message) && useStream) {
-          useStream = false;
-          continue;
+    try {
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        // gate on the scaler's backoff window if we just got throttled
+        if (this.concurrencyScaler) await this.concurrencyScaler.waitForDispatch();
+        const key = (await this.getNextApiKey()) || process.env.OLLAMA_API_KEY || null;
+        const client = this.buildClient(key);
+        const samplingProfile = SAMPLING[opts.samplingProfile || 'creative'] || {};
+        const mergedOptions: Record<string, unknown> = {
+          ...qwen,
+          ...samplingProfile,
+          ...(opts.options || {})
+        };
+        try {
+          const result = await this.limiter.add(() => client.chat({
+            model: opts.model || this.model,
+            messages: consolidateSystemMessages(messages),
+            stream: useStream,
+            options: mergedOptions,
+            think: opts.think,
+            format: opts.format,
+            keep_alive: opts.keep_alive,
+            max_tokens: opts.max_tokens,
+            onChunk: stream && typeof onChunk === 'function' ? onChunk : null,
+            ollamaOutput: opts.ollamaOutput
+          }));
+          this._markKeySuccess(key);
+          if (trace) trace.end(callId as number, {
+            latencyMs: Date.now() - t0,
+            response: (result.content || '') + ((result.thinking || '') ? `\n[thinking]\n${result.thinking}` : ''),
+            promptTokens: result.promptTokens ?? null,
+            responseTokens: result.responseTokens ?? null,
+            status: 'ok'
+          });
+          this._recordBatchCall(true, false, false, Date.now() - t0);
+          return result as ChatResult;
+        } catch (err: unknown) {
+          lastErr = err as Error;
+          this._markKeyFailure(key);
+          const rateLimited = isRateLimitError(err);
+          const timedOut = isTimeoutError(err);
+          this.concurrencyScaler?.onError(err);
+          this._syncConcurrency();
+          this._recordBatchCall(false, rateLimited, timedOut, Date.now() - t0);
+          if (attempt === 0 && !rateLimited && /stream|chunked/i.test(lastErr.message) && useStream) {
+            useStream = false;
+            continue;
+          }
+          if (attempt < maxAttempts - 1) {
+            const retryAfter = parseRetryAfter(err);
+            const base = rateLimited ? 1500 : timedOut ? 1000 : 500;
+            const wait = retryAfter ?? base * Math.pow(2, attempt) + Math.floor(Math.random() * 300);
+            this._log('warn', 'callChat', `attempt ${attempt + 1} failed (${(err as Error).message.slice(0, 80)}), retrying in ${wait}ms`);
+            await sleep(wait);
+          }
         }
-        if (attempt < maxAttempts - 1) await new Promise(r => setTimeout(r, DELAYS[attempt]));
       }
+      throw lastErr;
+    } catch (err: unknown) {
+      if (trace) trace.end(callId as number, {
+        latencyMs: Date.now() - t0,
+        status: isTimeoutError(err) ? 'timeout' : 'error',
+        error: (err as Error).message
+      });
+      throw err;
+    } finally {
+      this._activeCalls--;
+      this._maybeFlushBatch();
     }
-    throw lastErr;
   }
 
   async detectComputeNeeds(input: unknown, opts: DeepthinkOptions = {}): Promise<{ mode: 'none' | 'single' | 'parallel'; task?: string; tasks?: string[] }> {
@@ -432,7 +572,7 @@ export class Deepthink extends EventEmitter {
         '  - If the task is a "sanity check" on a number, use "single".\n\n' +
         'Output ONLY valid JSON - no markdown, no prose:\n' +
         '{"mode":"none" | "single" | "parallel", "task":"<the precise executable task>", "tasks":["<task1>", "<task2>"]}'
-    }, { role: 'user', content: messagesToText(input) }], false, null, { ...opts, think: false, samplingProfile: 'json' });
+    }, { role: 'user', content: messagesToText(input) }], false, null, { ...opts, think: false, samplingProfile: 'json', _phase: 'compute', _depth: 2 });
     try {
       const txt = (r.content || '').replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
       const p = JSON.parse(txt);
@@ -466,7 +606,7 @@ export class Deepthink extends EventEmitter {
         : `You are a Numerical Forensic Analyst. Audit every number and calculation in the response. Check for internal consistency, order-of-magnitude errors, and precision loss. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
     }].slice(0, Math.min(checksCount, 3));
 
-    const results = await Promise.allSettled(personas.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${response}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify' })));
+    const results = await Promise.allSettled(personas.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${response}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify', _phase: 'checks', _depth: 3 })));
 
     return results.map((r, i) => {
       const p = personas[i];
@@ -501,7 +641,7 @@ export class Deepthink extends EventEmitter {
           '  - Preserve all specific values, numbers, and key conclusions.\n' +
           '  - Remove redundancy and filler.\n' +
           '  - Output ONLY the compressed plain text, no JSON, no labels.'
-      }, { role: 'user', content: JSON.stringify(evicted, null, 2) }], false, null, { ...opts, think: false, samplingProfile: 'reasoning' });
+      }, { role: 'user', content: JSON.stringify(evicted, null, 2) }], false, null, { ...opts, think: false, samplingProfile: 'reasoning', _phase: 'memory', _depth: 2 });
       brain.appendToSemantic((r.content || '').trim());
     } catch (err: unknown) {
       this._log('warn', 'brain', `Consolidation failed: ${(err as Error).message}`);
@@ -521,13 +661,31 @@ export class Deepthink extends EventEmitter {
     const mergedOpts: DeepthinkOptions = { ...opts, type, depth };
     const brain = mergedOpts.humanBrain ? (mergedOpts._brain instanceof Brain ? mergedOpts._brain : new Brain()) : null;
 
+    // trace: one store per generation, threaded through every call
+    const trace = (mergedOpts._trace instanceof TraceStore ? mergedOpts._trace : null) ?? new TraceStore(this.traceMode === 'off' ? 'off' : 'flat', 500);
+    mergedOpts._trace = trace;
+    this._lastTrace = trace;
+    trace.markStart();
+    const traceScope = trace.pushScope('generate');
+    try {
+      return await this._generateInner(input, type, depth, checks, onChunk, mergedOpts, brain, trace);
+    } finally {
+      trace.popScope();
+      if (trace.size > 0) {
+        this.emit('trace', trace);
+        this._log('info', 'trace', trace.summarize());
+      }
+    }
+  }
+
+  private async _generateInner(input: unknown, type: string, depth: number, checks: number, onChunk: ((chunk: string, meta: { kind: 'content' | 'thinking' }) => void) | null, mergedOpts: DeepthinkOptions, brain: Brain | null, trace: TraceStore): Promise<unknown> {
     if (Array.isArray(mergedOpts.mixtureModels) && mergedOpts.mixtureModels.length >= 2) {
       const bound = mergedOpts.mixtureModels.map(m => ({
         name: typeof m === 'string' ? m : m.name,
         callChat: typeof m === 'string' ? this.callChat.bind(this) : ((m.callChat || this.callChat.bind(this)) as (...a: unknown[]) => Promise<unknown>)
       }));
       const judge = mergedOpts.mixtureJudge || this.callChat.bind(this);
-      const r = await runMoA(bound, judge as (...a: unknown[]) => Promise<{ content: string }>, input, mergedOpts);
+      const r = await runMoA(bound, judge as (...a: unknown[]) => Promise<{ content: string }>, input, { ...mergedOpts, _phase: 'mixture' });
       return parseDataType(r.answer, type !== 'string' ? type : 'string');
     }
 
@@ -602,7 +760,7 @@ export class Deepthink extends EventEmitter {
 
       if (isStream) mergedOpts.onChunk!('\n\n=== [FINAL SYNTHESIS] ===\n\n', { kind: 'content' });
 
-      const result = await this.callChat(preFinal, isStream, mergedOpts.onChunk || null, { ...mergedOpts, samplingProfile: finalSamplingProfile, think: mergedOpts.depth! > 0 });
+      const result = await this.callChat(preFinal, isStream, mergedOpts.onChunk || null, { ...mergedOpts, samplingProfile: finalSamplingProfile, think: mergedOpts.depth! > 0, _phase: 'final', _depth: 2 });
 
       const rawText = stripThinkBlocks(result.content || '');
       return parseDataType(rawText, type !== 'string' ? type : 'string');
@@ -622,7 +780,7 @@ export class Deepthink extends EventEmitter {
     }
     let thinkCtxMsg: ChatMessage | null = null;
     if (depth > 0) {
-      const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, mergedOpts);
+      const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, { ...mergedOpts, _phase: 'think', _depth: 2 });
       if (brain) brain.add('think_stages', Object.keys(thinkResults).join(', '), 6);
       let thinkCtx = 'BACKGROUND THINKING PROCESS (do not repeat this in your answer):\n';
       for (const [k, v] of Object.entries(thinkResults)) {
@@ -639,37 +797,44 @@ export class Deepthink extends EventEmitter {
     let codeExec: { result: string; sandboxValidated?: boolean } | null = null;
     let sandboxPrefix: ChatMessage[] = [];
     if (depth > 0 && mergedOpts.enableCode !== false) {
-      const needs = await this.detectComputeNeeds(input, mergedOpts);
-      const callCode = (task: string) => generateAndRunCode(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, task, inputText, mergedOpts);
-      if (reflexionCtx) {
-        const hint = await reflexionCtx.getHint();
-        if (hint) mergedOpts.systemPrompt = (mergedOpts.systemPrompt || '') + '\n\n' + hint;
-      }
-      if (needs.mode === 'parallel') {
-        try {
-          const results = await Promise.all(needs.tasks!.map(t => this.limiter.add(() => callCode(t))));
-          const combined = results.map((r, i) => `Task ${i + 1}: ${needs.tasks![i]}\nResult: ${r.result}`).join('\n\n');
-          codeExec = { result: results.map(r => r.result).join(' | '), sandboxValidated: true };
-          sandboxPrefix = [{ role: 'system', content: sandbox + `PARALLEL SANDBOX RESULTS${combined}\n\nDo NOT contradict these values.` }];
-          finalMessages = [...(thinkCtxMsg ? [thinkCtxMsg] : []), { role: 'user', content: `Original: ${inputText}` }];
-        } catch (e: unknown) {
-          finalMessages = insertSystemPrompt(finalMessages, `PARALLEL CODE FAILED: ${(e as Error).message}. Use reasoning.`);
+      // skip the compute-detection LLM call for inputs with no arithmetic
+      // or computation vocabulary — pure reasoning stays pure.
+      if (!looksComputational(inputText)) {
+        this._log('info', 'compute', 'input has no computational markers — skipping compute detection');
+      } else {
+        const needs = await this.detectComputeNeeds(input, mergedOpts);
+        const codeOpts = { ...mergedOpts, _phase: 'codegen' };
+        const callCode = (task: string) => generateAndRunCode(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, task, inputText, codeOpts);
+        if (reflexionCtx) {
+          const hint = await reflexionCtx.getHint();
+          if (hint) mergedOpts.systemPrompt = (mergedOpts.systemPrompt || '') + '\n\n' + hint;
         }
-      } else if (needs.mode === 'single' && needs.task) {
-        try {
-          codeExec = await callCode(needs.task);
-          if (brain) brain.add('code_result', `${needs.task} = ${codeExec.result}`, 10);
-          sandboxPrefix = [{ role: 'system', content: sandbox + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\nThis value is CERTAIN. Your answer MUST state [${codeExec.result}] exactly.` }];
-          finalMessages = [...(thinkCtxMsg ? [thinkCtxMsg] : []), { role: 'user', content: `Original: ${inputText}` }];
-        } catch (e: unknown) {
-          finalMessages = insertSystemPrompt(finalMessages, `CODE FAILED: ${(e as Error).message}. Use reasoning.`);
+        if (needs.mode === 'parallel') {
+          try {
+            const results = await Promise.all(needs.tasks!.map(t => this.limiter.add(() => callCode(t))));
+            const combined = results.map((r, i) => `Task ${i + 1}: ${needs.tasks![i]}\nResult: ${r.result}`).join('\n\n');
+            codeExec = { result: results.map(r => r.result).join(' | '), sandboxValidated: true };
+            sandboxPrefix = [{ role: 'system', content: sandbox + `PARALLEL SANDBOX RESULTS${combined}\n\nDo NOT contradict these values.` }];
+            finalMessages = [...(thinkCtxMsg ? [thinkCtxMsg] : []), { role: 'user', content: `Original: ${inputText}` }];
+          } catch (e: unknown) {
+            finalMessages = insertSystemPrompt(finalMessages, `PARALLEL CODE FAILED: ${(e as Error).message}. Use reasoning.`);
+          }
+        } else if (needs.mode === 'single' && needs.task) {
+          try {
+            codeExec = await callCode(needs.task);
+            if (brain) brain.add('code_result', `${needs.task} = ${codeExec.result}`, 10);
+            sandboxPrefix = [{ role: 'system', content: sandbox + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\nThis value is CERTAIN. Your answer MUST state [${codeExec.result}] exactly.` }];
+            finalMessages = [...(thinkCtxMsg ? [thinkCtxMsg] : []), { role: 'user', content: `Original: ${inputText}` }];
+          } catch (e: unknown) {
+            finalMessages = insertSystemPrompt(finalMessages, `CODE FAILED: ${(e as Error).message}. Use reasoning.`);
+          }
         }
       }
     }
     const preFinal = consolidateSystemMessages(finalMessages);
     const isStream = typeof onChunk === 'function';
     const finalSamplingProfile = mergedOpts.samplingProfile || (type !== 'string' ? 'verify' : 'creative');
-    let result = await this.callChat([...sandboxPrefix, ...preFinal], isStream, onChunk, { ...mergedOpts, samplingProfile: finalSamplingProfile });
+    let result = await this.callChat([...sandboxPrefix, ...preFinal], isStream, onChunk, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'final', _depth: 2 });
     let rawText = stripThinkBlocks(result.content || '');
     if (codeExec?.sandboxValidated) {
       const gt = String(codeExec.result).trim();
@@ -705,7 +870,7 @@ export class Deepthink extends EventEmitter {
         const lastIsFeedback = convo.at(-1)?.role === 'user' && convo.at(-1)!.content.includes('checker(s) found issues');
         convo = lastIsFeedback ? [...convo.slice(0, -1), { role: 'user', content: feedback }] : [...convo, { role: 'user', content: feedback }];
         const isLast = iter === maxIter - 1;
-        result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream && isLast, isStream && isLast ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile });
+        result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream && isLast, isStream && isLast ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3 });
         rawText = stripThinkBlocks(result.content || '');
         if (codeExec?.sandboxValidated) {
           const gtv = String(codeExec.result).trim();
@@ -736,7 +901,7 @@ export class Deepthink extends EventEmitter {
 
     let finalOutput = parseDataType(rawText, type !== 'string' ? type : 'string');
     if (mergedOpts.ollamaOutput) {
-      finalOutput = result.thinking ? `<think>\n${result.thinking}\n</think>\n\n${rawText}` : rawText;
+      finalOutput = result.thinking ? ` thinking\n${result.thinking}\n response\n\n${rawText}` : rawText;
     }
     return finalOutput;
   }

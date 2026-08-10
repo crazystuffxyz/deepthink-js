@@ -2,17 +2,29 @@
 // the master orchestrator. runs every benchmark and prints a single
 // comparison table.
 //
-//   - AIME 2024-I + 2024-II (integer answers, sympy-checked)
+//   - AIME 2024-I + 2024-II + 2023-I (integer answers, sympy-checked)
 //   - USAMO 2024 (3 numeric + 3 proof)
 //   - IMO 2024 (all proof; keyword-gate verifier)
 //   - Integration Bee (1 definite + 1 indefinite, sympy)
-//   - Coding (single HTML, plain ollama vs deepthink d=3 c=2,
-//     critiqued by minimax-m3:cloud — exactly 2 calls)
+//   - Coding (single HTML, plain ollama vs deepthink d=3 c=2)
+//
+// test model (MODEL) is the one being benchmarked; every deepthink check
+// runs against the verifier model (CRITIQUE_MODEL), so self-correction is
+// audited by a different brain than the one being tested.
+//
+// per-problem telemetry: every deepthink run leaves a trace JSON in
+// benchmarks/results/traces/ (calls, phases, tokens, latency, errors) so
+// reasoning quality and token efficiency are scored offline, not guessed.
+//
+// usage:
+//   node scripts/benchmarks/all.js [--model X] [--verifier Y] [--depth N]
+//       [--checks N] [--concurrency N] [--limit N] [--plan a,b,c] [--fresh]
 //
 // output:
 //   benchmarks/results/all.csv
 //   benchmarks/results/all.summary.json
 //   benchmarks/results/all.table.md
+//   benchmarks/results/traces/*.json
 //   console: a single markdown table
 //
 // all.js exits 0 even on benchmark errors — it just records them.
@@ -20,6 +32,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import PQueue from 'p-queue';
 import Deepthink from '../../dist/index.js';
 import { verify } from './verify.js';
 
@@ -27,10 +40,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..', 'benchmarks');
 const DATA = path.join(ROOT, 'data');
 const RES = path.join(ROOT, 'results');
-const MODEL = 'minimax-m3:cloud';
-const CRITIQUE_MODEL = 'gemma4:31b-cloud';
-const DEPTH = 2;
-const CHECKS = 2;
+
+function arg(name, def) {
+  const i = process.argv.indexOf('--' + name);
+  if (i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--')) return process.argv[i + 1];
+  return def;
+}
+const MODEL = arg('model', process.env.BENCH_MODEL || 'gemma4:31b-cloud');
+const CRITIQUE_MODEL = arg('verifier', process.env.BENCH_VERIFIER || 'deepseek-v4-flash:0731-cloud');
+const DEPTH = Number(arg('depth', process.env.BENCH_DEPTH || '2'));
+const CHECKS = Number(arg('checks', process.env.BENCH_CHECKS || '2'));
+const CONCURRENCY = Number(arg('concurrency', process.env.BENCH_CONCURRENCY || '2'));
+const LIMIT = Number(arg('limit', '0'));
+const PLAN_FILTER = arg('plan', '').split(',').map((s) => s.trim()).filter(Boolean);
+const FRESH = process.argv.includes('--fresh');
 
 // exact-answer-only suffix for the proof contests and the integration bee.
 // the user wants radicals/exponents/known-irrationals/integers/+−×÷/fractions
@@ -55,7 +78,6 @@ const BENCH_PLAN = [
 ];
 
 function loadBench(name) {
-  // accept both with and without .jsonl extension
   const fn = name.endsWith('.jsonl') ? name : name + '.jsonl';
   const fp = path.join(DATA, fn);
   if (!fs.existsSync(fp)) throw new Error(`missing ${fp}`);
@@ -81,10 +103,6 @@ function buildPrompt(row, exact) {
   return p;
 }
 
-// retry wrapper: ollama `fetch failed` errors are transient. 3 attempts,
-// exponential backoff, and a hard per-call timeout so a hung connection
-// can't kill the entire run. on success returns the value; on final
-// failure throws.
 async function withTimeout(fn, ms) {
   return await Promise.race([
     fn(),
@@ -131,8 +149,31 @@ async function runOnce(dt, prompt) {
   return String(r);
 }
 
+// extract 4-dimension telemetry from a finished trace. returns zeros when
+// tracing is off or the run failed before any LLM call.
+function traceStats(dt) {
+  const t = dt._lastTrace;
+  if (!t || !t.size) {
+    return { calls: 0, tokIn: 0, tokOut: 0, llmMs: 0, errors: 0, checks: 0, revisions: 0, phases: {} };
+  }
+  const evs = t.events;
+  let tokIn = 0, tokOut = 0, llmMs = 0, errors = 0, checks = 0, revisions = 0;
+  const phases = {};
+  for (const e of evs) {
+    tokIn += e.promptTokens || 0;
+    tokOut += e.responseTokens || 0;
+    llmMs += e.latencyMs || 0;
+    if (e.status !== 'ok') errors++;
+    if (e.phase === 'checks') checks++;
+    if (e.phase === 'revise') revisions++;
+    phases[e.phase] = (phases[e.phase] || 0) + 1;
+  }
+  return { calls: evs.length, tokIn, tokOut, llmMs, errors, checks, revisions, phases };
+}
+
 async function processOne(plain, dt, plan, row) {
   const prompt = buildPrompt(row, plan.exact);
+  const traceDir = path.join(RES, 'traces');
 
   // plain
   let plainA = '';
@@ -150,23 +191,39 @@ async function processOne(plain, dt, plan, row) {
     pVerify = { ok: false, reason: e.message };
   }
 
-  // deepthink
+  // deepthink (with trace)
   let dtA = '';
   let dSec = 0;
   let dOk = 0;
   let dVerify = { ok: false, reason: 'no run' };
+  let tr = traceStats(dt);
   try {
     const t0 = Date.now();
     dtA = await runOnce(dt, prompt);
     dSec = (Date.now() - t0) / 1000;
     dVerify = verify({ row, modelText: dtA });
     dOk = dVerify.ok ? 1 : 0;
+    tr = traceStats(dt);
+    // persist the raw trace for offline reasoning-quality scoring
+    if (dt._lastTrace && dt._lastTrace.size) {
+      fs.mkdirSync(traceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(traceDir, `${plan.bench}_${row.id}.json`),
+        JSON.stringify({ row: { id: row.id, problem: row.problem }, answer: dtA, trace: dt._lastTrace.toJSON() }, null, 2),
+        'utf-8'
+      );
+    }
   } catch (e) {
     dtA = `ERR: ${e.message}`;
     dVerify = { ok: false, reason: e.message };
   }
 
-  return { plainA, pSec, pOk, pVerify, dtA, dSec, dOk, dVerify };
+  // self-correction only counts when a defect was found AND fixed:
+  // a revision call implies a check failed; "revised & correct" is the win.
+  const revised = tr.revisions > 0;
+  const corrected = revised && dOk === 1;
+
+  return { plainA, pSec, pOk, pVerify, dtA, dSec, dOk, dVerify, tr, revised, corrected };
 }
 
 function pct(n, d) {
@@ -174,28 +231,29 @@ function pct(n, d) {
   return ((100 * n) / d).toFixed(1) + '%';
 }
 
+function k(n) {
+  return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+}
+
 function renderTable(perBench, coding, critique) {
   const lines = [];
-  lines.push(`# Deepthink vs Plain Ollama — ${MODEL} (deepthink d=${DEPTH}, c=${CHECKS})`);
+  lines.push(`# Deepthink vs Plain Ollama — ${MODEL} (deepthink d=${DEPTH}, c=${CHECKS}, verifier=${CRITIQUE_MODEL})`);
   lines.push('');
-  lines.push(`> sympy-backed code-execution verification on every math row. critique by \`${CRITIQUE_MODEL}\` (2 calls total, one per HTML).`);
-  lines.push('');
-  lines.push('| Benchmark | n | Plain ollama | Deepthink | Δ (dt - plain) | Code-exec agreement |');
-  lines.push('|---|---:|---:|---:|---:|---|');
+  lines.push('| Benchmark | n | Plain | Deepthink | Δ | dt calls (tok) | dt errors | self-corrected |');
+  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|');
   for (const b of perBench) {
     const p = pct(b.pOk, b.total);
     const d = pct(b.dOk, b.total);
     const delta = b.dOk - b.pOk;
     const sign = delta > 0 ? '+' : '';
-    const ex = `${b.pExecOk}/${b.total} vs ${b.dExecOk}/${b.total}`;
-    lines.push(`| ${b.label} | ${b.total} | ${p} | ${d} | ${sign}${delta} | ${ex} |`);
+    lines.push(`| ${b.label} | ${b.total} | ${p} | ${d} | ${sign}${delta} | ${b.dtCalls} (${k(b.dtTok)}) | ${b.dtErrors} | ${b.corrected}/${b.total} |`);
   }
   if (coding) {
     const p = critique?.scores?.plain?.parsed;
     const d = critique?.scores?.dt?.parsed;
     const ptot = p?.total ?? '?';
     const dtot = d?.total ?? '?';
-    lines.push(`| Coding (critique) | 1 | total=${ptot}/50 | total=${dtot}/50 | ${dtot - ptot} | n/a |`);
+    lines.push(`| Coding (critique) | 1 | total=${ptot}/50 | total=${dtot}/50 | ${dtot - ptot} | n/a | n/a | n/a |`);
   }
   lines.push('');
   return lines.join('\n');
@@ -203,14 +261,14 @@ function renderTable(perBench, coding, critique) {
 
 async function runCoding(dt, plain, opts = {}) {
   console.log('\n== Coding benchmark ==');
-  // the spec is in coding.jsonl — we read it so the prompt is
-  // exactly the same for plain and dt.
   const specRow = JSON.parse(
     fs.readFileSync(path.join(DATA, 'coding.jsonl'), 'utf-8').split('\n').filter(Boolean)[0]
   );
 
   const plainPath = path.join(RES, 'coding', 'plain.html');
   const dtPath = path.join(RES, 'coding', 'dt.html');
+
+  const HTML_SYS = 'You write production-grade, self-contained HTML. Output ONLY a code block containing the full HTML file. No commentary.';
 
   let plainHtml = '';
   let pSec = 0;
@@ -225,7 +283,7 @@ async function runCoding(dt, plain, opts = {}) {
         () => plain.chat({
           model: MODEL,
           messages: [
-            { role: 'system', content: 'You write production-grade, self-contained HTML. Output ONLY a code block containing the full HTML file. No commentary.' },
+            { role: 'system', content: HTML_SYS },
             { role: 'user', content: specRow.spec + '\n\nOutput ONLY the complete HTML file in one code block.' },
           ],
           stream: false,
@@ -243,6 +301,7 @@ async function runCoding(dt, plain, opts = {}) {
 
   let dtHtml = '';
   let dSec = 0;
+  let tr = traceStats(dt);
   if (fs.existsSync(dtPath) && opts.htmlOnly) {
     dtHtml = fs.readFileSync(dtPath, 'utf-8');
     console.log(`  dt HTML: ${dtHtml.length} chars (cached)`);
@@ -251,10 +310,12 @@ async function runCoding(dt, plain, opts = {}) {
     const t1 = Date.now();
     try {
       const out = await withRetry(
-        () => dt.generate(
-          specRow.spec + '\n\nOutput ONLY the complete HTML file in one code block.',
-          { depth: DEPTH, checks: CHECKS, system: 'You write production-grade, self-contained HTML. Output ONLY a code block containing the full HTML file. No commentary.' }
-        ),
+        () => dt.generate(specRow.spec + '\n\nOutput ONLY the complete HTML file in one code block.', {
+          depth: DEPTH,
+          checks: CHECKS,
+          systemPrompt: HTML_SYS,
+          autoSystemPrompt: true,
+        }),
         'coding.dt.generate'
       );
       dtHtml = typeof out === 'string' ? out : (out && (out.answer || out.output || out.content || out.text || out.result)) || '';
@@ -262,6 +323,12 @@ async function runCoding(dt, plain, opts = {}) {
       dtHtml = `ERR: ${e.message}`;
     }
     dSec = (Date.now() - t1) / 1000;
+    tr = traceStats(dt);
+    if (dt._lastTrace && dt._lastTrace.size) {
+      const traceDir = path.join(RES, 'traces');
+      fs.mkdirSync(traceDir, { recursive: true });
+      fs.writeFileSync(path.join(traceDir, 'coding.json'), JSON.stringify({ answer: dtHtml, trace: dt._lastTrace.toJSON() }, null, 2), 'utf-8');
+    }
     fs.writeFileSync(dtPath, dtHtml, 'utf-8');
     console.log(`  dt HTML: ${dtHtml.length} chars, ${dSec.toFixed(1)}s`);
   }
@@ -278,6 +345,7 @@ async function runCoding(dt, plain, opts = {}) {
     const c = spawnSync('node', ['scripts/benchmarks/critique.js'], {
       encoding: 'utf-8',
       cwd: path.resolve(__dirname, '..', '..'),
+      env: { ...process.env, BENCH_VERIFIER: CRITIQUE_MODEL },
     });
     if (c.status !== 0) {
       console.warn(`  critique failed: ${(c.stderr || '').slice(0, 200)}`);
@@ -292,14 +360,16 @@ async function runCoding(dt, plain, opts = {}) {
     dt_bytes: dtHtml.length,
     plain_seconds: pSec,
     dt_seconds: dSec,
+    tr,
     critique: critiqueData,
   };
 }
 
 async function main() {
   console.log(`model:           ${MODEL}`);
-  console.log(`critique model:  ${CRITIQUE_MODEL}`);
+  console.log(`verifier:        ${CRITIQUE_MODEL}`);
   console.log(`deepthink:       depth=${DEPTH} checks=${CHECKS}`);
+  console.log(`concurrency:     ${CONCURRENCY}${FRESH ? ' (fresh)' : ''}`);
   console.log(`data dir:        ${DATA}`);
   console.log(`out dir:         ${RES}`);
 
@@ -321,7 +391,10 @@ async function main() {
     }
     console.log(`[resume] loaded ${done.size} completed rows from existing all.csv`);
   }
-  // mark coding as done if its csv row already exists
+  if (FRESH) {
+    done.clear();
+    console.log('[fresh] ignoring completed rows');
+  }
   const codingDone = [...done].some((k) => k.startsWith('coding|'));
   const codingHtmlDone =
     fs.existsSync(path.join(RES, 'coding', 'plain.html')) &&
@@ -331,58 +404,94 @@ async function main() {
   if (csvNeedsHeader) {
     fs.writeSync(
       csvFp,
-      'bench,id,gold,plain_answer,plain_correct,dt_answer,dt_correct,plain_codeexec_ok,dt_codeexec_ok,plain_s,dt_s\n'
+      'bench,id,gold,plain_answer,plain_correct,dt_answer,dt_correct,plain_codeexec_ok,dt_codeexec_ok,plain_s,dt_s,dt_calls,dt_tok_in,dt_tok_out,dt_llm_s,dt_errors,dt_checks,dt_revisions,dt_revised,dt_corrected\n'
     );
   }
 
-  const dt = new Deepthink(MODEL, [], { provider: 'ollama' });
+  const dt = new Deepthink(MODEL, [], { provider: 'ollama' }, Infinity, CRITIQUE_MODEL, {
+    adaptiveConcurrency: true,
+    traceMode: 'flat',
+  });
   const plain = dt.buildClient(null);
 
   const perBench = [];
+  const queue = new PQueue({ concurrency: CONCURRENCY });
 
   for (const plan of BENCH_PLAN) {
+    if (PLAN_FILTER.length && !PLAN_FILTER.includes(plan.bench)) continue;
     const items = loadBench(plan.file);
     const slice = plan.limit > 0 ? items.slice(0, plan.limit) : items;
+    if (LIMIT > 0) slice.length = Math.min(slice.length, LIMIT);
     let pOk = 0, dOk = 0, pExec = 0, dExec = 0;
-    console.log(`\n== ${plan.label} (${slice.length}/${items.length}) ==`);
+    let dtCalls = 0, dtTok = 0, dtErrors = 0, corrected = 0;
     let done2 = 0;
-    for (const row of slice) {
-      const key = `${plan.bench}|${row.id}`;
-      done2++;
-      if (done.has(key)) {
-        console.log(`  [${plan.bench} ${done2}/${slice.length}] SKIP (already done)`);
-        continue;
+    console.log(`\n== ${plan.label} (${slice.length}/${items.length}) ==`);
+
+    const todo = slice.filter((row) => !done.has(`${plan.bench}|${row.id}`));
+    if (todo.length < slice.length) {
+      // count already-done rows into the summary so percentages stay honest
+      for (const row of slice) {
+        const key = `${plan.bench}|${row.id}`;
+        if (!done.has(key)) continue;
+        const prev = fs.readFileSync(csvPath, 'utf-8').split('\n').find((l) => l.startsWith(`${plan.bench},${row.id},`));
+        if (!prev) continue;
+        const c = prev.split(',');
+        if (c[4] === '1') pOk++;
+        if (c[6] === '1') dOk++;
+        if (c[7] === '1') pExec++;
+        if (c[8] === '1') dExec++;
+        done2++;
       }
-      const r = await processOne(plain, dt, plan, row);
-      pOk += r.pOk;
-      dOk += r.dOk;
-      if (r.pVerify.ok) pExec++;
-      if (r.dVerify.ok) dExec++;
-      const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-      const line = `  [${stamp}] [${plan.bench} ${done2}/${slice.length}] plain ${r.pSec.toFixed(1)}s ${r.pOk ? 'OK' : 'X'} | dt ${r.dSec.toFixed(1)}s ${r.dOk ? 'OK' : 'X'} | exec plain=${r.pVerify.ok} dt=${r.dVerify.ok}`;
-      console.log(line);
-      // also append a heartbeat to a separate log so progress survives stdout buffering
-      try {
-        fs.appendFileSync(path.join(RES, 'all.heartbeat.log'), line + '\n');
-      } catch {}
-      fs.writeSync(
-        csvFp,
-        [
-          plan.bench,
-          row.id,
-          csvEscape(row.answer || ''),
-          csvEscape(r.plainA),
-          r.pOk,
-          csvEscape(r.dtA),
-          r.dOk,
-          r.pVerify.ok ? 1 : 0,
-          r.dVerify.ok ? 1 : 0,
-          r.pSec.toFixed(1),
-          r.dSec.toFixed(1),
-        ].join(',') + '\n'
-      );
-      done.add(key);
     }
+
+    await queue.addAll(
+      todo.map((row) => async () => {
+        const key = `${plan.bench}|${row.id}`;
+        done2++;
+        const r = await processOne(plain, dt, plan, row);
+        pOk += r.pOk;
+        dOk += r.dOk;
+        if (r.pVerify.ok) pExec++;
+        if (r.dVerify.ok) dExec++;
+        dtCalls += r.tr.calls;
+        dtTok += r.tr.tokIn + r.tr.tokOut;
+        dtErrors += r.tr.errors;
+        if (r.corrected) corrected++;
+        const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        const line = `  [${stamp}] [${plan.bench} ${done2}/${slice.length}] plain ${r.pSec.toFixed(1)}s ${r.pOk ? 'OK' : 'X'} | dt ${r.dSec.toFixed(1)}s ${r.dOk ? 'OK' : 'X'} | exec plain=${r.pVerify.ok} dt=${r.dVerify.ok} | trace ${r.tr.calls} calls ${k(r.tr.tokIn + r.tr.tokOut)} tok ${r.tr.errors} err ${r.tr.revisions} rev${r.corrected ? ' ✓' : ''}`;
+        console.log(line);
+        try {
+          fs.appendFileSync(path.join(RES, 'all.heartbeat.log'), line + '\n');
+        } catch {}
+        fs.writeSync(
+          csvFp,
+          [
+            plan.bench,
+            row.id,
+            csvEscape(row.answer || ''),
+            csvEscape(r.plainA),
+            r.pOk,
+            csvEscape(r.dtA),
+            r.dOk,
+            r.pVerify.ok ? 1 : 0,
+            r.dVerify.ok ? 1 : 0,
+            r.pSec.toFixed(1),
+            r.dSec.toFixed(1),
+            r.tr.calls,
+            r.tr.tokIn,
+            r.tr.tokOut,
+            (r.tr.llmMs / 1000).toFixed(1),
+            r.tr.errors,
+            r.tr.checks,
+            r.tr.revisions,
+            r.revised ? 1 : 0,
+            r.corrected ? 1 : 0,
+          ].join(',') + '\n'
+        );
+        done.add(key);
+      })
+    );
+
     perBench.push({
       bench: plan.bench,
       label: plan.label,
@@ -391,6 +500,10 @@ async function main() {
       dOk,
       pExecOk: pExec,
       dExecOk: dExec,
+      dtCalls: Math.round(dtCalls / Math.max(1, slice.length)),
+      dtTok: Math.round(dtTok / Math.max(1, slice.length)),
+      dtErrors,
+      corrected,
     });
   }
 
@@ -398,18 +511,17 @@ async function main() {
 
   // coding + critique (skip if already done)
   let coding;
-  if (codingDone) {
+  if (codingDone && !FRESH) {
     console.log('\n== Coding benchmark == (skipped — already in CSV)');
-    coding = { plain_bytes: 0, dt_bytes: 0, plain_seconds: 0, dt_seconds: 0, critique: null };
-  } else if (codingHtmlDone) {
+    coding = { plain_bytes: 0, dt_bytes: 0, plain_seconds: 0, dt_seconds: 0, tr: traceStats(dt), critique: null };
+  } else if (codingHtmlDone && !FRESH) {
     console.log('\n== Coding benchmark == (HTML exists, but no CSV row — running critique only)');
     coding = await runCoding(dt, plain, { htmlOnly: true });
   } else {
     coding = await runCoding(dt, plain);
   }
 
-  // append coding row only if not already present
-  if (!codingDone) {
+  if (!codingDone || FRESH) {
     const csvPath2 = path.join(RES, 'all.csv');
     const c2 = fs.openSync(csvPath2, 'a');
     const cp = coding.critique?.scores?.plain?.parsed;
@@ -428,6 +540,15 @@ async function main() {
         'N/A',
         coding.plain_seconds.toFixed(1),
         coding.dt_seconds.toFixed(1),
+        coding.tr.calls,
+        coding.tr.tokIn,
+        coding.tr.tokOut,
+        (coding.tr.llmMs / 1000).toFixed(1),
+        coding.tr.errors,
+        coding.tr.checks,
+        coding.tr.revisions,
+        'N/A',
+        'N/A',
       ].join(',') + '\n'
     );
     fs.closeSync(c2);
@@ -436,7 +557,7 @@ async function main() {
   // summary
   const summary = {
     model: MODEL,
-    critique_model: CRITIQUE_MODEL,
+    verifier_model: CRITIQUE_MODEL,
     depth: DEPTH,
     checks: CHECKS,
     rows: perBench,
@@ -457,6 +578,7 @@ async function main() {
   console.log(`\nwrote ${csvPath}`);
   console.log(`wrote ${path.join(RES, 'all.summary.json')}`);
   console.log(`wrote ${path.join(RES, 'all.table.md')}`);
+  if (dt._lastTrace) console.log(`concurrency level after run: ${dt.concurrencyScaler?.current ?? 'n/a'} (cached for next run)`);
 
   dt.destroy();
 }

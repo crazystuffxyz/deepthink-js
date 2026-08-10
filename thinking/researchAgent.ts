@@ -107,9 +107,11 @@ CRITICAL: Respond with RAW JSON ONLY. Start with '{' and end with '}'.` },
 
 async function plannerAgent(callChat: any, topic: string, answerSpec: any, opts: any = {}): Promise<any[]> {
   const maxQueries = opts.maxQueries ?? 12;
-  const d0count = maxQueries;
-  const d1count = Math.floor(maxQueries / 2);
-  const d2count = Math.floor(maxQueries / 4);
+  // split the TOTAL budget across depths in a 4:2:1 ratio — maxQueries is a
+  // hard cap, not a per-depth budget (previously this emitted 1.75x queries)
+  const d0count = Math.ceil(maxQueries * 4 / 7);
+  const d1count = Math.ceil(maxQueries * 2 / 7);
+  const d2count = Math.max(0, maxQueries - d0count - d1count);
   const queryHintsBlock = (answerSpec.queryHints || []).length ? `\nPrioritize queries in this space:\n${answerSpec.queryHints.map((q: string, i: number) => `  ${i + 1}. ${q}`).join('\n')}` : '';
   const entityNote = (answerSpec.entityTypes || []).length ? `\nEvery query should aim to surface: ${answerSpec.entityTypes.join(', ')}.` : '';
   const timeNote = (answerSpec.timeConstraints || []).length ? `\nTime constraints to honour: ${answerSpec.timeConstraints.join('; ')}.` : '';

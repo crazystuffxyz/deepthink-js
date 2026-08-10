@@ -697,6 +697,89 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
   return { report: currentReport, critiqueHistory };
 }
 
+// ---- output format conversion ----
+// the report is authored as markdown; outputFormat converts it at the end so
+// the same pipeline serves markdown, plain text, JSON, and HTML consumers.
+// conversions are mechanical (no LLM) so they can never damage citations.
+
+function mdToPlain(md: string): string {
+  return String(md || '')
+    .replace(/^#{1,6}\s+/gm, '')          // headings
+    .replace(/\*\*([^*]+)\*\*/g, '$1')    // bold
+    .replace(/\*([^*]+)\*/g, '$1')        // italic
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // links
+    .replace(/^\s*[-*+]\s+/gm, '')        // list bullets
+    .replace(/^\s*\d+\.\s+/gm, '')        // numbered list
+    .replace(/`([^`]+)`/g, '$1')          // inline code
+    .replace(/\n{3,}/g, '\n\n');
+}
+
+function mdToHtml(md: string): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const lines = String(md || '').split('\n');
+  const out: string[] = [];
+  let inList = false;
+  for (const line of lines) {
+    const h = line.match(/^(#{1,6})\s+(.*)/);
+    if (h) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      const lvl = h[1].length;
+      out.push(`<h${lvl}>${esc(h[2])}</h${lvl}>`);
+      continue;
+    }
+    const li = line.match(/^\s*[-*+]\s+(.*)/);
+    if (li) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${esc(li[1])}</li>`);
+      continue;
+    }
+    if (inList) { out.push('</ul>'); inList = false; }
+    if (line.trim() === '') { out.push(''); continue; }
+    out.push(`<p>${esc(line)}</p>`);
+  }
+  if (inList) out.push('</ul>');
+  return out.join('\n');
+}
+
+function mdToJson(md: string, topic: string, answerSpec: any, references: any[]): string {
+  const text = String(md || '');
+  const sections: any[] = [];
+  const re = /^##\s+(.*)$/gm;
+  let last: any = null;
+  let m: RegExpExecArray | null;
+  const body = text.split(re);
+  // body[0] is preamble, then alternating title/content
+  for (let i = 1; i < body.length; i += 2) {
+    const title = body[i].trim();
+    const content = body[i + 1]?.trim() || '';
+    if (title.toLowerCase() === 'references') continue;
+    sections.push({ title, content });
+  }
+  const refs = (references || []).map((r: any, i: number) => ({
+    id: i + 1,
+    title: r.title || '',
+    url: r.url || '',
+    source: r.source || '',
+    date: r.publicationDate || r.date || '',
+  }));
+  return JSON.stringify({
+    topic,
+    answerType: answerSpec?.answerType || 'analysis',
+    generatedAt: new Date().toISOString(),
+    summary: body[0]?.trim() || '',
+    sections,
+    references: refs,
+  }, null, 2);
+}
+
+function formatReport(report: string, opts: any, topic: string, answerSpec: any, references: any[]): string {
+  const fmt = String(opts.outputFormat || 'markdown').toLowerCase();
+  if (fmt === 'plain') return mdToPlain(report);
+  if (fmt === 'html') return mdToHtml(report);
+  if (fmt === 'json') return mdToJson(report, topic, answerSpec, references);
+  return report; // markdown (default) — pass through untouched
+}
+
 export default async function runDeepResearch(callChat: any, topic: string, opts: any = {}): Promise<any> {
   const stepSummary: any = {};
   if (opts.useOllamaSearch) log({ level: 'info', msg: '[CONFIG] Search backend: Ollama API', source: 'researchAgent', ts: Date.now() });
@@ -754,7 +837,8 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
       log({ level: 'success', msg: `[HUMANIZE] Done — ${h.iterations} iterations, detector score ${h.finalScore}`, source: 'researchAgent', ts: Date.now() });
     }
     log({ level: 'success', msg: '[DONE] Research complete. Final report delivered.', source: 'researchAgent', ts: Date.now() });
-    return { report: finalReport, references, claimCount, stepSummary, critiqueHistory, success: true };
+    const report = formatReport(finalReport, opts, topic, answerSpec, references);
+    return { report, references, claimCount, stepSummary, critiqueHistory, success: true };
   } catch (e) {
     log({ level: 'error', msg: `[researchAgent] Fatal error: ${(e as Error).message}`, source: 'researchAgent', ts: Date.now() });
     return { report: `Research failed: ${(e as Error).message}`, references: [], claimCount: 0, stepSummary, success: false };

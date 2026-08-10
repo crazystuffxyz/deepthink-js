@@ -19,12 +19,17 @@ async function getWorkingSearxngInstances(): Promise<string[]> {
     if (process.stdout?.write) process.stdout.write('[mullvad] Fetching SearXNG instance list from searx.space...\n');
     const t0 = Date.now();
     try {
-      const { data } = await axios.get('https://searx.space/data/instances.json') as { data: { instances: Record<string, { generator: string; http?: { status_code?: number; error?: string | null }; timing?: { search?: { success_percentage: number } } }> } };
+      const { data } = await axios.get('https://searx.space/data/instances.json') as { data: { instances: Record<string, { generator?: string; git_url?: string; version?: string; http?: { status_code?: number; error?: string | null }; timing?: { search?: { success_percentage: number } } }> } };
       const elapsed = Date.now() - t0;
       const workingUrls = Object.keys(data.instances).filter(url => {
         const instance = data.instances[url];
         if (url.includes('.onion')) return false;
-        const isSearxng = instance.generator === 'searxng';
+        // searx.space dropped the `generator` field (2026) — every instance
+        // listed there is SearXNG by definition, so accept anything with a
+        // searxng git_url or a version stamp
+        const isSearxng = instance.generator === 'searxng'
+          || /searxng/i.test(instance.git_url || '')
+          || typeof instance.version === 'string';
         const isHttpOk = instance.http?.status_code === 200 && instance.http?.error === null;
         const isSearchWorking = (instance.timing?.search?.success_percentage ?? 0) > 0;
         return isSearxng && isHttpOk && isSearchWorking;

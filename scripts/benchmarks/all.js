@@ -609,7 +609,13 @@ async function main() {
   let coding;
   if (codingDone && !FRESH) {
     console.log('\n== Coding benchmark == (skipped — already in CSV)');
-    coding = { plain_bytes: 0, dt_bytes: 0, plain_seconds: 0, dt_seconds: 0, tr: traceStats(null), critique: null };
+    // reuse the persisted critique so the table keeps real scores
+    const cPath = path.join(RES, 'coding', 'critique.json');
+    let cachedCritique = null;
+    try {
+      if (fs.existsSync(cPath)) cachedCritique = JSON.parse(fs.readFileSync(cPath, 'utf-8'));
+    } catch { /* corrupt cache — table falls back to n/a */ }
+    coding = { plain_bytes: 0, dt_bytes: 0, plain_seconds: 0, dt_seconds: 0, tr: traceStats(null), critique: cachedCritique };
   } else if (codingHtmlDone && !FRESH) {
     console.log('\n== Coding benchmark == (HTML exists, but no CSV row — running critique only)');
     coding = await runCoding(dt, plain, { htmlOnly: true });

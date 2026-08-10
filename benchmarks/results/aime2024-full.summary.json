@@ -1,0 +1,14 @@
+{
+  "model": "gemma4:31b-cloud",
+  "depth": 3,
+  "checks": 2,
+  "rows": [
+    {
+      "bench": "aime2024",
+      "total": 30,
+      "plain": 0.7,
+      "dt": 0.9,
+      "delta": 0.20000000000000007
+    }
+  ]
+}

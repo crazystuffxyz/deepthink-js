@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.7
+
+### Fixed
+- **Recovery crawl string/object crash** — run 14: `recoverStockQuote` passes plain query strings to `crawlerAgent`, which destructured `{ query, goal, depth, topic }` from them — `query` came out `undefined`, the search crashed on `query.slice(0, 60)`, and the recovery crawl silently returned 0 URLs (quant model dead despite 103 verified claims). `crawlerAgent` now normalizes string items to `{ query: item, goal: '', depth: 0, topic: 'general' }` before use. The search chain is hardened the same way: `getSearchResults` and `getMullvadLetaResults` coerce `query ?? ''` and bail on empty, and the Ollama client-tier probe no longer crashes when a rejected promise carries no error value.
+
 ## v1.8.6
 
 ### Fixed

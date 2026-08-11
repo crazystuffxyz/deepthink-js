@@ -400,5 +400,34 @@ function check(name, cond, detail = '') {
   check('EPS kept when next claim has a %', m.eps === 6.53, `got ${m.eps}`);
 }
 
+// ---- run-19: beta missing must NOT kill the model — fallback to market
+// average 1.0, volatility from beta, and the section says the assumption ----
+{
+  const m = runQuantModel([
+    'NVDA stock price is $196.00.',
+    'Diluted EPS for fiscal year 2026 stood at $4.90.',
+    'Revenue grew 7.3% year over year.',
+    'risk-free rate 4.2%, equity risk premium 5.5%',
+  ]);
+  check('price stays $196 when EPS claim follows', m.price === 196, `got ${m.price}`);
+  check('model ok without beta (fallback)', m.ok === true, `ok=${m.ok}`);
+  check('beta fallback = 1.0', m.beta === null && m.costOfEquity != null, `beta=${m.beta} Re=${m.costOfEquity}`);
+  check('Re = rf + 1.0*erp = 9.7%', m.costOfEquity != null && Math.abs(m.costOfEquity - 0.097) < 1e-9, `got ${m.costOfEquity}`);
+  check('vol fallback = beta*0.18 = 18%', m.sigma != null && Math.abs(m.sigma - 0.18) < 1e-9, `got ${m.sigma}`);
+  check('DCF computed with fallback Re', m.intrinsicValue != null, `got ${m.intrinsicValue}`);
+  check('GBM/VaR/Sharpe computed', m.sharpe != null && m.var95_1d != null && m.expectedLogReturn != null, `sharpe=${m.sharpe}`);
+  check('section states the beta assumption', m.section.includes('assumed 1.00'), m.section.slice(0, 200));
+}
+
+// ---- beta harvest: β symbol + number-before-beta + range filter ----
+{
+  const m1 = runQuantModel(['NVDA stock price is $196.00.', 'Diluted EPS is $4.90.', 'Revenue grew 7.3% year over year.', 'β = 1.84.']);
+  check('β symbol harvested', m1.beta === 1.84, `got ${m1.beta}`);
+  const m2 = runQuantModel(['NVDA stock price is $196.00.', 'Diluted EPS is $4.90.', 'Revenue grew 7.3% year over year.', 'The 1.84 beta is from Yahoo.']);
+  check('number-before-beta harvested', m2.beta === 1.84, `got ${m2.beta}`);
+  const m3 = runQuantModel(['NVDA stock price is $196.00.', 'Diluted EPS is $4.90.', 'Revenue grew 7.3% year over year.', 'Beta 5 is not a real beta.']);
+  check('out-of-range beta rejected → fallback', m3.beta === null && m3.ok === true, `beta=${m3.beta}`);
+}
+
 console.log(`\nquantEngine: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

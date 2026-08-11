@@ -790,7 +790,7 @@ async function quantFinanceVerifier(callChat: any, report: string, opts: any = {
       `  - Price: $${quantModel.price.toFixed(2)}\n` +
       `  - EPS: $${quantModel.eps.toFixed(2)}\n` +
       `  - Growth: ${(quantModel.growth * 100).toFixed(1)}%\n` +
-      `  - Beta: ${quantModel.beta}\n` +
+      `  - Beta: ${quantModel.beta ?? 1.0}${quantModel.beta == null ? ' (assumed — market average, not in sources)' : ''}\n` +
       `  - Cost of equity (CAPM): ${(quantModel.costOfEquity * 100).toFixed(2)}%\n` +
       `  - Volatility: ${(quantModel.sigma * 100).toFixed(1)}%\n` +
       `  - Intrinsic value (10-yr DCF): $${quantModel.intrinsicValue.toFixed(2)}/share\n` +
@@ -1190,7 +1190,7 @@ async function recoverStockQuote(callChat: any, topic: string, opts: any = {}, m
     queries.push(`${name} (${ticker}) stock price today`, `${name} ${ticker} current share price quote`, `${name} ${ticker} stock quote live now`, `${name} ${ticker} last close price`);
   }
   if (missing.includes('eps')) queries.push(`${name} ${ticker} diluted EPS trailing twelve months`, `${name} ${ticker} earnings per share TTM`);
-  if (missing.includes('beta')) queries.push(`${name} ${ticker} beta 5 year monthly`, `${name} ${ticker} stock beta volatility`);
+  if (missing.includes('beta')) queries.push(`${name} ${ticker} beta 5 year monthly`, `${name} ${ticker} stock beta volatility`, `${name} ${ticker} beta coefficient`, `${ticker} beta stockanalysis`);
   if (!queries.length) queries.push(`${topic} current price quote`);
   log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl (${queries.length} phrasings for: ${missing.join(', ') || 'all'})`, source: 'researchAgent', ts: Date.now() });
   try {

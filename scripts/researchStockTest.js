@@ -30,6 +30,19 @@ function arg(name, def) {
 const TICKER = arg('ticker', 'NVDA');
 const MODEL = arg('model', process.env.BENCH_MODEL || 'gemma4:31b-cloud');
 const HUMANIZE = process.argv.includes('--humanize');
+// company names disambiguate bare tickers in search queries — run 17: the
+// quote-recovery crawl for "NVDA stock price today" returned nvaccess.org
+// (the NVDA SCREEN READER software), not NVIDIA the chip company.
+const COMPANY_NAMES = {
+  NVDA: 'NVIDIA', AAPL: 'Apple', MSFT: 'Microsoft', GOOG: 'Alphabet', GOOGL: 'Alphabet',
+  AMZN: 'Amazon', META: 'Meta Platforms', TSLA: 'Tesla', AMD: 'Advanced Micro Devices',
+  INTC: 'Intel', QCOM: 'Qualcomm', AVGO: 'Broadcom', ORCL: 'Oracle', CRM: 'Salesforce',
+  NFLX: 'Netflix', DIS: 'Walt Disney', JPM: 'JPMorgan Chase', BAC: 'Bank of America',
+  WMT: 'Walmart', KO: 'Coca-Cola', PEP: 'PepsiCo', XOM: 'Exxon Mobil', CVX: 'Chevron',
+  UNH: 'UnitedHealth', JNJ: 'Johnson & Johnson', PFE: 'Pfizer', MRK: 'Merck',
+  TSM: 'Taiwan Semiconductor', ASML: 'ASML Holding', MU: 'Micron Technology',
+};
+const COMPANY = COMPANY_NAMES[TICKER] || TICKER;
 // --files a.pdf,b.docx — local docs converted to markdown and injected as
 // max-credibility evidence sources alongside the web research
 const FILES = (arg('files', '') || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -44,7 +57,7 @@ const dt = new Deepthink(MODEL, [], { provider: 'ollama' });
 dt.on('log', (e) => console.log(`[pipeline] ${e.msg}`));
 const callChat = dt.callChat.bind(dt);
 
-const topic = `Should I invest in ${TICKER} right now (as of 2026-08-10)? Give a rigorous buy/hold/sell recommendation backed by deep mathematics and quantitative research — Ito's lemma / geometric Brownian motion expected return, volatility, Sharpe ratio, and value at risk — paired with actual research on the company's latest financials, its industry status quo, competitive position, moat, catalysts, and risks. Use the most recent data available and cite every source.`;
+const topic = `Should I invest in ${COMPANY} (${TICKER}) right now (as of 2026-08-10)? Give a rigorous buy/hold/sell recommendation backed by deep mathematics and quantitative research — Ito's lemma / geometric Brownian motion expected return, volatility, Sharpe ratio, and value at risk — paired with actual research on the company's latest financials, its industry status quo, competitive position, moat, catalysts, and risks. Use the most recent data available and cite every source.`;
 
 async function main() {
   console.log(`[stockTest] model=${MODEL} ticker=${TICKER} humanize=${HUMANIZE} run=${runN}`);
@@ -52,6 +65,7 @@ async function main() {
   const result = await runDeepResearch(callChat, topic, {
     mode: 'stock',
     ticker: TICKER,
+    companyName: COMPANY,
     maxQueries: 6,
     maxConcurrency: 3,
     credibilityThreshold: 30,

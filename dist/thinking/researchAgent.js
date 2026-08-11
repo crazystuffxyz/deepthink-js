@@ -1202,18 +1202,22 @@ function formatReport(report, opts, topic, answerSpec, references) {
 // writer is forced into inventing numbers.
 async function recoverStockQuote(callChat, topic, opts = {}, missing = []) {
     const ticker = opts.ticker || '';
+    // bare tickers are ambiguous — run 17: "NVDA stock price today" returned
+    // nvaccess.org (the NVDA screen-reader software), not NVIDIA. always pair
+    // the ticker with the company name when we have it.
+    const name = opts.companyName || ticker;
     // several phrasings per missing field — quote pages vary ("price",
     // "quote", "live", "now") and the fallback search instance is literal;
     // one phrasing can 404. run 10: the main crawl surfaced only industry
     // articles, so price/EPS/beta were all missing — recover each one.
     const queries = [];
     if (missing.includes('price') || !missing.length) {
-        queries.push(`${ticker} stock price today`, `${ticker} current share price quote`, `${ticker} stock quote live now`, `${ticker} last close price`);
+        queries.push(`${name} (${ticker}) stock price today`, `${name} ${ticker} current share price quote`, `${name} ${ticker} stock quote live now`, `${name} ${ticker} last close price`);
     }
     if (missing.includes('eps'))
-        queries.push(`${ticker} diluted EPS trailing twelve months`, `${ticker} earnings per share TTM`);
+        queries.push(`${name} ${ticker} diluted EPS trailing twelve months`, `${name} ${ticker} earnings per share TTM`);
     if (missing.includes('beta'))
-        queries.push(`${ticker} beta 5 year monthly`, `${ticker} stock beta volatility`);
+        queries.push(`${name} ${ticker} beta 5 year monthly`, `${name} ${ticker} stock beta volatility`);
     if (!queries.length)
         queries.push(`${topic} current price quote`);
     log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl (${queries.length} phrasings for: ${missing.join(', ') || 'all'})`, source: 'researchAgent', ts: Date.now() });
@@ -1227,7 +1231,26 @@ async function recoverStockQuote(callChat, topic, opts = {}, missing = []) {
         const sums = await extractWithFallback(callChat, credible, [], topic, { requiredFields: ['current stock price', 'EPS', 'beta', 'revenue growth'] }, { ...opts, maxSummaries: 3 });
         if (!sums.length)
             return [];
-        return await factVerificationLoop(callChat, sums.slice(0, 3), topic, opts);
+        // wrong-company guard: run 17's recovery crawl returned the NVDA screen
+        // reader (nvaccess.org) — its claims mention "NVDA" (the product name)
+        // but no stock terms, and they'd pollute the claim pool. keep a summary
+        // only if it names the company, or names the ticker AND reads like a
+        // stock page ($, price, share, EPS, market...).
+        const nameL = name.toLowerCase();
+        const tickL = ticker.toLowerCase();
+        const STOCK_TERMS = /\$|price|share|eps|stock|market|dividend|revenue|earnings|beta|volatility|analyst|target|valuation/i;
+        const onTopic = sums.filter((s) => {
+            const t = String(s.summary || s.content || '').toLowerCase();
+            if (nameL !== tickL && t.includes(nameL))
+                return true;
+            return t.includes(tickL) && STOCK_TERMS.test(t);
+        });
+        if (onTopic.length < sums.length) {
+            log({ level: 'warn', msg: `[QUANT] Recovery dropped ${sums.length - onTopic.length} off-topic summaries (wrong company?)`, source: 'researchAgent', ts: Date.now() });
+        }
+        if (!onTopic.length)
+            return [];
+        return await factVerificationLoop(callChat, onTopic.slice(0, 3), topic, opts);
     }
     catch (e) {
         log({ level: 'warn', msg: `[QUANT] Quote recovery failed: ${e.message}`, source: 'researchAgent', ts: Date.now() });

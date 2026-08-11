@@ -53,6 +53,18 @@ const HORIZON_YRS = 10;
 function yearLike(v: number): boolean {
   return v >= 1900 && v <= 2099 && Number.isInteger(v);
 }
+// date/time guard: "2026-08-11 at 8:00 PM" — "08", "11", "8", "00" are
+// date/time components, not prices (run 18: "after-hours price as of
+// 2026-08-11 at 8:00 PM" harvested $8.00 and the whole model computed
+// against it). a number flanked by - or / (date) or : (time) is not a
+// price. start/end are the capture's offsets in text.
+function isDateTimeComponent(text: string, start: number, end: number): boolean {
+  const before = text.slice(Math.max(0, start - 1), start);
+  const after = text.slice(end, end + 2);
+  if (/[-/]/.test(before) || /^[-/]/.test(after)) return true;
+  if (/^:\d/.test(after) || /:\d$/.test(before)) return true;
+  return false;
+}
 // scanPriceForwardAll — last resort for wordy price phrasings ("share price
 // for fiscal 2026 was $150.42"): walk each anchor hit and scan forward,
 // skipping year-like numbers ("2026") and %-moves ("up 5% to $150") until
@@ -83,6 +95,8 @@ function scanPriceForwardAll(text: string): number[] {
       for (const nm of slice.matchAll(/\$?([\d,]+\.?\d*)\s*%?/g)) {
         const v = parseFloat(nm[1].replace(/[,$]/g, ''));
         if (isNaN(v) || yearLike(v) || nm[0].includes('%')) continue;
+        const numStart = nm.index + nm[0].length - nm[1].length;
+        if (isDateTimeComponent(slice, numStart, nm.index + nm[0].length)) continue;
         if (MULTIPLE_RE.test(slice.slice(nm.index + nm[0].length, nm.index + nm[0].length + 25))) continue;
         out.push(v);
       }
@@ -103,7 +117,8 @@ function harvest(text: string, anchors: RegExp[], fallbackPattern?: RegExp, bann
       const ctx = text.slice(Math.max(0, mm.index - 25), mm.index + mm[0].length).toLowerCase();
       if (banned.some((w) => ctx.includes(w))) continue;
       const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
-      if (!isNaN(v) && !yearLike(v)) return v;
+      const capStart = mm.index + mm[0].length - (mm[1] || '').length;
+      if (!isNaN(v) && !yearLike(v) && !isDateTimeComponent(text, capStart, mm.index + mm[0].length)) return v;
     }
     return null;
   };
@@ -138,7 +153,8 @@ function harvestAll(text: string, anchors: RegExp[], fallbackPattern?: RegExp, b
       if (banned.some((w) => ctx.includes(w))) continue;
       if (postBanned && postBanned.test(text.slice(mm.index + mm[0].length, mm.index + mm[0].length + 25))) continue;
       const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
-      if (!isNaN(v) && !yearLike(v)) out.push(v);
+      const capStart = mm.index + mm[0].length - (mm[1] || '').length;
+      if (!isNaN(v) && !yearLike(v) && !isDateTimeComponent(text, capStart, mm.index + mm[0].length)) out.push(v);
     }
   };
   for (const a of anchors) tryMatch(a);
@@ -227,12 +243,29 @@ export function runQuantModel(claims: string[]): QuantModel {
   // same way a quote 2x off the implied price is. when the range rejects the
   // quote, the implied price (if any) wins; otherwise the price is dropped
   // and the recovery crawl fires for a real quote.
-  const rangeM = text.match(/(?:52[- ]?week|52week)[^0-9]{0,25}?\$?([\d,]+\.?\d*)[^0-9]{0,25}?\$?([\d,]+\.?\d*)/i)
-    ?? text.match(/(?:traded|trading|swung|ranged|range)[^0-9]{0,15}?between[^0-9]{0,15}?\$?([\d,]+\.?\d*)[^0-9]{0,15}?(?:and|to)[^0-9]{0,15}?\$?([\d,]+\.?\d*)/i);
+  // run 18: the claim "52-week price range for NVDA as of 2026-08-10 is
+  // between 163.85 and 236.26" tripped the first regex into capturing the
+  // DATE (2026, 08) — the 25-char window couldn't reach the real numbers,
+  // and a matched-but-garbage first alternative blocked the good ones via
+  // ??. every candidate is now validated before acceptance: lo < hi, high
+  // under 10x low, and price-like (a decimal, or both under 1000 — years
+  // are 4-digit integers).
+  const rangeCands = [
+    text.match(/(?:52[- ]?week|52week)[^0-9]{0,25}?\$?([\d,]+\.?\d*)[^0-9]{0,25}?\$?([\d,]+\.?\d*)/i),
+    text.match(/(?:traded|trading|swung|ranged|range)[^0-9]{0,15}?between[^0-9]{0,15}?\$?([\d,]+\.?\d*)[^0-9]{0,15}?(?:and|to)[^0-9]{0,15}?\$?([\d,]+\.?\d*)/i),
+    text.match(/(?:between|ranged from|range of|range is|range was|range for)[^0-9]{0,40}?\$?([\d,]+\.?\d*)[^0-9]{0,20}?(?:and|to)[^0-9]{0,20}?\$?([\d,]+\.?\d*)/i),
+  ];
+  const rangeM = rangeCands.find((m) => {
+    if (!m) return false;
+    const lo = parseFloat(m[1].replace(/,/g, ''));
+    const hi = parseFloat(m[2].replace(/,/g, ''));
+    const priceLike = /\.\d/.test(m[1]) || /\.\d/.test(m[2]) || (lo < 1000 && hi < 1000);
+    return lo > 0 && hi > lo && hi < lo * 10 && priceLike;
+  });
   if (price != null && rangeM) {
     const lo = parseFloat(rangeM[1].replace(/,/g, ''));
     const hi = parseFloat(rangeM[2].replace(/,/g, ''));
-    if (lo > 0 && hi > lo && (price < lo * 0.5 || price > hi * 2)) {
+    if (price < lo * 0.5 || price > hi * 2) {
       const orig = price;
       if (impliedPrice != null) {
         price = impliedPrice;

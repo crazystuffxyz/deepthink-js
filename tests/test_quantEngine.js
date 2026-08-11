@@ -300,6 +300,53 @@ function check(name, cond, detail = '') {
   check('in-range quote kept', m.price === 217.55, `got ${m.price}`);
 }
 
+// ---- run-18: "after-hours price as of 2026-08-11 at 8:00 PM" — the
+// date/time components (08, 11, 8, 00) were harvested as prices and
+// "8:00 PM" appeared in 4+ claims, so $8.00 became the mode and the whole
+// model computed against it. date (-, /) and time (:) flanks disqualify ----
+{
+  const m = runQuantModel([
+    'NVIDIA (NVDA) after-hours price as of 2026-08-11 at 8:00 PM was $217.99.',
+    'After-hours trading runs from 4:00 PM to 8:00 PM ET.',
+    'NVDA closed at $217.55 on 2026-08-10.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('8:00 PM not harvested as price', m.price === 217.55, `got ${m.price}`);
+}
+
+// ---- run-18: "The 52-week price range for NVDA as of 2026-08-10 is
+// between 163.85 and 236.26" — the 25-char window couldn't reach the real
+// numbers, the first regex captured the DATE (2026, 08), and a
+// matched-but-garbage first alternative blocked the good ones via ??. the
+// chain now validates every candidate and falls through to the "between"
+// phrasing ----
+{
+  const m = runQuantModel([
+    'NVDA is trading at $8.00 on August 7, 2026.',
+    'The 52-week price range for NVDA as of 2026-08-10 is between 163.85 and 236.26.',
+    'Diluted EPS for fiscal year 2026 stood at $4.90.',
+    'Revenue grew 85% year over year.',
+    'The beta is 1.84.',
+  ]);
+  check('wordy 52-week range phrasing still rejects bad quote', m.price == null || m.price > 150, `got ${m.price}`);
+  check('wordy range priceSource says rejected', m.priceSource != null && m.priceSource.includes('52-week'), m.priceSource);
+}
+
+// ---- years are not ranges: "between 2026 and 2028" must not reject a
+// sane price ----
+{
+  const m = runQuantModel([
+    'NVDA is trading at $217.55.',
+    'The market is expected to grow between 2026 and 2028.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('year range does not reject sane price', m.price === 217.55, `got ${m.price}`);
+}
+
 // ---- run-15: "TTM EPS growth is 214.42%" — the EPS window crossed
 // "growth is" and captured the growth RATE as the EPS value ($214.42 EPS
 // → IV $52,671). rates are never EPS: growth/cagr words in the window and

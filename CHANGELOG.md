@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.10
+
+### Fixed
+- **Critic parse failures from string numbers** — run 17: three of five critics failed to parse in loop 2 because LLMs emit numbers as strings ("73.3") and one quoted score killed the whole Zod check. All LLM-facing numeric fields now coerce strings to numbers and clamp to [min, max] (`num()` preprocess): source-fidelity scores/counts, math-rigor score, adversarial vulnerability score, and the boolean `hasMathContent` coercion.
+- **Humanize oscillation** — run 17: detector scores swung 15 → 92 → 85 because every rewrite replaced the previous one even when it scored worse. The loop now keeps best-text memory: a pass that regresses reverts to the best-scoring text, and the next humanize pass starts from there with the best pass's tells as feedback (not the worse pass's).
+- **Detector calibration** — the AI-detector judge now ignores structural elements that the report format requires ([Source N] tags, math notation, section headings) and judges prose register only, with no floor score. A text whose prose reads like a specific person wrote it scores 0.
+
 ## v1.8.9
 
 ### Fixed

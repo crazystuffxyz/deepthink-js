@@ -93,6 +93,12 @@ RULES:
 
 const DETECTOR_SYS = `You are an AI-text detector with a sharp eye. Judge how likely the given text was written by an AI.
 
+IMPORTANT — STRUCTURAL ELEMENTS ARE NOT SIGNALS:
+- [Source N] citation tags are REQUIRED by the report format — ignore them entirely.
+- Math notation ($\\mu$, LaTeX, formulas) is REQUIRED by the report format — ignore it.
+- Section headings are REQUIRED by the format — judge the prose inside them, not the headings themselves.
+Judge ONLY the prose register: sentence rhythm, word choice, voice, personality.
+
 SIGNALS OF AI WRITING:
 - Uniform sentence length (every sentence 15-25 words)
 - Perfect grammar and parallelism everywhere
@@ -111,7 +117,7 @@ SIGNALS OF HUMAN WRITING:
 
 Output ONLY valid JSON — no markdown fences, no prose:
 {"aiScore": 0-100, "tells": ["specific phrase or pattern that gave it away"], "verdict": "human|ai"}
-aiScore 0 = reads 100% human. aiScore 100 = reads 100% AI.`;
+aiScore 0 = reads 100% human. aiScore 100 = reads 100% AI. A text whose prose reads like a specific person wrote it scores 0 — do not hedge with a floor score.`;
 
 function extractClaims(text: string): string[] {
   // numbers, percentages, dollar amounts, years, and [Source N] tags
@@ -151,6 +157,11 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
   const refTail = refIdx > -1 ? current.slice(refIdx) : '';
   if (refTail) current = current.slice(0, refIdx);
   const history: any[] = [];
+  // best-text memory: run 17 oscillated 15 -> 92 -> 85 because every rewrite
+  // replaced the previous one even when it scored worse. keep the best-scoring
+  // text and feed THAT back to the humanizer — the tells from the best pass are
+  // the most useful feedback anyway.
+  let best = { text: current, score: Infinity };
 
   for (let iter = 1; iter <= maxIterations; iter++) {
     log({ level: 'info', msg: `[humanize] iteration ${iter}/${maxIterations} — humanize pass`, source: 'humanize', ts: Date.now() });
@@ -158,8 +169,12 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
     // as AI — hand those tells to the humanizer so it targets them instead
     // of guessing blind every iteration.
     const lastDet = history.at(-1);
-    const tellsNote = lastDet && lastDet.tells?.length
-      ? `\n\nThe detector flagged these tells in the previous pass — eliminate them specifically:\n${lastDet.tells.map((t: string) => `- ${t}`).join('\n')}`
+    // when working from the best text, feed the tells from the best pass —
+    // the last pass's tells describe a different (worse) text.
+    const bestDet = history.find((h: any) => h.aiScore === best.score);
+    const tellsSource = (current === best.text && bestDet) ? bestDet : lastDet;
+    const tellsNote = tellsSource && tellsSource.tells?.length
+      ? `\n\nThe detector flagged these tells in the previous pass — eliminate them specifically:\n${tellsSource.tells.map((t: string) => `- ${t}`).join('\n')}`
       : '';
     const hR = await callChat(
       [{ role: 'system', content: HUMANIZE_SYS }, { role: 'user', content: current + tellsNote }],
@@ -206,10 +221,17 @@ export async function humanizeText(callChat: any, text: string, opts: any = {}):
     history.push({ iteration: iter, aiScore: score, tells: det.tells || [], issuesFixed: issues.length });
     log({ level: 'info', msg: `[humanize] iteration ${iter} — detector score: ${score} (verdict: ${det.verdict})`, source: 'humanize', ts: Date.now() });
 
+    if (score < best.score) best = { text: rewritten, score };
     current = rewritten;
     if (score <= threshold) {
       log({ level: 'success', msg: `[humanize] detector at ${score} <= ${threshold} — done after ${iter} iterations`, source: 'humanize', ts: Date.now() });
       return { text: current + refTail, iterations: iter, finalScore: score, history, ok: true };
+    }
+    // regression guard: if this pass scored worse than the best so far, the
+    // next humanize pass starts from the best text, not the worse one.
+    if (score > best.score) {
+      log({ level: 'warn', msg: `[humanize] iteration ${iter} regressed (${best.score} -> ${score}) — next pass starts from best text`, source: 'humanize', ts: Date.now() });
+      current = best.text;
     }
     // plateau guard: if the score stopped improving two passes in a row,
     // more rewrites just burn calls — the tells feedback has converged.

@@ -136,7 +136,7 @@ export declare const VerifyResultSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type VerifyResult = z.infer<typeof VerifyResultSchema>;
 export declare const SourceFidelityIssueSchema: z.ZodObject<{
-    claimIndex: z.ZodOptional<z.ZodNumber>;
+    claimIndex: z.ZodPreprocess<z.ZodOptional<z.ZodNumber>>;
     severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
         [x: string]: string;
     }>>>;
@@ -146,7 +146,7 @@ export declare const SourceFidelityIssueSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const SourceFidelitySchema: z.ZodObject<{
     issues: z.ZodDefault<z.ZodArray<z.ZodObject<{
-        claimIndex: z.ZodOptional<z.ZodNumber>;
+        claimIndex: z.ZodPreprocess<z.ZodOptional<z.ZodNumber>>;
         severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
             [x: string]: string;
         }>>>;
@@ -154,8 +154,8 @@ export declare const SourceFidelitySchema: z.ZodObject<{
         description: z.ZodDefault<z.ZodString>;
         suggestion: z.ZodDefault<z.ZodString>;
     }, z.core.$strip>>>;
-    totalChecked: z.ZodDefault<z.ZodNumber>;
-    fidelityScore: z.ZodDefault<z.ZodNumber>;
+    totalChecked: z.ZodDefault<z.ZodPreprocess<z.ZodNumber>>;
+    fidelityScore: z.ZodDefault<z.ZodPreprocess<z.ZodNumber>>;
 }, z.core.$strip>;
 export type SourceFidelity = z.infer<typeof SourceFidelitySchema>;
 export declare const MathLogicIssueSchema: z.ZodObject<{
@@ -177,8 +177,8 @@ export declare const MathLogicSchema: z.ZodObject<{
         description: z.ZodDefault<z.ZodString>;
         correction: z.ZodDefault<z.ZodString>;
     }, z.core.$strip>>>;
-    hasMathContent: z.ZodDefault<z.ZodBoolean>;
-    mathRigorScore: z.ZodDefault<z.ZodNumber>;
+    hasMathContent: z.ZodPreprocess<z.ZodDefault<z.ZodBoolean>>;
+    mathRigorScore: z.ZodDefault<z.ZodPreprocess<z.ZodNumber>>;
 }, z.core.$strip>;
 export type MathLogic = z.infer<typeof MathLogicSchema>;
 export declare const ExpertCritiqueIssueSchema: z.ZodObject<{
@@ -232,7 +232,7 @@ export declare const AdversarialSchema: z.ZodObject<{
     }, z.core.$strip>>>;
     weakestArgument: z.ZodDefault<z.ZodString>;
     alternativeConclusion: z.ZodDefault<z.ZodString>;
-    overallVulnerabilityScore: z.ZodDefault<z.ZodNumber>;
+    overallVulnerabilityScore: z.ZodDefault<z.ZodPreprocess<z.ZodNumber>>;
 }, z.core.$strip>;
 export type Adversarial = z.infer<typeof AdversarialSchema>;
 //# sourceMappingURL=llmSchemas.d.ts.map

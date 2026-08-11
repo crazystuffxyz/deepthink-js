@@ -46,6 +46,26 @@ export function extractJsonCandidate(text) {
     }
     return null;
 }
+// LLM LaTeX leaks into JSON strings: \mu, \sigma, \sqrt are invalid JSON
+// escapes and JSON.parse throws "Bad escaped character" (run 18: the math
+// critic quoted the report's formulas). a run of backslashes before a
+// non-escape char must be EVEN (each pair = one literal backslash); odd
+// runs get one more backslash. already-escaped runs (\\sigma) stay put.
+function repairBadEscapes(s) {
+    return s.replace(/(\\+)(?![\\"\/bfnrtu]|u[0-9a-fA-F]{4})/g, (m) => m + (m.length % 2 ? '\\' : ''));
+}
+// {"issues": [a], b, c] — the model closed the array early and appended the
+// remaining issues as sibling objects, then closed with the array's bracket.
+// fold the trailing objects back into the array. only matches strings that
+// END with ] (valid JSON ends with }), so it can't corrupt valid output.
+function repairEscapedArrayObjects(s) {
+    const m = s.match(/^(\{[\s\S]*?"issues":\s*\[)([\s\S]*?)(\])((?:,\s*\{[\s\S]*?\})*)\]$/);
+    if (!m)
+        return null;
+    const [, head, inner, , tail] = m;
+    const folded = tail.replace(/^,\s*/, '');
+    return `${head}${inner}${folded ? ',' + folded : ''}]}`;
+}
 export function parseJsonSafe(text, schema) {
     const candidate = extractJsonCandidate(text ?? '');
     if (candidate == null) {
@@ -60,16 +80,30 @@ export function parseJsonSafe(text, schema) {
         raw = JSON.parse(candidate);
     }
     catch (e) {
-        const cleaned = stripCodeFences(candidate);
+        // repair chain: bad escapes first (most common), then escaped-array
+        // objects, then the legacy fence strip
+        const repaired = repairBadEscapes(candidate);
         try {
-            raw = JSON.parse(cleaned);
+            raw = JSON.parse(repaired);
         }
         catch (e2) {
-            return {
-                ok: false,
-                error: e2 instanceof Error ? e2 : new Error('JSON.parse failed'),
-                raw: candidate
-            };
+            const repaired2 = repairEscapedArrayObjects(repaired) ?? repaired;
+            try {
+                raw = JSON.parse(repaired2);
+            }
+            catch (e3) {
+                const cleaned = stripCodeFences(candidate);
+                try {
+                    raw = JSON.parse(cleaned);
+                }
+                catch (e4) {
+                    return {
+                        ok: false,
+                        error: e4 instanceof Error ? e4 : new Error('JSON.parse failed'),
+                        raw: candidate
+                    };
+                }
+            }
         }
     }
     const result = schema.safeParse(raw);

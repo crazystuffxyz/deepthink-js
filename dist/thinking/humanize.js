@@ -106,6 +106,12 @@ SIGNALS OF HUMAN WRITING:
 - Concrete details and specifics
 - Imperfect but natural rhythm
 
+SCORING RULES (run 18: the detector listed "varied sentence length", "contractions", and "distinct analyst voice" as tells and still scored 15 — those are HUMAN signals and add ZERO points):
+- Start at 0. Add points ONLY for specific AI-tell phrases you can QUOTE VERBATIM from the text.
+- HUMAN signals add 0 points: varied sentence length, contractions, informal phrasing, opinions, a distinct voice, staccato rhythm, non-parallel lists, idioms, conversational register, concrete details.
+- AI tells are specific, quotable phrases: "delve", "furthermore", "moreover", "additionally", "in conclusion", "it is important to note", "it is worth noting", "Not only... but also", "comprehensive", "robust", "seamless", "cutting-edge", "state-of-the-art", "pivotal", "a testament to", "underscore", "showcase", "foster", "holistic", "synergy", "paradigm", "multifaceted", "intricate", "meticulous", "unprecedented", "revolutionize", "transformative", "empower", "streamline", "optimize", "navigate the complexities", "play a pivotal role", "in today's fast-paced world", em-dash pairs, perfect parallelism across 3+ consecutive bullets.
+- If the text contains NONE of these verbatim, score 0. Do not invent tells. Do not penalize human voice.
+
 Output ONLY valid JSON — no markdown fences, no prose:
 {"aiScore": 0-100, "tells": ["specific phrase or pattern that gave it away"], "verdict": "human|ai"}
 aiScore 0 = reads 100% human. aiScore 100 = reads 100% AI. A text whose prose reads like a specific person wrote it scores 0 — do not hedge with a floor score.`;

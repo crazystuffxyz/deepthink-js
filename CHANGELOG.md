@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.11
+
+### Fixed
+- **Date/time components harvested as prices** — run 18: "after-hours price as of 2026-08-11 at 8:00 PM" — the harvest grabbed 08, 11, 8, and 00 from the date and time, and since "8:00 PM" appeared in 4+ claims, $8.00 became the mode and the whole quant model computed against it (IV $9.93 on a $217 stock). Numbers flanked by `-`/`/` (date) or `:` (time) are now rejected in all three harvest paths (anchored, harvestAll, forward scan).
+- **52-week range regex captured the date** — run 18: "The 52-week price range for NVDA as of 2026-08-10 is between 163.85 and 236.26" — the 25-char window couldn't reach the real numbers, the first regex captured (2026, 08), and a matched-but-garbage first alternative blocked the good ones via `??`. The range chain now validates every candidate (lo < hi, high under 10× low, price-like: a decimal or both under 1000) and falls through to the "between X and Y" phrasing. Years ("between 2026 and 2028") can no longer masquerade as a range.
+- **JSON repair for LLM output** — run 18: the math critic quoted the report's LaTeX (`\mu`, `\sigma`, `\sqrt`) inside JSON strings, which are invalid JSON escapes — JSON.parse threw "Bad escaped character" and the whole critic parse failed. `parseJsonSafe` now repairs backslash runs before non-escape chars (odd runs get one more backslash; already-escaped `\\sigma` stays put) and folds issues that escaped the array (`{"issues": [a], b, c]`).
+- **Quote-recovery disambiguation** — run 17: the recovery crawl's bare "NVDA stock price today" returned nvaccess.org (the NVDA screen-reader software), not NVIDIA. Recovery queries now pair the ticker with the company name, and off-topic summaries (ticker mention without any stock terms) are dropped before verification.
+- **Detector scoring rubric** — run 18: the AI-detector listed "varied sentence length", "contractions", and "distinct analyst voice" as tells and still scored 15 — those are HUMAN signals. The rubric now starts at 0 and adds points only for specific, quotable AI-tell phrases; human voice adds zero.
+
 ## v1.8.10
 
 ### Fixed

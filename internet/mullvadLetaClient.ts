@@ -115,12 +115,17 @@ export async function getMullvadLetaResults(query: string, desiredResultCount = 
     return [];
   }
   const max = Math.min(8, instances.length);
-  const shuffled = [...instances].sort(() => Math.random() - 0.5);
+  // normalize trailing slashes ONCE — searx.space URLs carry them, and the
+  // tried-set must compare the same strings the shuffle holds. run 13: the
+  // stripped baseUrl never matched the unstripped entries, so every attempt
+  // re-picked the same first instance and hammered a rate-limited one 8x.
+  const normalized = [...new Set(instances.map((u) => u.replace(/\/+$/, '')))];
+  const shuffled = [...normalized].sort(() => Math.random() - 0.5);
   const triedUrls = new Set<string>();
   let allResults: Array<{ title: string; link: string; snippet: string; cite: string }> = [];
   const seenLinks = new Set<string>();
   for (let instanceIdx = 0; instanceIdx < max; instanceIdx++) {
-    const baseUrl = shuffled.find(u => !triedUrls.has(u))?.replace(/\/$/, '');
+    const baseUrl = shuffled.find(u => !triedUrls.has(u));
     if (!baseUrl) break;
     triedUrls.add(baseUrl);
     if (process.stdout?.write) process.stdout.write(`[mullvad] Selected instance: ${baseUrl} (attempt ${instanceIdx + 1}/${max})\n`);

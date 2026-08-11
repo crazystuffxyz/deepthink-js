@@ -21,5 +21,5 @@ export type QuantModel = {
     section: string;
     inputs: string[];
 };
-export declare function runQuantModel(claims: string[]): QuantModel;
+export declare function runQuantModel(claims: string[], rawTexts?: string[]): QuantModel;
 //# sourceMappingURL=quantEngine.d.ts.map

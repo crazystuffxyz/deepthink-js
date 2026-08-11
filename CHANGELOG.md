@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.8.14
+
+### Fixed
+- **"Cannot compute" messages named the wrong inputs** — run 20: EPS was found ($6.53) but the DCF line said "need EPS and growth from sources", and the writer's no-model note said "missing inputs (current price, EPS, beta, or growth)" which made the exec summary claim all four were absent when only growth was. The DCF line now names exactly which inputs are missing ("need a growth rate from sources" vs "need EPS from sources"), and the writer's note lists the precise missing fields so it can't over-generalize.
+
+## v1.8.13
+
+### Fixed
+- **Recovery crawl never covered growth** — run 20: price/EPS/beta all found but no claim cited a growth rate, so the DCF intrinsic value stayed uncomputable, `ok` flipped false, and the purge repair stripped 7 model-math claims from the report. The targeted quote crawl now recovers growth too (revenue growth latest quarter / annual / sales growth / forward P/E + PEG — the last feeds the engine's forward-P/E ÷ PEG fallback derivation), and the missing/still-missing checks include it.
+
 ## v1.8.12
 
 ### Fixed

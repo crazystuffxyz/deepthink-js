@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.6
+
+### Fixed
+- **SearXNG instance rotation** — run 13: searx.space URLs carry trailing slashes, but the tried-set held the stripped `baseUrl` while the shuffle held unstripped entries — the `find` never matched, so all 8 attempts hammered the same rate-limited instance (5 URLs from 6 queries, 1 extractable source, quant model dead). The instance list is now normalized once before shuffling; a 403 on one instance rotates to a working one (verified live: 20 results from the second instance).
+
 ## v1.8.5
 
 ### Fixed

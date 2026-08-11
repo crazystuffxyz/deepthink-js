@@ -44,9 +44,10 @@ export async function getFetchResults(url: string): Promise<string> {
 }
 
 export async function getSearchResults(query: string, opts: { useOllamaSearch?: boolean; [k: string]: unknown } = {}): Promise<SearchResult[] | null> {
+  const q = String(query ?? '').trim();
   if (opts.useOllamaSearch) {
     try {
-      if (process.stdout?.write) process.stdout.write(`[getSearchResults] Routing to Ollama search for: "${query.slice(0, 60)}"\n`);
+      if (process.stdout?.write) process.stdout.write(`[getSearchResults] Routing to Ollama search for: "${q.slice(0, 60)}"\n`);
       const results = await getOllamaSearchResults(query, 5);
       if (results && results.length > 0) return results;
       if (process.stdout?.write) process.stdout.write('[getSearchResults] Ollama returned 0 results — falling back to SearXNG\n');
@@ -55,10 +56,10 @@ export async function getSearchResults(query: string, opts: { useOllamaSearch?: 
     }
   }
   try {
-    const results = await getMullvadLetaResults(query, 5, 1, 1, 'google');
+    const results = await getMullvadLetaResults(q, 5, 1, 1, 'google');
     return results as unknown as SearchResult[];
   } catch (error) {
-    if (process.stdout?.write) process.stdout.write(`[getSearchResults] SearXNG error for query "${query}": ${(error as Error).message}\n`);
+    if (process.stdout?.write) process.stdout.write(`[getSearchResults] SearXNG error for query "${q}": ${(error as Error)?.message ?? error}\n`);
     return null;
   }
 }

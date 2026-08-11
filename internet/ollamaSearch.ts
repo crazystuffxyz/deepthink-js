@@ -61,7 +61,10 @@ async function probeClientTier(): Promise<boolean> {
     return true;
   } catch (err) {
     _clientTierUsable = false;
-    if (process.stdout?.write) process.stdout.write(`[ollamaSearch] client tier probe FAILED (${(err as Error).message.slice(0, 60)}) — skipping client tier this session\n`);
+    // err can be undefined (a rejected promise with no value) — never let
+    // the probe's own error handling crash the search chain
+    const why = String((err as Error)?.message ?? err ?? 'unknown').slice(0, 60);
+    if (process.stdout?.write) process.stdout.write(`[ollamaSearch] client tier probe FAILED (${why}) — skipping client tier this session\n`);
     return false;
   }
 }

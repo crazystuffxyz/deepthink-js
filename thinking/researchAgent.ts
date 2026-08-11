@@ -183,7 +183,14 @@ async function crawlerAgent(queries: any[], maxConcurrency = 5, opts: any = {}):
   const seenUrls = new Set<string>();
   for (let i = 0; i < queries.length; i += maxConcurrency) {
     const batch = queries.slice(i, i + maxConcurrency);
-    const batchResults = await Promise.allSettled(batch.map(async ({ query, goal, depth, topic }: any) => {
+    const batchResults = await Promise.allSettled(batch.map(async (item: any) => {
+      // recoverStockQuote passes plain strings; plannerAgent passes
+      // {query,goal,depth,topic} objects. run 14: destructuring a string
+      // gave query=undefined, the search crashed on query.slice(), and the
+      // recovery crawl silently returned 0 URLs — the quant model died.
+      const { query, goal, depth, topic } = typeof item === 'string'
+        ? { query: item, goal: '', depth: 0, topic: 'general' }
+        : (item || {});
       const searchResults = await getSearchResults(query, opts);
       if (!Array.isArray(searchResults)) return [];
       return searchResults.map((r: any) => ({ url: r.link, title: r.title || '', snippet: r.snippet || '', cite: r.cite || '', query, goal, depth, topic: topic || 'general' }));

@@ -1057,7 +1057,12 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
 // code-enforced. runs before the critique loop (critics verify the aligned
 // report) and once more after it (repair may re-introduce divergence).
 function quantConformanceRepair(report, quantModel) {
-    if (!quantModel || !quantModel.ok)
+    // run even on PARTIAL models — run 20: growth missing made ok=false, but
+    // price/EPS/beta/Re/Sharpe/VaR were all computed and the report's prose
+    // drifted to "$217.36" against the engine's "$217.55". every rule no-ops
+    // on null values, so a partial model aligns what it has and leaves the
+    // rest alone.
+    if (!quantModel)
         return report;
     // the References section is METADATA (titles, years, URLs) — never sweep
     // it. run 8: the beta rule matched "beta" inside a URL and rewrote "[5]"
@@ -1379,7 +1384,7 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
         // with the computed model BEFORE the critics see the report, so the
         // critique loop verifies the aligned version instead of flagging the
         // divergence. deterministic — no LLM.
-        if (opts.mode === 'stock' && quantModel && quantModel.ok) {
+        if (opts.mode === 'stock' && quantModel) {
             const aligned = quantConformanceRepair(initialReport, quantModel);
             if (aligned !== initialReport)
                 log({ level: 'warn', msg: '[QUANT] Pre-critique conformance sweep aligned prose numbers with the computed model', source: 'researchAgent', ts: Date.now() });
@@ -1403,7 +1408,7 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
         // quant conformance (post-critique): repair passes can re-introduce
         // writer-style numbers — one final deterministic sweep locks the engine's
         // values into the shipped report.
-        if (opts.mode === 'stock' && quantModel && quantModel.ok) {
+        if (opts.mode === 'stock' && quantModel) {
             const aligned = quantConformanceRepair(finalReport, quantModel);
             if (aligned !== finalReport)
                 log({ level: 'warn', msg: '[QUANT] Post-critique conformance sweep realigned prose numbers', source: 'researchAgent', ts: Date.now() });
@@ -1436,6 +1441,17 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
             finalReport = h.text;
             stepSummary.humanize = { iterations: h.iterations, finalScore: h.finalScore, ok: h.ok, history: h.history };
             log({ level: 'success', msg: `[HUMANIZE] Done — ${h.iterations} iterations, detector score ${h.finalScore}`, source: 'researchAgent', ts: Date.now() });
+        }
+        // final conformance sweep AFTER humanize: the humanizer is told to keep
+        // numbers exact and the integrity check is supposed to catch drift, but
+        // both are LLM-based — run 20 shipped "at a price of $217.36" against the
+        // engine's $217.55. one deterministic pass locks the engine's values in
+        // as the last word before the quant section is appended.
+        if (opts.mode === 'stock' && quantModel) {
+            const aligned = quantConformanceRepair(finalReport, quantModel);
+            if (aligned !== finalReport)
+                log({ level: 'warn', msg: '[QUANT] Final conformance sweep locked engine values after humanize', source: 'researchAgent', ts: Date.now() });
+            finalReport = aligned;
         }
         // the computed quant section is appended AFTER the critique loop AND the
         // humanize loop so no critic/repair/humanizer pass can rewrite

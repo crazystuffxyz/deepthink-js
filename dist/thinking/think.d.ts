@@ -5,6 +5,12 @@ type CallChat = (messages: Message[], stream: boolean, onChunk: null, opts: Reco
 }>;
 export declare function runThink(callChat: CallChat, inputText: string, depth: number, opts: Record<string, unknown>): Promise<{
     analysis?: string;
+    answers?: Array<{
+        tag: string;
+        answer: string | null;
+    }>;
+    consensus?: string | null;
+    agreement?: number;
 }>;
 export {};
 //# sourceMappingURL=think.d.ts.map

@@ -6,6 +6,8 @@
 //
 // usage:
 //   node scripts/iqTrain.js [--pop N] [--gens N] [--model X] [--concurrency N]
+//       [--train <jsonl>] [--ood <jsonl>]   (override the banks — e.g. retrain
+//        on aime-2026-I.jsonl with aime-2026-II.jsonl as the OOD holdout)
 //
 // output:
 //   benchmarks/evolved/iq/<runId>/population-gen-*.json
@@ -36,8 +38,22 @@ const CONCURRENCY = Number(arg('concurrency', process.env.BENCH_CONCURRENCY || '
 const EVAL_SAMPLE = Number(arg('sample', process.env.BENCH_EVAL_SAMPLE || '0')); // mini-batch size (0 = full bank)
 
 // ---- train bench: IQ banks (kind 'choice', reference = 1-based choice index)
-const train = fs.readFileSync(path.join(DATA, 'iqTrain.jsonl'), 'utf-8')
-  .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+// --train overrides with a jsonl of {id, problem, answer} (aime-2026-* format)
+function loadBench(file) {
+  const items = fs.readFileSync(path.join(DATA, file), 'utf-8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // aime-style rows: {id, source, kind, problem, answer} → BenchItem
+  if (items[0] && items[0].problem && !items[0].prompt) {
+    return items.map((o) => ({
+      id: o.id, kind: o.kind || 'math', prompt: o.problem,
+      reference: Number(o.answer), numericTolerance: 0, weight: 1
+    }));
+  }
+  return items;
+}
+const TRAIN_FILE = arg('train', 'iqTrain.jsonl');
+const OOD_FILE = arg('ood', 'freshSet.jsonl');
+const train = loadBench(TRAIN_FILE);
 
 // ---- test holdout: fresh set → BenchItem format
 function toBenchItem(o) {
@@ -55,11 +71,13 @@ function toBenchItem(o) {
   if (/^[A-Za-z]$/.test(a)) return { id: o.id, kind: 'letter', prompt: o.prompt, reference: a, weight: 1 };
   return { id: o.id, kind: 'deduction', prompt: o.prompt, reference: a.toLowerCase(), weight: 1 };
 }
-const ood = fs.readFileSync(path.join(DATA, 'freshSet.jsonl'), 'utf-8')
-  .split('\n').filter(Boolean).map((l) => toBenchItem(JSON.parse(l)));
+const ood = OOD_FILE === 'freshSet.jsonl'
+  ? fs.readFileSync(path.join(DATA, 'freshSet.jsonl'), 'utf-8')
+      .split('\n').filter(Boolean).map((l) => toBenchItem(JSON.parse(l)))
+  : loadBench(OOD_FILE);
 
 console.log(`[iqTrain] model=${MODEL} pop=${POP} gens=${GENS} concurrency=${CONCURRENCY}`);
-console.log(`[iqTrain] train=${train.length} items (${new Set(train.map((t) => t.subkind)).size} kinds) | ood test=${ood.length} items`);
+console.log(`[iqTrain] train=${train.length} items (${TRAIN_FILE}) | ood test=${ood.length} items (${OOD_FILE})`);
 
 // ---- serialize the bench through a queue so ollama stays calm
 const queue = new PQueue({ concurrency: CONCURRENCY });

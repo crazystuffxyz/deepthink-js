@@ -48,6 +48,8 @@ const PLAIN_ONLY = process.argv.includes('--plain-only');
 const DT_ONLY = process.argv.includes('--dt-only');
 
 const problems = fs.readFileSync(DATA, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+// data files use "problem" (aime-2026-*); older sets use "prompt". accept both.
+for (const p of problems) if (!p.prompt && p.problem) p.prompt = p.problem;
 const selected = LIMIT > 0 ? problems.slice(0, LIMIT) : problems;
 
 // ---- runners ----

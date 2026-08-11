@@ -1282,6 +1282,34 @@ async function recoverStockQuote(callChat, topic, opts = {}, missing = []) {
         return [];
     }
 }
+// run 23: search-based recovery can still miss the price — searxng
+// instances 403 or return 0-result pages, and JS-rendered quote pages
+// (nasdaq.com) show nothing to static extraction. these hosts serve the
+// price in plain HTML and have worked in past runs (run 22's price and
+// beta both came from stockscan.io) — fetch them directly, no search.
+async function recoverQuoteDirect(callChat, topic, opts = {}) {
+    const ticker = String(opts.ticker || '').toUpperCase();
+    if (!ticker)
+        return [];
+    const urls = [
+        `https://stockscan.io/stocks/${ticker}`,
+        `https://stockanalysis.com/stocks/${ticker.toLowerCase()}/`,
+        `https://tickzen.app/stocks/${ticker.toLowerCase()}/overview`,
+    ];
+    log({ level: 'info', msg: `[QUANT] Direct quote fallback: ${urls.length} known static-HTML quote pages`, source: 'researchAgent', ts: Date.now() });
+    const sources = urls.map((url) => {
+        let cite = '';
+        try {
+            cite = new URL(url).hostname;
+        }
+        catch { /* ignore */ }
+        return { url, title: `${ticker} stock quote`, snippet: '', cite, credibilityScore: 40 };
+    });
+    const sums = await extractWithFallback(callChat, sources, [], topic, { requiredFields: ['current stock price', 'EPS', 'beta', 'revenue growth'] }, { ...opts, maxSummaries: 3 });
+    if (!sums.length)
+        return [];
+    return await factVerificationLoop(callChat, sums.slice(0, 3), topic, opts);
+}
 export default async function runDeepResearch(callChat, topic, opts = {}) {
     // thread the topic through opts so language-aware guards (CJK penalties)
     // can decide per-query instead of blanket-rejecting non-English content
@@ -1374,9 +1402,19 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
                 if (extra.length) {
                     verifiedNodes.push(...extra);
                     quantModel = runQuantModel(verifiedNodes.map((n) => n.claim), verifiedNodes.map((n) => n.citedSummary ?? ''));
-                    const still = ['price', 'eps', 'beta', 'growth'].filter((k) => quantModel[k] == null);
-                    log({ level: still.length ? 'warn' : 'success', msg: `[QUANT] Recovery added ${extra.length} claims — still missing: ${still.join(', ') || 'none'}`, source: 'researchAgent', ts: Date.now() });
                 }
+                let still = ['price', 'eps', 'beta', 'growth'].filter((k) => quantModel[k] == null);
+                // search recovery came up short on price/beta — hit the known
+                // static-HTML quote pages directly (no search involved)
+                if (still.includes('price') || still.includes('beta')) {
+                    const direct = await recoverQuoteDirect(callChat, topic, opts);
+                    if (direct.length) {
+                        verifiedNodes.push(...direct);
+                        quantModel = runQuantModel(verifiedNodes.map((n) => n.claim), verifiedNodes.map((n) => n.citedSummary ?? ''));
+                        still = ['price', 'eps', 'beta', 'growth'].filter((k) => quantModel[k] == null);
+                    }
+                }
+                log({ level: still.length ? 'warn' : 'success', msg: `[QUANT] Recovery added ${verifiedNodes.length - preRecovery} claims — still missing: ${still.join(', ') || 'none'}`, source: 'researchAgent', ts: Date.now() });
             }
             stepSummary.quant = {
                 ok: quantModel.ok, intrinsicValue: quantModel.intrinsicValue,

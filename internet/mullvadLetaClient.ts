@@ -13,6 +13,13 @@ const headerconfig: Record<string, string> = {
 
 let instancesPromise: Promise<string[]> | null = null;
 
+// searxng instances sometimes emit trailing %20 (URL-encoded space) on
+// result links — run 23: investing.com/equities/nvidia-corp%20 fetched the
+// wrong page and the price recovery died. strip encoded whitespace.
+export function sanitizeResultLink(link: string): string {
+  return String(link ?? '').replace(/(?:%20|\+)+$/i, '').trim();
+}
+
 async function getWorkingSearxngInstances(): Promise<string[]> {
   if (instancesPromise) return instancesPromise;
   instancesPromise = (async () => {
@@ -74,7 +81,7 @@ async function fetchSearxngPage(query: string, pageNo: number, baseUrl: string, 
         const titleMatch = /<h3>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(articleContent);
         const snippetMatch = /<p class="content[^"]*">([\s\S]*?)<\/p>/i.exec(articleContent);
         if (titleMatch) {
-          const link = titleMatch[1];
+          const link = sanitizeResultLink(titleMatch[1]);
           const title = cleanHtml(titleMatch[2]);
           const snippet = snippetMatch ? cleanHtml(snippetMatch[1]) : '';
           let hostname = '';

@@ -1191,6 +1191,11 @@ async function recoverStockQuote(callChat: any, topic: string, opts: any = {}, m
   }
   if (missing.includes('eps')) queries.push(`${name} ${ticker} diluted EPS trailing twelve months`, `${name} ${ticker} earnings per share TTM`);
   if (missing.includes('beta')) queries.push(`${name} ${ticker} beta 5 year monthly`, `${name} ${ticker} stock beta volatility`, `${name} ${ticker} beta coefficient`, `${ticker} beta stockanalysis`);
+  // growth feeds the DCF — run 20: price/EPS/beta all found but no growth %
+  // in any claim, so the intrinsic value stayed uncomputable and the whole
+  // model flipped to "cannot compute". the PEG phrasing also feeds the
+  // engine's forward-P/E ÷ PEG fallback derivation.
+  if (missing.includes('growth')) queries.push(`${name} ${ticker} revenue growth latest quarter`, `${name} ${ticker} revenue growth rate annual`, `${name} ${ticker} sales growth 2026`, `${name} ${ticker} forward P/E PEG ratio`);
   if (!queries.length) queries.push(`${topic} current price quote`);
   log({ level: 'info', msg: `[QUANT] Recovering: targeted quote crawl (${queries.length} phrasings for: ${missing.join(', ') || 'all'})`, source: 'researchAgent', ts: Date.now() });
   try {
@@ -1298,14 +1303,14 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
       const preRecovery = verifiedNodes.length;
       quantModel = runQuantModel(verifiedNodes.map((n: any) => n.claim));
       // missing inputs = no math: one targeted quote crawl per missing
-      // field (price, EPS, beta) before giving up
-      const missing = ['price', 'eps', 'beta'].filter((k) => quantModel[k] == null);
+      // field (price, EPS, beta, growth) before giving up
+      const missing = ['price', 'eps', 'beta', 'growth'].filter((k) => quantModel[k] == null);
       if (missing.length) {
         const extra = await recoverStockQuote(callChat, topic, opts, missing);
         if (extra.length) {
           verifiedNodes.push(...extra);
           quantModel = runQuantModel(verifiedNodes.map((n: any) => n.claim));
-          const still = ['price', 'eps', 'beta'].filter((k) => quantModel[k] == null);
+          const still = ['price', 'eps', 'beta', 'growth'].filter((k) => quantModel[k] == null);
           log({ level: still.length ? 'warn' : 'success', msg: `[QUANT] Recovery added ${extra.length} claims — still missing: ${still.join(', ') || 'none'}`, source: 'researchAgent', ts: Date.now() });
         }
       }

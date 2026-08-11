@@ -898,20 +898,8 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
       log({ level: 'success', msg: `[CRITIQUE LOOP ${loop}] Issue score below threshold (${issueScore} < ${issueThreshold}) — report accepted`, source: 'researchAgent', ts: Date.now() });
       break;
     }
-    // convergence guard: if the last repair pass barely moved the score
-    // (<20% improvement), more loops just burn calls — the report has
-    // reached what this model can fix. a REGRESSION (score went up) means
-    // the pass made it worse: restore the best-scoring version, don't ship
-    // the damage.
-    const prevScore = critiqueHistory.length > 1 ? critiqueHistory[critiqueHistory.length - 2].issueScore : null;
-    if (prevScore != null && issueScore >= prevScore * 0.8) {
-      log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair converged or regressed (score ${prevScore} -> ${issueScore}, <20% improvement) — restoring best report (score ${bestScore})`, source: 'researchAgent', ts: Date.now() });
-      currentReport = bestReport;
-      break;
-    }
-    allIssues.sort((a: any, b: any) => (severityWeights[b.severity] || 1) - (severityWeights[a.severity] || 1));
-    currentReport = await constrainedRepairAgent(callChat, currentReport, allIssues, topic, opts);
-    // repair agents are told to keep [Source N] tags — enforce it
+    // citation integrity data — computed once per loop, used by both the
+    // normal repair and the regression retry below
     const refCount = new Set(verifiedNodes.map((n: any) => n.url)).size;
     const claimsByRef = new Map<number, string[]>();
     const urlToId = new Map<string, number>();
@@ -922,6 +910,38 @@ async function critiqueAndRepairLoop(callChat: any, report: string, verifiedNode
       if (!claimsByRef.has(id)) claimsByRef.set(id, []);
       claimsByRef.get(id)!.push(node.claim);
     }
+    // convergence guard: if the last repair pass barely moved the score
+    // (<20% improvement), more loops just burn calls — the report has
+    // reached what this model can fix. a REGRESSION (score went up) means
+    // the pass made it worse: restore the best-scoring version, don't ship
+    // the damage.
+    const prevScore = critiqueHistory.length > 1 ? critiqueHistory[critiqueHistory.length - 2].issueScore : null;
+    if (prevScore != null && issueScore > prevScore) {
+      // regression retry: the full repair pass made things worse (run 14:
+      // 37 -> 54). restore the best report and retry with a SURGICAL pass
+      // that fixes only the critical issues — a smaller issue list means a
+      // smaller rewrite, which means less chance of introducing new damage.
+      const criticals = allIssues.filter((i: any) => i.severity === 'critical');
+      if (criticals.length && loop < maxLoops) {
+        log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair regressed (${prevScore} -> ${issueScore}) — surgical retry on ${criticals.length} critical issues only`, source: 'researchAgent', ts: Date.now() });
+        currentReport = bestReport;
+        const surgical = await constrainedRepairAgent(callChat, currentReport, criticals, topic, opts);
+        const integrity2 = await enforceCitations(callChat, surgical, refCount, claimsByRef, opts);
+        if (integrity2.restored.length) log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Surgical repair dropped ${integrity2.restored.length} citations — restored: [Source ${integrity2.restored.join('], [Source ')}]`, source: 'researchAgent', ts: Date.now() });
+        currentReport = integrity2.report;
+        continue; // re-critique the surgical result next loop
+      }
+      log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair regressed (score ${prevScore} -> ${issueScore}) — restoring best report (score ${bestScore})`, source: 'researchAgent', ts: Date.now() });
+      currentReport = bestReport;
+      break;
+    }
+    if (prevScore != null && issueScore >= prevScore * 0.8) {
+      log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair converged (score ${prevScore} -> ${issueScore}, <20% improvement) — restoring best report (score ${bestScore})`, source: 'researchAgent', ts: Date.now() });
+      currentReport = bestReport;
+      break;
+    }
+    allIssues.sort((a: any, b: any) => (severityWeights[b.severity] || 1) - (severityWeights[a.severity] || 1));
+    currentReport = await constrainedRepairAgent(callChat, currentReport, allIssues, topic, opts);
     const integrity = await enforceCitations(callChat, currentReport, refCount, claimsByRef, opts);
     if (integrity.restored.length) log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair dropped ${integrity.restored.length} citations — restored: [Source ${integrity.restored.join('], [Source ')}]`, source: 'researchAgent', ts: Date.now() });
     currentReport = integrity.report;

@@ -441,7 +441,10 @@ export function runQuantModel(claims) {
         L.push(`**Discounted Cash Flow:** EPS ${eps.toFixed(2)} projected ${HORIZON_YRS} years at ${(gDcf * 100).toFixed(1)}\\% growth${capped}, fading linearly to ${(TERMINAL_GROWTH * 100).toFixed(0)}\\% terminal, discounted at ${(costOfEquity * 100).toFixed(2)}\\%; terminal value via Gordon growth — **intrinsic value ≈ $${intrinsicValue.toFixed(2)}/share** (${upside != null ? (upside >= 0 ? '+' : '') + (upside * 100).toFixed(1) + '%' : 'n/a'} vs the current price).`);
     }
     else {
-        L.push('**Discounted Cash Flow:** cannot compute — need EPS and growth from sources.');
+        // say exactly what's missing — run 20: EPS was found, only growth was
+        // absent, and the old message ("need EPS and growth") was misleading
+        const missingBits = [eps == null ? 'EPS' : null, growth == null ? 'a growth rate' : null].filter(Boolean).join(' and ');
+        L.push(`**Discounted Cash Flow:** cannot compute — need ${missingBits} from sources.`);
     }
     if (expectedReturn != null && vol != null) {
         L.push(`**Geometric Brownian Motion:** $dS_t = \\mu S_t dt + \\sigma S_t dW_t$ with $\\mu = ${(expectedReturn * 100).toFixed(1)}\\%$, $\\sigma = ${(vol * 100).toFixed(1)}\\%$. Ito's lemma on $f(S)=\\ln S$ gives the expected log-return $(\\mu - \\sigma^2/2) = ${(expectedLogReturn * 100).toFixed(1)}\\%$ per year — the drift correction $\\sigma^2/2 = ${((vol * vol / 2) * 100).toFixed(1)}\\%$ is the volatility drag. Expected price in one year: $E[S_T] = S_0 e^{\\mu T} = $${expectedPrice != null ? '$' + expectedPrice.toFixed(2) : 'n/a'}.`);

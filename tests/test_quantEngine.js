@@ -429,5 +429,30 @@ function check(name, cond, detail = '') {
   check('out-of-range beta rejected → fallback', m3.beta === null && m3.ok === true, `beta=${m3.beta}`);
 }
 
+// ---- run-20: growth missing → DCF message names ONLY the missing input ----
+{
+  const m = runQuantModel([
+    'NVDA stock price is $217.55.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'NVDA beta is 2.23.',
+    'NVDA volatility is 40.1%.',
+    'risk-free rate 4.2%, equity risk premium 5.5%',
+  ]);
+  check('ok=false when growth missing', m.ok === false, `ok=${m.ok}`);
+  check('DCF message names growth only (EPS was found)', m.section.includes('need a growth rate from sources'), m.section.slice(0, 300));
+  check('DCF message does NOT claim EPS missing', !m.section.includes('need EPS and a growth rate'), m.section.slice(0, 300));
+}
+
+// ---- run-20: EPS missing → DCF message names EPS ----
+{
+  const m = runQuantModel([
+    'NVDA stock price is $217.55.',
+    'Revenue grew 7.3% year over year.',
+    'NVDA beta is 2.23.',
+    'risk-free rate 4.2%, equity risk premium 5.5%',
+  ]);
+  check('DCF message names EPS when missing', m.section.includes('need EPS from sources'), m.section.slice(0, 300));
+}
+
 console.log(`\nquantEngine: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

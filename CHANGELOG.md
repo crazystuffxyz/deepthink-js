@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.19
+
+### Fixed
+- **Price: NOT FOUND despite quote pages in the crawl** — run 23: the main crawl fetched nasdaq.com (JS-rendered — the price never appears in static HTML) and the recovery crawl's best hit was `investing.com/equities/nvidia-corp%20`, a trailing URL-encoded space that fetched the wrong page. Two fixes: (1) search-result links are now sanitized (`%20`/`+` stripped from the end) before anything else sees them; (2) when search-based recovery still misses price/beta, the pipeline now fetches known static-HTML quote pages directly (stockscan.io, stockanalysis.com, tickzen.app — run 22's price and beta both came from stockscan.io) with no search involved. The direct fallback runs through the same extraction + fact-verification pipeline, so its values are claims like any other.
+
 ## v1.8.18
 
 ### Fixed

@@ -44,10 +44,11 @@ export async function getFetchResults(url) {
     }
 }
 export async function getSearchResults(query, opts = {}) {
+    const q = String(query ?? '').trim();
     if (opts.useOllamaSearch) {
         try {
             if (process.stdout?.write)
-                process.stdout.write(`[getSearchResults] Routing to Ollama search for: "${query.slice(0, 60)}"\n`);
+                process.stdout.write(`[getSearchResults] Routing to Ollama search for: "${q.slice(0, 60)}"\n`);
             const results = await getOllamaSearchResults(query, 5);
             if (results && results.length > 0)
                 return results;
@@ -60,12 +61,12 @@ export async function getSearchResults(query, opts = {}) {
         }
     }
     try {
-        const results = await getMullvadLetaResults(query, 5, 1, 1, 'google');
+        const results = await getMullvadLetaResults(q, 5, 1, 1, 'google');
         return results;
     }
     catch (error) {
         if (process.stdout?.write)
-            process.stdout.write(`[getSearchResults] SearXNG error for query "${query}": ${error.message}\n`);
+            process.stdout.write(`[getSearchResults] SearXNG error for query "${q}": ${error?.message ?? error}\n`);
         return null;
     }
 }

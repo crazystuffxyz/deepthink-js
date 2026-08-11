@@ -1,6 +1,7 @@
 export type QuantModel = {
     ok: boolean;
     price: number | null;
+    priceSource: string;
     eps: number | null;
     growth: number | null;
     beta: number | null;

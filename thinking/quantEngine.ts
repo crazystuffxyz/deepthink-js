@@ -18,6 +18,7 @@
 export type QuantModel = {
   ok: boolean;
   price: number | null;
+  priceSource: string;          // where the price came from (quoted/implied/rejected)
   eps: number | null;
   growth: number | null;        // revenue growth rate (decimal)
   beta: number | null;
@@ -219,6 +220,29 @@ export function runQuantModel(claims: string[]): QuantModel {
     ...scanPriceForwardAll(text),
   ]);
   let priceSource = 'quoted price';
+  // run 16: the $8.00 glitch struck again, but this time no shares-outstanding
+  // claim was harvested, so the implied-price cross-check had nothing to
+  // divide by. the same claims DID carry the 52-week range ($164.07–$236.54)
+  // — a quote 2x below the 52-week LOW or above the HIGH is implausible the
+  // same way a quote 2x off the implied price is. when the range rejects the
+  // quote, the implied price (if any) wins; otherwise the price is dropped
+  // and the recovery crawl fires for a real quote.
+  const rangeM = text.match(/(?:52[- ]?week|52week)[^0-9]{0,25}?\$?([\d,]+\.?\d*)[^0-9]{0,25}?\$?([\d,]+\.?\d*)/i)
+    ?? text.match(/(?:traded|trading|swung|ranged|range)[^0-9]{0,15}?between[^0-9]{0,15}?\$?([\d,]+\.?\d*)[^0-9]{0,15}?(?:and|to)[^0-9]{0,15}?\$?([\d,]+\.?\d*)/i);
+  if (price != null && rangeM) {
+    const lo = parseFloat(rangeM[1].replace(/,/g, ''));
+    const hi = parseFloat(rangeM[2].replace(/,/g, ''));
+    if (lo > 0 && hi > lo && (price < lo * 0.5 || price > hi * 2)) {
+      const orig = price;
+      if (impliedPrice != null) {
+        price = impliedPrice;
+        priceSource = `implied from market cap ÷ shares (quote $${orig.toFixed(2)} rejected — outside 52-week range $${lo.toFixed(2)}–$${hi.toFixed(2)})`;
+      } else {
+        price = null;
+        priceSource = `rejected — quote $${orig.toFixed(2)} outside 52-week range $${lo.toFixed(2)}–$${hi.toFixed(2)}`;
+      }
+    }
+  }
   if (price != null && impliedPrice != null && (price < impliedPrice * 0.5 || price > impliedPrice * 2)) {
     const orig = price;
     price = impliedPrice;
@@ -372,7 +396,7 @@ export function runQuantModel(claims: string[]): QuantModel {
 
   return {
     ok: price != null && eps != null && growth != null && beta != null && vol != null && intrinsicValue != null,
-    price, eps, growth, beta, rf, erp, costOfEquity, sigma: vol,
+    price, priceSource, eps, growth, beta, rf, erp, costOfEquity, sigma: vol,
     intrinsicValue, expectedReturn, expectedLogReturn, expectedPrice,
     sharpe, var95_1d, var99_1d, var95_1y, upside,
     section: L.join('\n'),

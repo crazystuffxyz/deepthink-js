@@ -62,11 +62,9 @@ export declare const ClaimSchema: z.ZodObject<{
 export type Claim = z.infer<typeof ClaimSchema>;
 export declare const VerificationSchema: z.ZodObject<{
     claim: z.ZodString;
-    verdict: z.ZodEnum<{
-        supported: "supported";
-        unsupported: "unsupported";
-        unclear: "unclear";
-    }>;
+    verdict: z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>;
     rationale: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export type Verification = z.infer<typeof VerificationSchema>;
@@ -98,14 +96,9 @@ export declare const ScoreSchema: z.ZodObject<{
 export type Score = z.infer<typeof ScoreSchema>;
 export declare const LooseJsonSchema: z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean, z.ZodArray<z.ZodUnknown>, z.ZodRecord<z.ZodString, z.ZodUnknown>]>;
 export declare const AnswerFormatSpecSchema: z.ZodObject<{
-    answerType: z.ZodDefault<z.ZodEnum<{
-        data: "data";
-        analysis: "analysis";
-        list: "list";
-        comparison: "comparison";
-        explanation: "explanation";
-        recommendation: "recommendation";
-    }>>;
+    answerType: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>>;
     requiredFields: z.ZodDefault<z.ZodArray<z.ZodString>>;
     timeConstraints: z.ZodDefault<z.ZodArray<z.ZodString>>;
     entityTypes: z.ZodDefault<z.ZodArray<z.ZodString>>;
@@ -144,11 +137,9 @@ export declare const VerifyResultSchema: z.ZodObject<{
 export type VerifyResult = z.infer<typeof VerifyResultSchema>;
 export declare const SourceFidelityIssueSchema: z.ZodObject<{
     claimIndex: z.ZodOptional<z.ZodNumber>;
-    severity: z.ZodDefault<z.ZodEnum<{
-        critical: "critical";
-        major: "major";
-        minor: "minor";
-    }>>;
+    severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>>;
     type: z.ZodDefault<z.ZodString>;
     description: z.ZodDefault<z.ZodString>;
     suggestion: z.ZodDefault<z.ZodString>;
@@ -156,11 +147,9 @@ export declare const SourceFidelityIssueSchema: z.ZodObject<{
 export declare const SourceFidelitySchema: z.ZodObject<{
     issues: z.ZodDefault<z.ZodArray<z.ZodObject<{
         claimIndex: z.ZodOptional<z.ZodNumber>;
-        severity: z.ZodDefault<z.ZodEnum<{
-            critical: "critical";
-            major: "major";
-            minor: "minor";
-        }>>;
+        severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+            [x: string]: string;
+        }>>>;
         type: z.ZodDefault<z.ZodString>;
         description: z.ZodDefault<z.ZodString>;
         suggestion: z.ZodDefault<z.ZodString>;
@@ -171,11 +160,9 @@ export declare const SourceFidelitySchema: z.ZodObject<{
 export type SourceFidelity = z.infer<typeof SourceFidelitySchema>;
 export declare const MathLogicIssueSchema: z.ZodObject<{
     location: z.ZodDefault<z.ZodString>;
-    severity: z.ZodDefault<z.ZodEnum<{
-        critical: "critical";
-        major: "major";
-        minor: "minor";
-    }>>;
+    severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>>;
     type: z.ZodDefault<z.ZodString>;
     description: z.ZodDefault<z.ZodString>;
     correction: z.ZodDefault<z.ZodString>;
@@ -183,11 +170,9 @@ export declare const MathLogicIssueSchema: z.ZodObject<{
 export declare const MathLogicSchema: z.ZodObject<{
     issues: z.ZodDefault<z.ZodArray<z.ZodObject<{
         location: z.ZodDefault<z.ZodString>;
-        severity: z.ZodDefault<z.ZodEnum<{
-            critical: "critical";
-            major: "major";
-            minor: "minor";
-        }>>;
+        severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+            [x: string]: string;
+        }>>>;
         type: z.ZodDefault<z.ZodString>;
         description: z.ZodDefault<z.ZodString>;
         correction: z.ZodDefault<z.ZodString>;
@@ -198,29 +183,22 @@ export declare const MathLogicSchema: z.ZodObject<{
 export type MathLogic = z.infer<typeof MathLogicSchema>;
 export declare const ExpertCritiqueIssueSchema: z.ZodObject<{
     location: z.ZodDefault<z.ZodString>;
-    severity: z.ZodDefault<z.ZodEnum<{
-        critical: "critical";
-        major: "major";
-        minor: "minor";
-    }>>;
+    severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>>;
     type: z.ZodDefault<z.ZodString>;
     description: z.ZodDefault<z.ZodString>;
     recommendation: z.ZodDefault<z.ZodString>;
 }, z.core.$strip>;
 export declare const ExpertCritiqueSchema: z.ZodObject<{
-    overallAssessment: z.ZodDefault<z.ZodEnum<{
-        accept: "accept";
-        major_revision: "major_revision";
-        minor_revision: "minor_revision";
-        reject: "reject";
-    }>>;
+    overallAssessment: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>>;
     issues: z.ZodDefault<z.ZodArray<z.ZodObject<{
         location: z.ZodDefault<z.ZodString>;
-        severity: z.ZodDefault<z.ZodEnum<{
-            critical: "critical";
-            major: "major";
-            minor: "minor";
-        }>>;
+        severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+            [x: string]: string;
+        }>>>;
         type: z.ZodDefault<z.ZodString>;
         description: z.ZodDefault<z.ZodString>;
         recommendation: z.ZodDefault<z.ZodString>;
@@ -232,35 +210,25 @@ export type ExpertCritique = z.infer<typeof ExpertCritiqueSchema>;
 export declare const AdversarialVulnerabilitySchema: z.ZodObject<{
     claim: z.ZodDefault<z.ZodString>;
     attackVector: z.ZodDefault<z.ZodString>;
-    severity: z.ZodDefault<z.ZodEnum<{
-        critical: "critical";
-        major: "major";
-        minor: "minor";
-    }>>;
+    severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>>;
     counterEvidence: z.ZodDefault<z.ZodString>;
-    verdict: z.ZodDefault<z.ZodEnum<{
-        likely_wrong: "likely_wrong";
-        possibly_wrong: "possibly_wrong";
-        weak_support: "weak_support";
-        acceptable: "acceptable";
-    }>>;
+    verdict: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+        [x: string]: string;
+    }>>>;
 }, z.core.$strip>;
 export declare const AdversarialSchema: z.ZodObject<{
     vulnerabilities: z.ZodDefault<z.ZodArray<z.ZodObject<{
         claim: z.ZodDefault<z.ZodString>;
         attackVector: z.ZodDefault<z.ZodString>;
-        severity: z.ZodDefault<z.ZodEnum<{
-            critical: "critical";
-            major: "major";
-            minor: "minor";
-        }>>;
+        severity: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+            [x: string]: string;
+        }>>>;
         counterEvidence: z.ZodDefault<z.ZodString>;
-        verdict: z.ZodDefault<z.ZodEnum<{
-            likely_wrong: "likely_wrong";
-            possibly_wrong: "possibly_wrong";
-            weak_support: "weak_support";
-            acceptable: "acceptable";
-        }>>;
+        verdict: z.ZodDefault<z.ZodPreprocess<z.ZodEnum<{
+            [x: string]: string;
+        }>>>;
     }, z.core.$strip>>>;
     weakestArgument: z.ZodDefault<z.ZodString>;
     alternativeConclusion: z.ZodDefault<z.ZodString>;

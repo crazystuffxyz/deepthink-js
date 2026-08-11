@@ -969,7 +969,13 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
         const expertCritic = critics.find((c) => c.agent === 'domainExpert');
         if (expertCritic?.overallAssessment)
             log({ level: 'info', msg: `[CRITIQUE LOOP ${loop}] Expert assessment: ${expertCritic.overallAssessment}`, source: 'researchAgent', ts: Date.now() });
-        critiqueHistory.push({ loop, issueCount: allIssues.length, issueScore, criticalCount, expertAssessment: expertCritic?.overallAssessment });
+        // persist the issues themselves (compact) so the meta file is a real
+        // diagnostic — counts alone can't tell us WHAT the critics flagged
+        critiqueHistory.push({
+            loop, issueCount: allIssues.length, issueScore, criticalCount,
+            expertAssessment: expertCritic?.overallAssessment,
+            issues: allIssues.map((i) => ({ agent: i.agent, severity: i.severity, type: i.type, description: String(i.description || i.attackVector || '').slice(0, 140) })),
+        });
         if (issueScore < bestScore) {
             bestScore = issueScore;
             bestReport = currentReport;

@@ -454,5 +454,17 @@ function check(name, cond, detail = '') {
   check('DCF message names EPS when missing', m.section.includes('need EPS from sources'), m.section.slice(0, 300));
 }
 
+// ---- run-20: partial model (ok=false, growth missing) must still align
+// the computed values — the report drifted to "$217.36" against the
+// engine's "$217.55" because the sweep was gated on ok ----
+{
+  const partial = { ok: false, price: 217.55, eps: 6.53, beta: 2.23, sigma: 0.401, costOfEquity: 0.16465, intrinsicValue: null, expectedPrice: 256.49, expectedLogReturn: 0.0841, expectedReturn: 0.1645, sharpe: 0.31, var95_1d: 9.05, var99_1d: 12.8, var95_1y: 143.65 };
+  const rep = quantConformanceRepair('At a price of $217.36 on August 10, 2026, the stock looks cheap. The Beta is 2.23. Sharpe of 0.30.', partial);
+  check('partial model aligns price', rep.includes('$217.55'), rep);
+  check('partial model keeps cited beta', rep.includes('2.23'), rep);
+  check('partial model aligns Sharpe', rep.includes('0.31'), rep);
+  check('partial model leaves null IV alone', !rep.includes('intrinsic value'), rep);
+}
+
 console.log(`\nquantEngine: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

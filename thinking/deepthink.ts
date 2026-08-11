@@ -275,6 +275,31 @@ function looksComputational(inputText: string): boolean {
   );
 }
 
+/** cheap difficulty router: long + proof/quantifier language + math
+ *  vocabulary + depth → hard. drives probe escalation + budget forcing. */
+function estimateDifficulty(inputText: string, depth: number): boolean {
+  let score = 0;
+  if (inputText.length > 500) score++;
+  if (/prove|show that|find all|for all n|for every|determine all|is it possible|must be/i.test(inputText)) score++;
+  if (/integer|prime|modulo|mod |divisib|permutation|combinator|probability|expected|sequence|polynomial|triangle|circle|convex/i.test(inputText)) score++;
+  if (depth >= 3) score++;
+  return score >= 2;
+}
+
+/** probe dumps are verbose LaTeX — the final call only needs the reasoning
+ *  flavor + every probe's ANSWER line (which sits at the block tail). cut
+ *  each block to head+tail so the re-sent thinkCtx shrinks ~3x without
+ *  losing the votes. */
+function compressProbeDump(s: string): string {
+  if (!s || s.length <= 1500) return s;
+  const blocks = s.split(/\n(?=[A-Z]+:\n)/);
+  if (blocks.length <= 1) return s.slice(0, 700) + '\n[...]\n' + s.slice(-700);
+  return blocks.map((b) => {
+    if (b.length <= 700) return b;
+    return b.slice(0, 300) + '\n[...]\n' + b.slice(-300);
+  }).join('\n');
+}
+
 /** pull the answer value out of a formatted response: the "ANSWER: X" line,
  *  or [X] on the last line, else the whole trimmed text. */
 function extractAnswerValue(text: string): string {
@@ -619,11 +644,18 @@ export class Deepthink extends EventEmitter {
   async runChecks(input: unknown, response: string, checksCount: number, opts: DeepthinkOptions = {}, groundTruth: { value: unknown; sandboxValidated?: boolean } | null = null, sandboxPrefix: ChatMessage[] = []): Promise<CheckResult[]> {
     const inputText = messagesToText(input);
     const gtVal = groundTruth?.sandboxValidated ? String(groundTruth.value).trim() : null;
-    // checkStyle: 'full' = checker audits the whole draft; 'blind' = checker
-    // sees ONLY the claimed answer and must re-derive it (verifier-blind —
-    // tests whether seeing the reasoning biases the audit).
-    const blind = opts.checkStyle === 'blind';
-    const claimed = blind ? (response.match(/\[([^\]]+)\]\s*$/)?.[1] || response.trim().slice(-160)) : null;
+    // checkStyle: 'full' = checker audits the whole draft; 'blind' (DEFAULT)
+    // = checker sees ONLY the claimed answer and must re-derive it
+    // (verifier-blind — fresh-context verifier subagents outperform
+    // self-critique per Anthropic's documented recipe).
+    const blind = opts.checkStyle !== 'full';
+    const claimed = blind ? (() => {
+      const m = response.match(/ANSWER\s*:\s*([^\n]+)/i);
+      if (m) return m[1].trim();
+      const b = response.match(/\[([^\]]+)\]\s*$/m);
+      if (b) return b[1].trim();
+      return response.trim().slice(-160);
+    })() : null;
     const personas = [{
       label: 'Standard',
       system: gtVal
@@ -653,14 +685,25 @@ export class Deepthink extends EventEmitter {
         : blind
           ? `You are a Backward Verifier. You see ONLY the claimed answer. Reconstruct the problem that would produce this answer, then compare against the actual input. If the claimed answer implies a different problem than the one asked, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
           : `You are a Backward Verifier. Reconstruct the original problem from the response, then diff it against the actual input. Flag every constraint the response misread, missed, or added, and every edge case ignored. If the response solved a different problem than the one asked, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}`
-    }].slice(0, Math.min(checksCount, 4));
+    }];
+    // step-level (process) verification for hard problems — PRM800K: process
+    // supervision beats outcome supervision (78.2 vs 72.4). needs the FULL
+    // solution, not the blind claimed answer, so it gets its own display.
+    if ((opts.depth ?? 0) >= 3) {
+      personas.push({
+        label: 'StepLevel',
+        full: true,
+        system: 'You are a Step-Level Verifier. Below is a solution broken into numbered steps. For EACH step, judge whether it is correct (sound math, no logical leaps, no misread constraints). A single wrong step invalidates the whole solution. Output ONLY valid JSON: {"step_scores":[0.0,1.0,...],"verdict":"YES/NO","reason":"..."}'
+      });
+    }
+    const personasFinal = personas.slice(0, Math.min(checksCount, 4));
 
     const shown = claimed ? `<claimed answer>\n${claimed}\n</claimed answer>` : response;
 
-    const results = await Promise.allSettled(personas.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${shown}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify', _phase: 'checks', _depth: 3 })));
+    const results = await Promise.allSettled(personasFinal.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${p.full ? response : shown}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify', _phase: 'checks', _depth: 3, options: { ...(opts.options || {}), num_predict: 150 } })));
 
     return results.map((r, i) => {
-      const p = personas[i];
+      const p = personasFinal[i];
       if (r.status === 'rejected') {
         return { correct: false, feedback: `Checker (${p.label}): ${(r.reason as Error)?.message}` };
       }
@@ -868,6 +911,8 @@ export class Deepthink extends EventEmitter {
       }
     }
     let thinkCtxMsg: ChatMessage | null = null;
+    let probeConsensus: string | null = null;
+    let probeAgreement = 0;
     if (depth > 0) {
       // the trained prompt ALSO rides into the probes themselves: they are
       // the deep-think engine, and the evolved techniques (poincare-incubate,
@@ -875,11 +920,26 @@ export class Deepthink extends EventEmitter {
       // should make. probe framing lives in think.ts via opts.evolvedGuide.
       const thinkOpts = { ...mergedOpts, _phase: 'think', _depth: 2 };
       if (evolvedGuide) thinkOpts.evolvedGuide = evolvedGuide;
+      // conditional probes: code when computational, constraint/analogy when
+      // hard — the difficulty router also drives budget forcing below.
+      // code probe only at depth 3: at depth 2 the sandbox path already
+      // computes the answer for real, so a "what would the code output"
+      // guess probe is redundant (and its text is the longest in the dump).
+      thinkOpts.codeProbe = looksComputational(inputText) && (depth >= 3);
+      thinkOpts.hard = estimateDifficulty(inputText, depth);
       const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, thinkOpts);
+      probeConsensus = thinkResults.consensus ?? null;
+      probeAgreement = thinkResults.agreement ?? 0;
       if (brain) brain.add('think_stages', Object.keys(thinkResults).join(', '), 6);
       let thinkCtx = 'BACKGROUND THINKING PROCESS (do not repeat this in your answer):\n';
       for (const [k, v] of Object.entries(thinkResults)) {
-        if (v && typeof v === 'string') thinkCtx += `\n[${k.toUpperCase()}]\n${v}\n`;
+        if (v && typeof v === 'string') thinkCtx += `\n[${k.toUpperCase()}]\n${compressProbeDump(v)}\n`;
+      }
+      // probe consensus: N independent passes landed on the same value —
+      // the strongest self-consistency signal the pipeline has. the final
+      // call must treat it as the leading candidate, not ignore it.
+      if (probeConsensus) {
+        thinkCtx += `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of independent probes arrived at [${probeConsensus}]. Treat this as the leading candidate — verify it, do not ignore it.\n`;
       }
       if (brain) {
         await this.consolidateBrainMemory(brain, mergedOpts);
@@ -947,6 +1007,15 @@ export class Deepthink extends EventEmitter {
     const fmtDirective = buildFormatDirective(mergedOpts, type);
     if (fmtDirective) finalMessages = insertSystemPrompt(finalMessages, fmtDirective);
     const preFinal = consolidateSystemMessages(finalMessages);
+    // budget forcing (s1 recipe): hard problems get "Wait. Let me reconsider
+    // this step by step." appended — forces re-examination before the final
+    // answer. never applied to easy problems (tiny budgets beat full thinking
+    // on shallow tasks).
+    const hard = estimateDifficulty(inputText, depth);
+    if (hard) {
+      const lastUser = [...preFinal].reverse().find(m => m.role === 'user');
+      if (lastUser) lastUser.content += '\n\nWait. Let me reconsider this step by step.';
+    }
     const isStream = typeof onChunk === 'function';
     const finalSamplingProfile = mergedOpts.samplingProfile || (type !== 'string' ? 'verify' : 'creative');
     let result = await this.callChat([...sandboxPrefix, ...preFinal], isStream, onChunk, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'final', _depth: 2 });
@@ -969,6 +1038,9 @@ export class Deepthink extends EventEmitter {
       let prevVerdicts = '';
       let stallIter = 0;
       let bestPassed = 0;
+      // commitment boundary: the answer value of the first draft — if a
+      // revision produces the same value, the answer has stabilized.
+      let prevAnswer = normAnswer(extractAnswerValue(rawText));
       for (let iter = 0; iter < maxIter; iter++) {
         const checkResults = await this.runChecks(input, rawText, checks, mergedOpts, gt, sandboxPrefix);
         const passed = checkResults.filter(r => r.correct).length;
@@ -1005,12 +1077,23 @@ export class Deepthink extends EventEmitter {
         const lastIsFeedback = convo.at(-1)?.role === 'user' && convo.at(-1)!.content.includes('checker(s) found issues');
         convo = lastIsFeedback ? [...convo.slice(0, -1), { role: 'user', content: feedback }] : [...convo, { role: 'user', content: feedback }];
         const isLast = iter === maxIter - 1;
-        result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream && isLast, isStream && isLast ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3 });
+        result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream && isLast, isStream && isLast ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: 400 } });
         rawText = stripThinkBlocks(result.content || '');
         if (codeExec?.sandboxValidated) {
           const gtv = String(codeExec.result).trim();
           if (gtv && !rawText.includes(gtv)) rawText += `\n\n**Verified Answer: ${gtv}**`;
         }
+        // commitment-boundary escape: the answer value stopped changing
+        // across revisions — it has stabilized, more revising just churns
+        // tokens (research: answers stabilize mid-trace; stopping once the
+        // value is unchanged cuts CoT up to 55% with negligible loss).
+        const curAnswer = normAnswer(extractAnswerValue(rawText));
+        if (curAnswer && curAnswer === prevAnswer) {
+          this.emit('log', { level: 'warn', msg: `[CHECK LOOP] answer stabilized at [${curAnswer}] — commitment boundary reached, stopping.`, source: 'checks', ts: Date.now() });
+          rawText = monitor.interrupt(rawText);
+          break;
+        }
+        prevAnswer = curAnswer;
         convo = [...convo, { role: 'assistant', content: rawText }];
       }
       // final self-consistency: one independent blind re-derivation of the
@@ -1018,22 +1101,24 @@ export class Deepthink extends EventEmitter {
       // reasoning; a fresh sample from the ORIGINAL input only catches
       // "confident but wrong" answers the checkers rubber-stamp. on
       // mismatch, reconcile once and re-check. skipped when the sandbox
-      // already machine-verified the answer (machine > model sample).
-      if (mergedOpts.finalConsistency !== false && !codeExec?.sandboxValidated) {
+      // already machine-verified the answer (machine > model sample) or
+      // when the probes already agreed (agreement IS the consistency
+      // signal — a second sample adds nothing).
+      if (mergedOpts.finalConsistency !== false && !codeExec?.sandboxValidated && !probeConsensus) {
         const fmtDir = buildFormatDirective(mergedOpts, type);
         const mine = extractAnswerValue(rawText);
         if (fmtDir && mine && mine.length <= 60) {
           try {
             const indep = await this.callChat(
               [{ role: 'system', content: `Solve the problem independently from scratch. Do not assume any prior work exists. ${fmtDir}` }, { role: 'user', content: inputText }],
-              false, null, { ...mergedOpts, think: true, samplingProfile: 'verify', _phase: 'consistency', _depth: 2 }
+              false, null, { ...mergedOpts, think: true, samplingProfile: 'verify', _phase: 'consistency', _depth: 2, options: { ...(mergedOpts.options || {}), num_predict: 300 } }
             );
             const theirs = extractAnswerValue(stripThinkBlocks(indep.content || ''));
             if (theirs && normAnswer(theirs) !== normAnswer(mine)) {
               this.emit('log', { level: 'warn', msg: `[SELF-CONSISTENCY] independent re-derivation [${theirs}] ≠ pipeline [${mine}] — reconciling`, source: 'checks', ts: Date.now() });
               const reconcileMsg = `An independent re-derivation of the problem produced the answer [${theirs}], but your answer is [${mine}]. At most one is right. Re-derive carefully, find the error, and give the final answer.`;
               convo = [...convo, { role: 'user', content: reconcileMsg }];
-              result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream, isStream ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3 });
+              result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream, isStream ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: 400 } });
               rawText = stripThinkBlocks(result.content || '');
               const recheck = await this.runChecks(input, rawText, checks, mergedOpts, gt, sandboxPrefix);
               const passed2 = recheck.filter(r => r.correct).length;

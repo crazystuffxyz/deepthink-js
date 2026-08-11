@@ -1,175 +1,115 @@
 // thinking/think.ts
-// parallel-probe internal reasoning. instead of a sequential chain where
-// every call sees the previous call's output (which invalidates the KV
-// cache each step and serializes wall time), we fire N independent probes
-// at the same problem with an IDENTICAL system+user prefix — Ollama caches
-// that prefix once, so all probes share one prompt-eval — then ONE
-// synthesis call recombines them into the final thinking doc.
+// parallel-probe internal reasoning. N independent ANSWER-PRODUCING probes
+// on an identical prefix (KV cache shared — one prompt-eval), then selection:
+// majority vote when ≥2 probes agree (skip synthesis), synthesis fallback
+// when they disagree. every probe ends with "ANSWER: " so the wave yields
+// N candidate answers — the self-consistency signal (Wang et al. 2022).
 //
-// research basis: on equal token budgets, independent sampling (parallel
-// probes) scales better than dependent sampling (sequential chain); and
-// cache-friendly prompts cut input cost ~5x and wall time dramatically.
+// research basis: on equal token budgets, independent sampling scales better
+// than dependent sampling; verifier-guided search + self-consistency decoding
+// is the frontier recipe (o1/o3, GPT-5.6 Sol consensus ladder); the probe
+// techniques are the high-IQ moves that measurably move hard reasoning —
+// chunking/working-memory offloading (Miller/Cowan), invariants (Engel),
+// instantiation/pattern-mining (Ramanujan), System-2 disconfirmation
+// (Kahneman & Klein), backward verification (RCoT), constraint relaxation
+// (Duncker), analogical transfer (Gick & Holyoak).
 //
-// probe set (v2, 2026-08): added the techniques that measurably move hard
-// reasoning — explicit heuristic strategy selection (Engel/Tao taxonomy),
-// backward verification (RCoT: reconstruct the problem from the solution and
-// diff against the original — catches misread constraints), and a structured
-// scratchpad with explicit state (known facts / current state / goal /
-// constraints). the synthesis pass now scores each probe for soundness and
-// weights the final doc toward the sound passes (verifier-weighted voting).
+// bodies are deliberately COMPACT: gemma writes verbose LaTeX and burns the
+// whole output budget on long instructions — a 1-2 line nudge per technique
+// is what actually lets it finish with the ANSWER line (tested).
 // probes are fire-and-forget internal reasoning: hard output cap keeps
 // gemma from writing an essay per probe (it ignores "be concise").
 // num_predict (ollama-native) — max_tokens is ignored by the ollama client.
-const PROBE_OPTS = { think: true, autoSystemPrompt: false, options: { num_predict: 300 } };
-const THINK_SYS = 'You are performing INTERNAL REASONING ONLY. Do NOT answer the prompt. ' +
-    'Do NOT produce any code or final deliverable. Be short and concise.';
-const STRATEGY_BODY = 'Name 3 candidate strategies from this taxonomy: invariants/monovariants, extremal principle, ' +
-    'working backwards, extreme/special cases, symmetry, pigeonhole, coloring/parity, reformulation, ' +
-    'induction, contradiction, case analysis, approximation-and-refine. ' +
-    'Pick the most promising one for THIS problem and outline how it applies. ' +
-    'If the problem is computational, name the algorithm class (DP, greedy, search, number theory, etc.).';
-const BACKWARD_BODY = 'BACKWARD VERIFICATION: reconstruct the original problem from the solution you derived, ' +
-    'then diff it against the actual problem statement. Identify every constraint you misread, ' +
-    'missed, or added. Check: did you answer the question that was actually asked? ' +
-    'Did you use every given condition? Are there edge cases (zero, negatives, boundaries) the solution ignores?';
-const SCRATCHPAD_BODY = 'Work through the problem using a structured scratchpad with explicit state:\n' +
-    'KNOWN FACTS: [every given condition, restated precisely]\n' +
-    'GOAL: [what must be found, exactly]\n' +
-    'CONSTRAINTS: [boundaries, domains, edge cases]\n' +
-    'STEPS: [numbered computation, showing the actual arithmetic]\n' +
-    'Then verify the result against every constraint.';
-const TRAP_BODY = 'TRAP DETECTION: what is the most likely WRONG answer a careless solver would give, and why is it wrong? ' +
-    'Identify the trap in this problem: misleading wording, tempting shortcut, common fallacy, ' +
-    'or an answer that is "close but off by one". Then state what the correct approach must avoid. ' +
-    'If the problem lists numbered choices, say which choice the trap points to and which is correct.';
-const RESTATE_BODY = 'RESTATE the problem in your own words. What exactly is being asked? What is NOT being asked? ' +
-    'List every given condition. Does the question use all of them, or is one a distractor? ' +
-    'Check for ambiguity: could the wording support a different reading? If so, which reading is intended?';
-// each probe: distinct lens on the same problem. same prefix, independent
-// sampling (temp 0.7 gives path diversity; the synthesis repairs gaps).
-const PROBES = {
+// 1000: gemma's reasoning length is stochastic (300-700 tokens on AIME) —
+// a 500 cap truncated the verbose samples before the ANSWER line, killing
+// the consensus vote. the wave is parallel, so the cap only bounds the
+// slowest probe, not the sum.
+const PROBE_OPTS = { think: true, autoSystemPrompt: false, options: { num_predict: 1000 } };
+const THINK_SYS = 'You are performing INTERNAL REASONING ONLY. Be short and concise.';
+// the answer contract: "at most 10 lines" + "mandatory" is the phrasing
+// that actually makes gemma finish with the ANSWER line (tested).
+const ANSWER_LINE = 'Keep the reasoning tight (at most 10 lines). Then end with the final answer on a line starting with "ANSWER: " — the ANSWER line is mandatory and must be the last line.';
+const SCRATCHPAD_BODY = 'Use a structured scratchpad: KNOWN FACTS, GOAL, CONSTRAINTS, STEPS. Keep at most 5 live quantities; ' +
+    'compress fully-verified sub-results into named chunks and refer to them by name. Verify the result against every constraint.';
+const COMPUTE_BODY = 'If computational (probability, counting, arithmetic, any numeric quantity): COMPUTE explicitly — ' +
+    'enumerate the sample space, set up equations, evaluate with real numbers. No symmetry/intuition ' +
+    'shortcuts. If not computational, state the exact formula/procedure and apply it.';
+const STRATEGY_BODY = 'Name 3 candidate strategies (invariants, extremal principle, working backwards, special cases, symmetry, ' +
+    'pigeonhole, parity, reformulation, induction, contradiction, case analysis, generating functions, ' +
+    'inclusion-exclusion). Pick the best for THIS problem and EXECUTE it fully. If computational, name the ' +
+    'algorithm class (DP, greedy, search, number theory) and apply it.';
+const BACKWARD_BODY = 'Solve, then BACKWARD-VERIFY: reconstruct the problem from your solution and diff against the actual ' +
+    'statement. Flag misread/missed/added constraints and ignored edge cases (zero, negatives, boundaries). ' +
+    'Fix any error you find.';
+const INVARIANT_BODY = 'Search for an INVARIANT: a quantity preserved by every allowed operation (parity, sum, alternating sum, ' +
+    'product, mod residue, count of a color class, orientation). Evaluate at initial vs goal state — differing ' +
+    'values prove impossibility. Also try a MONOVARIANT (strictly monotone measure) to prove termination. Use it to solve.';
+const INSTANTIATE_BODY = 'Generate data first: instantiate the smallest concrete cases (n=1,2,3,4,5 or specific values), compute ' +
+    'each fully, pattern-mine (sequence, periodicity, recurrence, closed form, symmetry). State a labeled ' +
+    'conjecture, verify against ALL cases plus one new case, then prove it.';
+const SYSTEM2_BODY = 'Two passes. PASS 1: immediate answer labeled HYPOTHESIS with confidence %. PASS 2: assume it is wrong — ' +
+    'build the strongest refutation (edge case, reasoning error). Re-derive load-bearing steps slowly. ' +
+    'Deliver the survivor with the refutation documented.';
+const CODE_BODY = 'Write a Python script that computes the answer (sympy/fractions for exact arithmetic), one step per line, ' +
+    'printing the final answer as its last line. Do NOT compute it yourself. Then reason about what it would ' +
+    'output and give the final answer.';
+const CONSTRAINT_BODY = 'Question your constraints: list every one, mark GIVEN vs ASSUMED. RELAX one ASSUMED constraint and solve ' +
+    'the relaxed problem (often dramatically easier, reveals the mechanism). Re-impose: does the solution ' +
+    'adapt? Also try ADDING structure. Use the insight to solve.';
+const ANALOGY_BODY = 'Find an analog from a DIFFERENT domain (physics, games, programming, everyday life) with the same ' +
+    'STRUCTURE. Build an explicit mapping table; discard if any relation breaks. Translate the solution back, ' +
+    'verify against constraints, extract the ABSTRACT SCHEMA, use it to solve.';
+// base roster by depth: easy 3, medium 5, hard 7. all answer-producing.
+const BASE = {
     1: [
-        {
-            tag: 'analysis',
-            body: 'Perform rigorous mathematical and logical decomposition. Decompose the request into primitive logical units. ' +
-                'Isolate all explicit and implicit variables, state boundary conditions, and define constraints using extreme-case analysis. ' +
-                'Proactively identify potential off-by-one errors and domain-boundary violations.',
-            fmt: 'ANALYSIS:\n[3-6 bullet points max, no prose preamble]'
-        },
-        {
-            tag: 'strategy',
-            body: STRATEGY_BODY,
-            fmt: 'STRATEGY:\n1. [candidate strategy]\n2. [candidate strategy]\n3. [candidate strategy]\nPICK: [chosen strategy + why]'
-        },
-        {
-            tag: 'working',
-            body: SCRATCHPAD_BODY,
-            fmt: 'KNOWN FACTS:\nGOAL:\nCONSTRAINTS:\nSTEPS:\n1. [step]\n2. [step]'
-        }
+        { tag: 'scratchpad', body: SCRATCHPAD_BODY },
+        { tag: 'compute', body: COMPUTE_BODY },
+        { tag: 'strategy', body: STRATEGY_BODY }
     ],
     2: [
-        {
-            tag: 'analysis',
-            body: 'Perform rigorous mathematical and logical decomposition. Decompose the request into primitive logical units. ' +
-                'Isolate all explicit and implicit variables, state boundary conditions, and define constraints using extreme-case analysis. ' +
-                'Proactively identify potential off-by-one errors and domain-boundary violations.',
-            fmt: 'ANALYSIS:\n[3-6 bullet points max, no prose preamble]'
-        },
-        {
-            tag: 'strategy',
-            body: STRATEGY_BODY,
-            fmt: 'STRATEGY:\n1. [candidate strategy]\n2. [candidate strategy]\n3. [candidate strategy]\nPICK: [chosen strategy + why]'
-        },
-        {
-            tag: 'working',
-            body: SCRATCHPAD_BODY,
-            fmt: 'KNOWN FACTS:\nGOAL:\nCONSTRAINTS:\nSTEPS:\n1. [step]\n   - [sub-detail]\n2. [step]'
-        },
-        {
-            tag: 'backward',
-            body: BACKWARD_BODY,
-            fmt: 'RECONSTRUCTED PROBLEM:\n[restate the problem as the solution implies it]\nDIFF:\n- [constraint misread/missed/added]\n- [edge case ignored]'
-        },
-        {
-            tag: 'trap',
-            body: TRAP_BODY,
-            fmt: 'TRAP:\n[the wrong answer a careless solver gives]\nWHY WRONG:\n[the fallacy]\nAVOID:\n[what the correct approach must not do]'
-        },
-        {
-            tag: 'compute',
-            body: 'If this problem involves probability, expected value, counting, or arithmetic: COMPUTE the answer explicitly. ' +
-                'Enumerate the sample space, set up the equations, and evaluate them with actual numbers. ' +
-                'Do NOT rely on symmetry, intuition, or qualitative reasoning — write out the real computation. ' +
-                'If the problem is not computational, state the exact formula or procedure that would produce the answer.',
-            fmt: 'COMPUTE:\n[explicit enumeration/equations with actual numbers]\nRESULT: [the computed value]'
-        },
-        {
-            tag: 'structure',
-            body: 'Define the structure of the final response in exactly 5 numbered steps.',
-            fmt: '**Response Structure:**\n1. [step]\n2. [step]\n3. [step]\n4. [step]\n5. [step]'
-        }
+        { tag: 'scratchpad', body: SCRATCHPAD_BODY },
+        { tag: 'compute', body: COMPUTE_BODY },
+        { tag: 'strategy', body: STRATEGY_BODY },
+        { tag: 'backward', body: BACKWARD_BODY },
+        { tag: 'invariant', body: INVARIANT_BODY }
     ],
     3: [
-        {
-            tag: 'analysis',
-            body: 'Perform rigorous mathematical and logical decomposition. Decompose the request into primitive logical units. ' +
-                'Isolate all explicit and implicit variables, state boundary conditions, and define constraints using extreme-case analysis. ' +
-                'Proactively identify potential off-by-one errors and domain-boundary violations.',
-            fmt: 'ANALYSIS:\n[3-6 bullet points max, no prose preamble]'
-        },
-        {
-            tag: 'strategy',
-            body: STRATEGY_BODY,
-            fmt: 'STRATEGY:\n1. [candidate strategy]\n2. [candidate strategy]\n3. [candidate strategy]\nPICK: [chosen strategy + why]'
-        },
-        {
-            tag: 'working',
-            body: SCRATCHPAD_BODY,
-            fmt: 'KNOWN FACTS:\nGOAL:\nCONSTRAINTS:\nSTEPS:\n1. [step]\n   - [sub-detail]\n2. [step]'
-        },
-        {
-            tag: 'backward',
-            body: BACKWARD_BODY,
-            fmt: 'RECONSTRUCTED PROBLEM:\n[restate the problem as the solution implies it]\nDIFF:\n- [constraint misread/missed/added]\n- [edge case ignored]'
-        },
-        {
-            tag: 'sanity',
-            body: 'Perform a rigorous, adversarial audit. Actively attempt to falsify the working: search for sign errors, ' +
-                'division-by-zero vulnerabilities, boundary-condition leaks, and logical non-sequiturs. ' +
-                'Do not restate assumptions — attack the calculations.',
-            fmt: 'SANITY CHECK:\n[findings — max 6 bullet points]'
-        },
-        {
-            tag: 'trap',
-            body: TRAP_BODY,
-            fmt: 'TRAP:\n[the wrong answer a careless solver gives]\nWHY WRONG:\n[the fallacy]\nAVOID:\n[what the correct approach must not do]'
-        },
-        {
-            tag: 'restate',
-            body: RESTATE_BODY,
-            fmt: 'RESTATED:\n[the problem in your own words]\nNOT ASKED:\n[what is not being asked]\nCONDITIONS:\n[every given condition, one per line]'
-        },
-        {
-            tag: 'alternative',
-            body: 'Propose an alternative method — a different algorithmic approach, different framing, or different structure.',
-            fmt: 'ALTERNATIVE:\n[max 100 words]'
-        },
-        {
-            tag: 'compute',
-            body: 'If this problem involves probability, expected value, counting, or arithmetic: COMPUTE the answer explicitly. ' +
-                'Enumerate the sample space, set up the equations, and evaluate them with actual numbers. ' +
-                'Do NOT rely on symmetry, intuition, or qualitative reasoning — write out the real computation. ' +
-                'If the problem is not computational, state the exact formula or procedure that would produce the answer.',
-            fmt: 'COMPUTE:\n[explicit enumeration/equations with actual numbers]\nRESULT: [the computed value]'
-        }
+        { tag: 'scratchpad', body: SCRATCHPAD_BODY },
+        { tag: 'compute', body: COMPUTE_BODY },
+        { tag: 'strategy', body: STRATEGY_BODY },
+        { tag: 'backward', body: BACKWARD_BODY },
+        { tag: 'invariant', body: INVARIANT_BODY },
+        { tag: 'instantiate', body: INSTANTIATE_BODY },
+        { tag: 'system2', body: SYSTEM2_BODY }
     ]
 };
-const SYNTH_SYS = 'You are the internal reasoning coordinator. Below are independent analyses of the same problem, ' +
-    'each produced by a separate reasoning pass. Consolidate them into ONE coherent reasoning document.\n\n' +
+// conditional probes — the caller adds them via flags (code when the input
+// is computational, constraint/analogy when it is hard).
+const EXTRA = {
+    code: { tag: 'code', body: CODE_BODY },
+    constraint: { tag: 'constraint', body: CONSTRAINT_BODY },
+    analogy: { tag: 'analogy', body: ANALOGY_BODY }
+};
+const SYNTH_SYS = 'You are the internal reasoning coordinator. Below are independent solution attempts of the same ' +
+    'problem, each produced by a separate reasoning pass. Consolidate them into ONE coherent reasoning ' +
+    'document.\n\n' +
     'SCORING: for each pass, judge whether its reasoning is sound (correct math, no misread constraints, ' +
     'no logical leaps). Base the final document on the SOUND passes. Explicitly flag or discard unsound ones ' +
-    'and say why. If passes disagree on a number, recompute the disputed step yourself and keep the correct value.\n\n' +
-    'Be concise — no preamble, no repetition of what the passes already agree on.';
+    'and say why. If passes disagree on a number, recompute the disputed step yourself and keep the correct ' +
+    'value. State which pass you are trusting and why.\n\n' +
+    'Be concise — no preamble, no repetition of what the passes already agree on. ' +
+    ANSWER_LINE;
+/** pull the ANSWER: line out of a probe response */
+function extractAnswer(text) {
+    if (!text)
+        return null;
+    const m = text.match(/ANSWER\s*:\s*([^\n]+)/i);
+    return m ? m[1].trim() : null;
+}
+/** loose equality for answer grouping: case, whitespace, trailing period */
+function normAnswer(s) {
+    return String(s).trim().toLowerCase().replace(/[.\s]+$/g, '').replace(/\s+/g, ' ');
+}
 async function probe(callChat, systemContent, userContent, opts) {
     const r = await callChat([
         { role: 'system', content: systemContent },
@@ -177,7 +117,7 @@ async function probe(callChat, systemContent, userContent, opts) {
     ], false, null, {
         ...opts,
         ...PROBE_OPTS,
-        // PROBE_OPTS sets the DEFAULT cap (300); a caller (the synthesis
+        // PROBE_OPTS sets the DEFAULT cap (500); a caller (the synthesis
         // pass) may override with its own num_predict. merge caller-last.
         options: { ...PROBE_OPTS.options, ...(opts.options || {}) }
     });
@@ -191,32 +131,101 @@ export async function runThink(callChat, inputText, depth, opts) {
     if (depth <= 0)
         return results;
     const level = Math.min(Math.max(depth, 1), 3);
-    const probesDef = PROBES[level];
+    // evolved guidance rides into the probes: the trained techniques are
+    // reasoning moves, exactly what a probe should try. it's system-content,
+    // so the KV-cache sharing across probes is preserved.
+    const guide = opts.evolvedGuide || '';
+    const probeSys = (p) => `${THINK_SYS}\n${p.body}\n\n${ANSWER_LINE}` + (guide ? `\n\nAlso apply these techniques to your reasoning:\n${guide}` : '');
+    // conditional probes: code when computational, constraint when hard,
+    // analogy when hard AND not computational (novel-reasoning problems).
+    const roster = [...BASE[level]];
+    if (opts.codeProbe)
+        roster.push(EXTRA.code);
+    if (opts.hard)
+        roster.push(EXTRA.constraint);
+    if (opts.hard && !opts.codeProbe)
+        roster.push(EXTRA.analogy);
     // wave 1: all probes in parallel — identical prefix, KV cache shared.
     // temp 0.7 for path diversity; independent draws, not a chain.
     const probeOpts = {
         ...opts,
         options: { ...(opts.options || {}), temperature: 0.7 }
     };
-    // evolved guidance rides into the probes: the trained techniques are
-    // reasoning moves, exactly what a probe should try. it's system-content,
-    // so the KV-cache sharing across probes is preserved.
-    const guide = opts.evolvedGuide || '';
-    const probeSys = (p) => `${THINK_SYS}\n${p.body}\nOutput format:\n${p.fmt}` + (guide ? `\n\nAlso apply these techniques to your reasoning:\n${guide}` : '');
-    const settled = await Promise.allSettled(probesDef.map((p) => probe(callChat, probeSys(p), inputText, probeOpts)));
-    const chunks = [];
-    settled.forEach((r, i) => {
-        if (r.status === 'fulfilled' && r.value) {
-            chunks.push(`${probesDef[i].tag.toUpperCase()}:\n${r.value}`);
+    const runWave = async (defs) => {
+        const settled = await Promise.allSettled(defs.map((p) => probe(callChat, probeSys(p), inputText, probeOpts)));
+        const out = [];
+        settled.forEach((r, i) => {
+            if (r.status === 'fulfilled' && r.value)
+                out.push({ tag: defs[i].tag, text: r.value });
+        });
+        return out;
+    };
+    let wave = await runWave(roster);
+    // depth-1 escalation: the easy probes disagree → add the depth-2 extras
+    // (backward, invariant) and re-select. cheap second wave, same cache.
+    if (level === 1) {
+        const extras = BASE[2].filter((p) => !roster.some((q) => q.tag === p.tag));
+        if (extras.length) {
+            const more = await runWave(extras);
+            wave = [...wave, ...more];
         }
-    });
+    }
+    const answers = wave.map((w) => ({ tag: w.tag, answer: extractAnswer(w.text) }));
+    const groups = new Map();
+    for (const a of answers) {
+        if (!a.answer)
+            continue;
+        const k = normAnswer(a.answer);
+        groups.set(k, (groups.get(k) || 0) + 1);
+    }
+    let consensus = null;
+    let agreement = 0;
+    if (groups.size) {
+        let best = '';
+        let bestN = 0;
+        for (const [k, n] of groups)
+            if (n > bestN) {
+                bestN = n;
+                best = k;
+            }
+        if (bestN >= 2) {
+            consensus = best;
+            agreement = bestN / answers.length;
+        }
+    }
+    const chunks = wave.map((w) => `${w.tag.toUpperCase()}:\n${w.text}`);
     if (!chunks.length)
         return results; // every probe died — degrade to no think ctx
-    // wave 2: one synthesis pass recombines the probes (the only sequential
-    // step). lower temp for fidelity; bigger cap since it carries the whole doc.
-    const synth = await probe(callChat, SYNTH_SYS, `Problem:\n${inputText}\n\nIndependent passes:\n\n${chunks.join('\n\n')}\n\nCONSOLIDATED:`, { ...opts, options: { ...(opts.options || {}), temperature: 0.3, num_predict: 600 } });
-    if (synth)
-        chunks.push(`CONSOLIDATED:\n${synth}`);
+    // wave 2: synthesis ONLY when probes disagree (hard case). lower temp for
+    // fidelity; bigger cap since it carries the whole doc.
+    if (!consensus) {
+        const synth = await probe(callChat, SYNTH_SYS, `Problem:\n${inputText}\n\nIndependent passes:\n\n${chunks.join('\n\n')}\n\nCONSOLIDATED:`, { ...opts, options: { ...(opts.options || {}), temperature: 0.3, num_predict: 600 } });
+        if (synth) {
+            chunks.push(`CONSOLIDATED:\n${synth}`);
+            const sAns = extractAnswer(synth);
+            if (sAns) {
+                answers.push({ tag: 'synthesis', answer: sAns });
+                // the synthesis answer votes too — if it lands on a probe's value,
+                // that pair is now a consensus.
+                const k = normAnswer(sAns);
+                groups.set(k, (groups.get(k) || 0) + 1);
+                let best = '';
+                let bestN = 0;
+                for (const [kk, n] of groups)
+                    if (n > bestN) {
+                        bestN = n;
+                        best = kk;
+                    }
+                if (bestN >= 2) {
+                    consensus = best;
+                    agreement = bestN / answers.length;
+                }
+            }
+        }
+    }
     results.analysis = chunks.join('\n\n');
+    results.answers = answers;
+    results.consensus = consensus;
+    results.agreement = agreement;
     return results;
 }

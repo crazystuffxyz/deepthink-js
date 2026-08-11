@@ -1357,7 +1357,11 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
         let quantModel = null;
         if (opts.mode === 'stock') {
             const preRecovery = verifiedNodes.length;
-            quantModel = runQuantModel(verifiedNodes.map((n) => n.claim));
+            // v1.8.17: pass the raw summaries too — the LLM claims extraction is
+            // lossy (run 21: Wikipedia's "diluted earnings per share of $1.76"
+            // never made it into a verified claim), so the engine harvests from
+            // the claims first and falls back to the source text.
+            quantModel = runQuantModel(verifiedNodes.map((n) => n.claim), verifiedNodes.map((n) => n.citedSummary ?? ''));
             // missing inputs = no math: one targeted quote crawl per missing
             // field (price, EPS, beta, growth) before giving up
             const missing = ['price', 'eps', 'beta', 'growth'].filter((k) => quantModel[k] == null);
@@ -1365,7 +1369,7 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
                 const extra = await recoverStockQuote(callChat, topic, opts, missing);
                 if (extra.length) {
                     verifiedNodes.push(...extra);
-                    quantModel = runQuantModel(verifiedNodes.map((n) => n.claim));
+                    quantModel = runQuantModel(verifiedNodes.map((n) => n.claim), verifiedNodes.map((n) => n.citedSummary ?? ''));
                     const still = ['price', 'eps', 'beta', 'growth'].filter((k) => quantModel[k] == null);
                     log({ level: still.length ? 'warn' : 'success', msg: `[QUANT] Recovery added ${extra.length} claims — still missing: ${still.join(', ') || 'none'}`, source: 'researchAgent', ts: Date.now() });
                 }

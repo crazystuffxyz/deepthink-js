@@ -207,8 +207,17 @@ function pct(m: RegExpMatchArray | null, group = 1): number | null {
   return isNaN(v) ? null : v / 100; // "42%" -> 0.42 decimal
 }
 
-export function runQuantModel(claims: string[]): QuantModel {
+export function runQuantModel(claims: string[], rawTexts: string[] = []): QuantModel {
+  // v1.8.17: the LLM claims-extraction step is lossy — run 21's Wikipedia
+  // summary said "diluted earnings per share of $1.76" but the extracted
+  // claims dropped the EPS fact, so the model reported EPS: NOT FOUND while
+  // the raw text had it. the raw summaries (citedSummary) now feed the
+  // harvest as a fallback layer: claims stay primary (verified + curated),
+  // raw fills the gaps the extraction dropped. consensus logic (mode/cluster)
+  // keeps a stale raw value from outvoting fresh claims.
   const text = claims.join('\n');
+  const raw = rawTexts.join('\n');
+  const harvestText = text + '\n' + raw;
 
   // ---- harvest inputs from the verified claims ----
   // windows cross digits ("closed Wednesday at $150.42", "EPS for Q3 FY2026
@@ -223,9 +232,18 @@ export function runQuantModel(claims: string[]): QuantModel {
   // outstanding" → $200.83/share. when the harvested price is off by
   // more than 2x from the implied one, the implied price wins; when no
   // quote was harvested at all, the implied price fills the slot.
-  const capM = text.match(/(?:market cap(?:italization)?|market value)[^0-9]{0,30}?\$?([\d,]+\.?\d*)\s*(trillion|billion|million|t|b|m)\b/i);
-  const sharesM = text.match(/([\d,]+\.?\d*)\s*(billion|million|b|m)\s+shares\s+outstanding/i)
-    ?? text.match(/(?:shares outstanding|shares issued)[^0-9]{0,30}?([\d,]+\.?\d*)\s*(billion|million|b|m)\b/i);
+  // implied price: claims-first, raw fallback. a raw-sourced cap/shares is
+  // likely stale (the extraction dropped it for a reason) — it may FILL a
+  // missing price but must never REJECT a quoted one (a 2023 "market cap of
+  // $1.2T" ÷ current shares → $49.6 implied → would kill the real $217.55).
+  const capRe = /(?:market cap(?:italization)?|market value)[^0-9]{0,30}?\$?([\d,]+\.?\d*)\s*(trillion|billion|million|t|b|m)\b/i;
+  const sharesRe1 = /([\d,]+\.?\d*)\s*(billion|million|b|m)\s+shares\s+outstanding/i;
+  const sharesRe2 = /(?:shares outstanding|shares issued)[^0-9]{0,30}?([\d,]+\.?\d*)\s*(billion|million|b|m)\b/i;
+  const capFromClaims = text.match(capRe);
+  const sharesFromClaims = text.match(sharesRe1) ?? text.match(sharesRe2);
+  const capM = capFromClaims ?? raw.match(capRe);
+  const sharesM = sharesFromClaims ?? raw.match(sharesRe1) ?? raw.match(sharesRe2);
+  const impliedFromClaims = !!(capFromClaims && sharesFromClaims);
   let impliedPrice: number | null = null;
   if (capM && sharesM) {
     const cap = parseFloat(capM[1].replace(/,/g, '')) * ({ trillion: 1e12, billion: 1e9, million: 1e6, t: 1e12, b: 1e9, m: 1e6 } as Record<string, number>)[capM[2].toLowerCase()];
@@ -233,12 +251,12 @@ export function runQuantModel(claims: string[]): QuantModel {
     if (cap > 0 && shares > 0) impliedPrice = cap / shares;
   }
   let price = clusterPick([
-    ...harvestAll(text, [
+    ...harvestAll(harvestText, [
       /(?:trading at|currently at|closed at|trades at|price is|price of|sits at|traded at|quoted at)\s*\$?([\d,]+\.?\d*)/i,
       /(?:trades|trading|closed|sits|quoted)\s+(?:\w+\s+){0,2}(?:around|near|about|for|at)\s*\$?([\d,]+\.?\d*)/i,
       /\$([\d,]+\.\d{2})\s*(?:USD|per share|US\$)/i,
     ], undefined, PRICE_BANNED_WORDS, MULTIPLE_RE),
-    ...scanPriceForwardAll(text),
+    ...scanPriceForwardAll(harvestText),
   ]);
   let priceSource = 'quoted price';
   // run 16: the $8.00 glitch struck again, but this time no shares-outstanding
@@ -255,19 +273,23 @@ export function runQuantModel(claims: string[]): QuantModel {
   // ??. every candidate is now validated before acceptance: lo < hi, high
   // under 10x low, and price-like (a decimal, or both under 1000 — years
   // are 4-digit integers).
-  const rangeCands = [
-    text.match(/(?:52[- ]?week|52week)[^0-9]{0,25}?\$?([\d,]+\.?\d*)[^0-9]{0,25}?\$?([\d,]+\.?\d*)/i),
-    text.match(/(?:traded|trading|swung|ranged|range)[^0-9]{0,15}?between[^0-9]{0,15}?\$?([\d,]+\.?\d*)[^0-9]{0,15}?(?:and|to)[^0-9]{0,15}?\$?([\d,]+\.?\d*)/i),
-    text.match(/(?:between|ranged from|range of|range is|range was|range for)[^0-9]{0,40}?\$?([\d,]+\.?\d*)[^0-9]{0,20}?(?:and|to)[^0-9]{0,20}?\$?([\d,]+\.?\d*)/i),
+  const rangeRe = [
+    /(?:52[- ]?week|52week)[^0-9]{0,25}?\$?([\d,]+\.?\d*)[^0-9]{0,25}?\$?([\d,]+\.?\d*)/i,
+    /(?:traded|trading|swung|ranged|range)[^0-9]{0,15}?between[^0-9]{0,15}?\$?([\d,]+\.?\d*)[^0-9]{0,15}?(?:and|to)[^0-9]{0,15}?\$?([\d,]+\.?\d*)/i,
+    /(?:between|ranged from|range of|range is|range was|range for)[^0-9]{0,40}?\$?([\d,]+\.?\d*)[^0-9]{0,20}?(?:and|to)[^0-9]{0,20}?\$?([\d,]+\.?\d*)/i,
   ];
-  const rangeM = rangeCands.find((m) => {
+  const validRange = (m: RegExpMatchArray | null): boolean => {
     if (!m) return false;
     const lo = parseFloat(m[1].replace(/,/g, ''));
     const hi = parseFloat(m[2].replace(/,/g, ''));
     const priceLike = /\.\d/.test(m[1]) || /\.\d/.test(m[2]) || (lo < 1000 && hi < 1000);
     return lo > 0 && hi > lo && hi < lo * 10 && priceLike;
-  });
-  if (price != null && rangeM) {
+  };
+  // same claims-first rule as the implied price: a raw-sourced range is
+  // stale (extraction dropped it) — it must not reject a quoted price.
+  const rangeFromClaims = rangeRe.map((r) => text.match(r)).find(validRange);
+  const rangeM = rangeFromClaims ?? rangeRe.map((r) => raw.match(r)).find(validRange);
+  if (price != null && rangeM && rangeFromClaims) {
     const lo = parseFloat(rangeM[1].replace(/,/g, ''));
     const hi = parseFloat(rangeM[2].replace(/,/g, ''));
     if (price < lo * 0.5 || price > hi * 2) {
@@ -281,7 +303,7 @@ export function runQuantModel(claims: string[]): QuantModel {
       }
     }
   }
-  if (price != null && impliedPrice != null && (price < impliedPrice * 0.5 || price > impliedPrice * 2)) {
+  if (price != null && impliedPrice != null && impliedFromClaims && (price < impliedPrice * 0.5 || price > impliedPrice * 2)) {
     const orig = price;
     price = impliedPrice;
     priceSource = `implied from market cap ÷ shares (quote $${orig.toFixed(2)} rejected as implausible)`;
@@ -296,10 +318,14 @@ export function runQuantModel(claims: string[]): QuantModel {
   // phrasing when both exist (score: annual > neutral > quarterly).
   const eps = (() => {
     const cands: { v: number; q: number }[] = [];
-    for (const a of [/(?:EPS|earnings per share)[\s\S]{0,60}?([\d,]+\.\d+)/i, /diluted\s+EPS[\s\S]{0,60}?([\d,]+\.\d+)/i]) {
+    // v1.8.17: "earnings of $1.76 per share" (number BEFORE the phrase) —
+    // the contiguous "earnings per share" anchor never precedes the number,
+    // so the first two patterns miss it. the decimal requirement keeps
+    // "earnings of $43 billion per share" out (43 has no decimal).
+    for (const a of [/(?:EPS|earnings per share)[\s\S]{0,60}?([\d,]+\.\d+)/i, /diluted\s+EPS[\s\S]{0,60}?([\d,]+\.\d+)/i, /(?:earnings|EPS)[\s\S]{0,40}?([\d,]+\.\d+)\s*per share/i]) {
       const g = new RegExp(a.source, a.flags.replace('g', '') + 'g');
       while (true) {
-        const mm = g.exec(text);
+        const mm = g.exec(harvestText);
         if (!mm) break;
         const v = parseFloat((mm[1] || '').replace(/[,$]/g, ''));
         if (isNaN(v) || yearLike(v)) continue;
@@ -328,12 +354,12 @@ export function runQuantModel(claims: string[]): QuantModel {
   // growth rate. the %→growth-word gap is now tight (a "26% increase" is
   // 0-2 chars; "54% expect that growth" is 13), and the post-growth window
   // is digit-safe so it can't cross a year to reach a later number.
-  let growth = pct(text.match(/(?:revenue|sales|earnings)[\s\S]{0,80}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
-    ?? pct(text.match(/(?:revenue|sales|earnings)[^0-9]{0,40}?\s+(?:grew|growth|increased|increase|jumped)[^0-9]{0,60}?([\d.]+)\s*%/i))
-    ?? pct(text.match(/(?:representing|represented)[\s\S]{0,50}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
+  let growth = pct(harvestText.match(/(?:revenue|sales|earnings)[\s\S]{0,80}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
+    ?? pct(harvestText.match(/(?:revenue|sales|earnings)[^0-9]{0,40}?\s+(?:grew|growth|increased|increase|jumped)[^0-9]{0,60}?([\d.]+)\s*%/i))
+    ?? pct(harvestText.match(/(?:representing|represented)[\s\S]{0,50}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
     // EPS CAGR is a legit annualized-growth proxy when no explicit growth %
     // is cited — "3-year EPS CAGR of 64%" feeds the DCF the same way
-    ?? pct(text.match(/(?:cagr|compound annual growth rate)[^0-9]{0,40}?([\d.]+)\s*%/i));
+    ?? pct(harvestText.match(/(?:cagr|compound annual growth rate)[^0-9]{0,40}?([\d.]+)\s*%/i));
   let growthSource = 'explicit growth %';
   if (growth == null) {
     // fallback: PEG = forward P/E / expected growth  →  g = PE / PEG.
@@ -341,8 +367,8 @@ export function runQuantModel(claims: string[]): QuantModel {
     // an analyst would instead of leaving the DCF uncomputable.
     // the parenthetical skip keeps "PEG Ratio (5yr expected): 0.55" from
     // capturing the "5" in "(5yr" (run 12: growth 4.6% instead of 41.6%).
-    const peF = harvest(text, [/(?:forward\s+p\/e|forward pe|fwd p\/e)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i]);
-    const peg = harvest(text, [/(?:peg\s+ratio|expected\s+peg)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i]);
+    const peF = harvest(harvestText, [/(?:forward\s+p\/e|forward pe|fwd p\/e)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i]);
+    const peg = harvest(harvestText, [/(?:peg\s+ratio|expected\s+peg)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i]);
     if (peF != null && peg != null && peg > 0) {
       growth = peF / peg / 100;
       growthSource = `derived from forward P/E ${peF} ÷ PEG ${peg}`;
@@ -354,14 +380,14 @@ export function runQuantModel(claims: string[]): QuantModel {
   // range-check 0.2-3.0: real stock betas live there; anything else is a
   // date, a count, or a mis-parse (run 19: recovery pages had no beta at
   // all, so the fallback below keeps the model computable).
-  const beta = clusterPick(harvestAll(text, [
+  const beta = clusterPick(harvestAll(harvestText, [
     /(?:beta|Beta|β)\s+(?:of|at|is|:|=|≈)\s*([\d.]+)/i,
     /(?:beta|Beta|β)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i,
     /([\d.]+)\s*(?:beta|Beta|β)/i,
   ]).filter((b) => b >= 0.2 && b <= 3.0));
-  const sigma = pct(text.match(/(?:volatility|annualized volatility|vol(?!ume))[\s\S]{0,40}?([\d.]+)\s*%/i));
-  const rf = pct(text.match(/(?:risk[- ]free rate|Rf|treasury)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? RF_DEFAULT;
-  const erp = pct(text.match(/(?:equity risk premium|ERP|market risk premium)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? ERP_DEFAULT;
+  const sigma = pct(harvestText.match(/(?:volatility|annualized volatility|vol(?!ume))[\s\S]{0,40}?([\d.]+)\s*%/i));
+  const rf = pct(harvestText.match(/(?:risk[- ]free rate|Rf|treasury)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? RF_DEFAULT;
+  const erp = pct(harvestText.match(/(?:equity risk premium|ERP|market risk premium)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? ERP_DEFAULT;
 
   const inputs: string[] = [];
   if (price != null) inputs.push(`price $${price.toFixed(2)} (${priceSource})`);

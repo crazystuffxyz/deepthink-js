@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.12
+
+### Fixed
+- **Missing beta killed the whole quant model** — run 19: the recovery crawl added 17 claims but no source cited a beta, so CAPM cost of equity, DCF intrinsic value, GBM/Ito expected return, Sharpe, and VaR were ALL null and the injected section said "cannot compute" — a stock report with no math. Beta now falls back to 1.0 (market average) with the assumption stated out loud in the section text, volatility falls back to beta × market vol (~18%), and the model computes whenever price/EPS/growth are present. The `ok` flag no longer requires beta.
+- **Price harvest window crossed into the next claim** — "stock price is $196.00.\nDiluted EPS is $4.90." — the 60-char forward window collected both numbers and clusterPick picked the smaller on ties, so the EPS became the price. The forward scan now takes only the FIRST valid number per anchor hit (the one closest to the anchor); cross-source consensus still works because each claim contributes its own anchor hit.
+- **Beta harvest gaps** — added the β symbol ("β = 1.84"), number-before-beta ("1.84 beta"), and a 0.2–3.0 range filter so dates/counts can't masquerade as beta. Recovery crawl gained two finance-data phrasings ("beta coefficient", "beta stockanalysis").
+
 ## v1.8.11
 
 ### Fixed

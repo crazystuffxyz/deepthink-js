@@ -71,6 +71,10 @@ function scanPriceForwardAll(text) {
             const before = slice.split(/\d/)[0].toLowerCase();
             if (PRICE_BANNED_WORDS.some((w) => before.includes(w)))
                 continue;
+            // take only the FIRST valid number per anchor hit — the one closest
+            // to the anchor is the price. collecting every number in the window
+            // let the next claim's EPS bleed in ("stock price is $196.00.\nDiluted
+            // EPS is $4.90." → [196, 4.9] → clusterPick picked 4.9, run 19 test).
             for (const nm of slice.matchAll(/\$?([\d,]+\.?\d*)\s*%?/g)) {
                 const v = parseFloat(nm[1].replace(/[,$]/g, ''));
                 if (isNaN(v) || yearLike(v) || nm[0].includes('%'))
@@ -81,6 +85,7 @@ function scanPriceForwardAll(text) {
                 if (MULTIPLE_RE.test(slice.slice(nm.index + nm[0].length, nm.index + nm[0].length + 25)))
                     continue;
                 out.push(v);
+                break;
             }
         }
     }
@@ -351,10 +356,14 @@ export function runQuantModel(claims) {
     // skip parenthesized qualifiers like "Beta (5Y Monthly) is 2.21" — the
     // naive [^0-9] window would grab the "5" from "(5Y Monthly)". beta can
     // conflict across sources too, so take the consensus value like price.
+    // range-check 0.2-3.0: real stock betas live there; anything else is a
+    // date, a count, or a mis-parse (run 19: recovery pages had no beta at
+    // all, so the fallback below keeps the model computable).
     const beta = clusterPick(harvestAll(text, [
-        /(?:beta|Beta)\s+(?:of|at|is|:|=)\s*([\d.]+)/i,
-        /(?:beta|Beta)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i,
-    ]));
+        /(?:beta|Beta|β)\s+(?:of|at|is|:|=|≈)\s*([\d.]+)/i,
+        /(?:beta|Beta|β)(?:\s*\([^)]*\)|[^0-9]){0,40}([\d.]+)/i,
+        /([\d.]+)\s*(?:beta|Beta|β)/i,
+    ]).filter((b) => b >= 0.2 && b <= 3.0));
     const sigma = pct(text.match(/(?:volatility|annualized volatility|vol(?!ume))[\s\S]{0,40}?([\d.]+)\s*%/i));
     const rf = pct(text.match(/(?:risk[- ]free rate|Rf|treasury)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? RF_DEFAULT;
     const erp = pct(text.match(/(?:equity risk premium|ERP|market risk premium)[^0-9]{0,30}([\d.]+)\s*%/i)) ?? ERP_DEFAULT;
@@ -371,15 +380,20 @@ export function runQuantModel(claims) {
     if (beta != null)
         inputs.push(`beta ${beta}`);
     else
-        inputs.push('beta: NOT FOUND');
+        inputs.push('beta 1.00 (assumed — market average, not in sources)');
     if (sigma != null)
         inputs.push(`volatility ${(sigma * 100).toFixed(1)}%`);
     else
-        inputs.push('volatility: NOT FOUND (using beta-based estimate)');
+        inputs.push(`volatility ${((beta ?? 1) * 0.18 * 100).toFixed(1)}% (beta-based estimate)`);
     inputs.push(`risk-free ${(rf * 100).toFixed(1)}%, ERP ${(erp * 100).toFixed(1)}%`);
     // ---- compute ----
-    const costOfEquity = beta != null ? rf + beta * erp : null;
-    const vol = sigma ?? (beta != null ? beta * 0.18 : null); // beta-based fallback: market vol ~18%
+    // beta fallback: no source citing beta shouldn't kill the whole model —
+    // CAPM with beta = 1.0 (market average) is the textbook default, and the
+    // section text says the assumption out loud. volatility falls back to
+    // beta * market vol (~18%) the same way.
+    const betaUsed = beta ?? 1.0;
+    const costOfEquity = rf + betaUsed * erp;
+    const vol = sigma ?? betaUsed * 0.18;
     // DCF growth: cap + fade. run 15: the recovery crawl surfaced "TTM EPS
     // CAGR 71%" and the constant-growth DCF projected 71% for a decade —
     // IV $4,309/share on a $217 stock. no company sustains that; analysts
@@ -416,18 +430,18 @@ export function runQuantModel(claims) {
     const L = ['## Quantitative Model (computed by pipeline)', ''];
     L.push(`Inputs harvested from the cited sources: ${inputs.join(' · ')}.`);
     L.push('');
-    if (costOfEquity != null) {
+    if (beta != null) {
         L.push(`**Cost of equity (CAPM):** $R_e = R_f + \\beta \\times ERP = ${(rf * 100).toFixed(1)}\\% + ${beta.toFixed(2)} \\times ${(erp * 100).toFixed(1)}\\% = ${(costOfEquity * 100).toFixed(2)}\\%$.`);
     }
     else {
-        L.push(`**Cost of equity (CAPM):** cannot compute — beta not found in sources.`);
+        L.push(`**Cost of equity (CAPM):** $R_e = R_f + \\beta \\times ERP = ${(rf * 100).toFixed(1)}\\% + 1.00 \\times ${(erp * 100).toFixed(1)}\\% = ${(costOfEquity * 100).toFixed(2)}\\%$ — beta not cited in sources, assumed 1.00 (market average).`);
     }
     if (intrinsicValue != null) {
         const capped = growth > GROWTH_CAP ? ` (capped from ${(growth * 100).toFixed(1)}\\% — sustainable-growth assumption)` : '';
         L.push(`**Discounted Cash Flow:** EPS ${eps.toFixed(2)} projected ${HORIZON_YRS} years at ${(gDcf * 100).toFixed(1)}\\% growth${capped}, fading linearly to ${(TERMINAL_GROWTH * 100).toFixed(0)}\\% terminal, discounted at ${(costOfEquity * 100).toFixed(2)}\\%; terminal value via Gordon growth — **intrinsic value ≈ $${intrinsicValue.toFixed(2)}/share** (${upside != null ? (upside >= 0 ? '+' : '') + (upside * 100).toFixed(1) + '%' : 'n/a'} vs the current price).`);
     }
     else {
-        L.push('**Discounted Cash Flow:** cannot compute — need EPS, growth, and cost of equity from sources.');
+        L.push('**Discounted Cash Flow:** cannot compute — need EPS and growth from sources.');
     }
     if (expectedReturn != null && vol != null) {
         L.push(`**Geometric Brownian Motion:** $dS_t = \\mu S_t dt + \\sigma S_t dW_t$ with $\\mu = ${(expectedReturn * 100).toFixed(1)}\\%$, $\\sigma = ${(vol * 100).toFixed(1)}\\%$. Ito's lemma on $f(S)=\\ln S$ gives the expected log-return $(\\mu - \\sigma^2/2) = ${(expectedLogReturn * 100).toFixed(1)}\\%$ per year — the drift correction $\\sigma^2/2 = ${((vol * vol / 2) * 100).toFixed(1)}\\%$ is the volatility drag. Expected price in one year: $E[S_T] = S_0 e^{\\mu T} = $${expectedPrice != null ? '$' + expectedPrice.toFixed(2) : 'n/a'}.`);
@@ -435,12 +449,12 @@ export function runQuantModel(claims) {
         L.push(`**Value at Risk (normal model):** 1-day 95\\% VaR $= 1.645 \\cdot \\sigma \\cdot P / \\sqrt{252} = $${var95_1d != null ? '$' + var95_1d.toFixed(2) : 'n/a'} (${vol * 100 >= 1 ? (var95_1d != null && price ? ((var95_1d / price) * 100).toFixed(2) + '\\%' : 'n/a') : 'n/a'}); 1-day 99\\% VaR $= $${var99_1d != null ? '$' + var99_1d.toFixed(2) : 'n/a'}; 1-year 95\\% VaR $= $${var95_1y != null ? '$' + var95_1y.toFixed(2) : 'n/a'}.`);
     }
     else {
-        L.push('**GBM/Ito:** cannot compute — need volatility and cost of equity from sources.');
+        L.push('**GBM/Ito:** cannot compute — need price and EPS from sources.');
     }
     L.push('');
-    L.push('*All figures above are computed deterministically by the research pipeline from the cited inputs — no estimation. The report prose must use these exact numbers.*');
+    L.push('*All figures above are computed deterministically by the research pipeline from the cited inputs — no estimation. Beta is assumed at the market average (1.0) when no source cites it. The report prose must use these exact numbers.*');
     return {
-        ok: price != null && eps != null && growth != null && beta != null && vol != null && intrinsicValue != null,
+        ok: price != null && eps != null && growth != null && intrinsicValue != null,
         price, priceSource, eps, growth, beta, rf, erp, costOfEquity, sigma: vol,
         intrinsicValue, expectedReturn, expectedLogReturn, expectedPrice,
         sharpe, var95_1d, var99_1d, var95_1y, upside,

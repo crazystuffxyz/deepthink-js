@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.18
+
+### Fixed
+- **Humanizer fix pass echoed its own instruction into the report** — run 22: the fix model output "Restore these exact values into the text: 253,491, 491, 0.95, 252, 1.645, 0.40" verbatim into the conclusion, and the detector scored the leak 0 (it looks like a human instruction, so it "passed"). Fix passes now deterministically strip instruction-echo lines, then re-check the claims actually survived — a fix that didn't restore them is not a fix, and the pre-fix text is kept instead.
+- **Claims checked against the wrong baseline** — the integrity check compared the rewrite against the *previous iteration's* text, so a value lost two iterations ago became invisible. Claims are now checked against the ORIGINAL text every iteration (normal pass, radical pass, and the final return).
+- **Radical pass (plateau escalation) skipped the same guards** — it had no leak strip, no claims re-check on its fix pass, and its done condition ignored missing claims. Now identical to the normal pass: strip, re-check, done only when all claims survive.
+- **Critique loop could waste loops on repeated surgical retries** — run 22: 62 → 28 → 34 → 42, two loops burned on a surgical retry that itself regressed. The surgical retry is now allowed exactly once; a second regression restores the best report and breaks.
+- **js_eval/py_eval ignored nested params** — the tool loop read `call.code` (flat form) but models often emit `{"tool":"js_eval","params":{"code":"..."}}` (nested form), so the sandbox ran an empty script and returned "". Both forms are now accepted.
+
 ## v1.8.17
 
 ### Fixed

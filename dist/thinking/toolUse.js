@@ -38,10 +38,13 @@ async function executeTool(call, tools) {
             const t = map.get(call.tool);
             if (!t)
                 throw new Error(`Unknown tool: ${call.tool}`);
+            // models sometimes emit {"tool":"js_eval","code":"..."} flat and
+            // sometimes {"tool":"js_eval","params":{"code":"..."}} nested — accept both
+            const code = String((call.params && call.params.code) || call.code || '');
             if (call.tool === 'js_eval')
-                return await runJSSandbox(String(call.code || ''));
+                return await runJSSandbox(code);
             if (call.tool === 'py_eval')
-                return await runPythonSandbox(String(call.code || ''));
+                return await runPythonSandbox(code);
             if (typeof t.run === 'function')
                 return await t.run(call.params || {});
             return null;

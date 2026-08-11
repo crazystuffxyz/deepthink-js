@@ -67,7 +67,7 @@ await test('humanizeText: dropped claim triggers fix pass and is restored', asyn
     // humanizer drops the number — integrity says ok (bad judge), local backstop must catch it
     humanize: 'Revenue grew a lot last year. [Source 3]',
     integrity: '{"issues": [], "ok": true}',
-    fix: (() => { fixCalled = true; return 'Revenue grew 12.5% last year. [Source 3]'; })(),
+    fix: (() => { fixCalled = true; return 'Revenue grew 12.5% in 2024. [Source 3]'; })(),
     detect: '{"aiScore": 0, "tells": [], "verdict": "human"}'
   });
   const r = await humanizeText(callChat, 'Revenue grew 12.5% in 2024 [Source 3].', { maxIterations: 3 });

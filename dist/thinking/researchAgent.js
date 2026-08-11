@@ -940,6 +940,9 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
     // restore it when the loop stalls or the cap is hit.
     let bestReport = report;
     let bestScore = Infinity;
+    // surgical retry is a last resort — it can itself regress (run 22: 62 ->
+    // 28 -> 34 -> 42, two wasted loops). allow exactly ONE, then break.
+    let surgicalRetried = false;
     const critiqueHistory = [];
     for (let loop = 1; loop <= maxLoops; loop++) {
         log({ level: 'info', msg: `[CRITIQUE LOOP ${loop}/${maxLoops}] Running all critics in parallel...`, source: 'researchAgent', ts: Date.now() });
@@ -1010,7 +1013,8 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
             // that fixes only the critical issues — a smaller issue list means a
             // smaller rewrite, which means less chance of introducing new damage.
             const criticals = allIssues.filter((i) => i.severity === 'critical');
-            if (criticals.length && loop < maxLoops) {
+            if (criticals.length && loop < maxLoops && !surgicalRetried) {
+                surgicalRetried = true;
                 log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair regressed (${prevScore} -> ${issueScore}) — surgical retry on ${criticals.length} critical issues only`, source: 'researchAgent', ts: Date.now() });
                 currentReport = bestReport;
                 const surgical = await constrainedRepairAgent(callChat, currentReport, criticals, topic, opts);

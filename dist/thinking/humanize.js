@@ -153,11 +153,16 @@ export async function humanizeText(callChat, text, opts = {}) {
     const refTail = refIdx > -1 ? current.slice(refIdx) : '';
     if (refTail)
         current = current.slice(0, refIdx);
+    // run 22: claims were checked against the PREVIOUS iteration's text, so a
+    // number lost in iteration 1 was invisible to iteration 2's check — the
+    // loop could "succeed" with facts missing. check against the ORIGINAL
+    // every pass; the loop is not done while any claim is missing.
+    const original = current;
     const history = [];
     // best-text memory: run 17 oscillated 15 -> 92 -> 85 because every rewrite
     // replaced the previous one even when it scored worse. keep the best-scoring
-    // text and feed THAT back to the humanizer — the tells from the best pass are
-    // the most useful feedback anyway.
+    // COMPLETE text (all claims survived) and feed THAT back to the humanizer —
+    // the tells from the best pass are the most useful feedback anyway.
     let best = { text: current, score: Infinity };
     for (let iter = 1; iter <= maxIterations; iter++) {
         log({ level: 'info', msg: `[humanize] iteration ${iter}/${maxIterations} — humanize pass`, source: 'humanize', ts: Date.now() });
@@ -183,8 +188,9 @@ export async function humanizeText(callChat, text, opts = {}) {
         const iR = await callChat([{ role: 'system', content: INTEGRITY_SYS }, { role: 'user', content: `ORIGINAL:\n${current}\n\n---\n\nREWRITE:\n${rewritten}` }], false, null, { ...opts, think: false, samplingProfile: 'json' });
         const integrity = parseJsonSafe(iR.content || '', IntegritySchema) || { issues: [], ok: true };
         const issues = Array.isArray(integrity.issues) ? integrity.issues : [];
-        // local backstop: claims must survive
-        const missingClaims = claimsSurvived(current, rewritten);
+        // local backstop: claims must survive (vs the ORIGINAL, not the last
+        // iteration — a value lost once must be restored, not forgotten)
+        const missingClaims = claimsSurvived(original, rewritten);
         if (missingClaims.length) {
             log({ level: 'warn', msg: `[humanize] ${missingClaims.length} claims lost in rewrite: ${missingClaims.slice(0, 5).join(', ')}`, source: 'humanize', ts: Date.now() });
             issues.push({ type: 'fact_drift', original: missingClaims.join(', '), rewritten: '(missing)', fix: `Restore these exact values into the text: ${missingClaims.join(', ')}` });
@@ -193,9 +199,22 @@ export async function humanizeText(callChat, text, opts = {}) {
             log({ level: 'info', msg: `[humanize] iteration ${iter} — fixing ${issues.length} issues`, source: 'humanize', ts: Date.now() });
             const issuesList = issues.map((iss, i) => `ISSUE ${i + 1} [${iss.type}]:\n  Original: "${iss.original || ''}"\n  Rewritten: "${iss.rewritten || ''}"\n  Fix: ${iss.fix || 'Repair as described'}`).join('\n\n');
             const fR = await callChat([{ role: 'system', content: FIX_SYS }, { role: 'user', content: `ISSUES TO FIX:\n${issuesList}\n\n---\n\nTEXT:\n${rewritten}` }], false, null, { ...opts, think: false, samplingProfile: 'creative' });
-            const fixed = (fR.content || '').trim();
-            if (fixed.length >= rewritten.length * 0.5)
-                rewritten = fixed;
+            let fixed = (fR.content || '').trim();
+            // run 22: the fix model echoed the instruction ("Restore these exact
+            // values into the text: 253,491, ...") into its output and the
+            // detector scored the leak 0. strip instruction-echo lines, then
+            // re-check the claims actually survived — a fix that didn't restore
+            // them is not a fix.
+            fixed = fixed.replace(/^restore these exact values into the text:.*$/gim, '').trim();
+            if (fixed.length >= rewritten.length * 0.5) {
+                const stillMissing = claimsSurvived(original, fixed);
+                if (stillMissing.length) {
+                    log({ level: 'warn', msg: `[humanize] fix pass did not restore ${stillMissing.length} values (${stillMissing.slice(0, 5).join(', ')}) — keeping pre-fix text`, source: 'humanize', ts: Date.now() });
+                }
+                else {
+                    rewritten = fixed;
+                }
+            }
         }
         // detector
         log({ level: 'info', msg: `[humanize] iteration ${iter} — detector`, source: 'humanize', ts: Date.now() });
@@ -205,11 +224,11 @@ export async function humanizeText(callChat, text, opts = {}) {
         const score = Math.max(0, Math.min(100, det.aiScore == null ? 100 : Number(det.aiScore)));
         history.push({ iteration: iter, aiScore: score, tells: det.tells || [], issuesFixed: issues.length });
         log({ level: 'info', msg: `[humanize] iteration ${iter} — detector score: ${score} (verdict: ${det.verdict})`, source: 'humanize', ts: Date.now() });
-        if (score < best.score)
+        if (score < best.score && !claimsSurvived(original, rewritten).length)
             best = { text: rewritten, score };
         current = rewritten;
-        if (score <= threshold) {
-            log({ level: 'success', msg: `[humanize] detector at ${score} <= ${threshold} — done after ${iter} iterations`, source: 'humanize', ts: Date.now() });
+        if (score <= threshold && !claimsSurvived(original, rewritten).length) {
+            log({ level: 'success', msg: `[humanize] detector at ${score} <= ${threshold} with all claims intact — done after ${iter} iterations`, source: 'humanize', ts: Date.now() });
             return { text: current + refTail, iterations: iter, finalScore: score, history, ok: true };
         }
         // regression guard: if this pass scored worse than the best so far, the
@@ -236,15 +255,17 @@ export async function humanizeText(callChat, text, opts = {}) {
                 const iR2 = await callChat([{ role: 'system', content: INTEGRITY_SYS }, { role: 'user', content: `ORIGINAL:\n${current}\n\n---\n\nREWRITE:\n${radical}` }], false, null, { ...opts, think: false, samplingProfile: 'json' });
                 const integrity2 = parseJsonSafe(iR2.content || '', IntegritySchema) || { issues: [], ok: true };
                 const issues2 = Array.isArray(integrity2.issues) ? integrity2.issues : [];
-                const missing2 = claimsSurvived(current, radical);
+                const missing2 = claimsSurvived(original, radical);
                 if (missing2.length)
                     issues2.push({ type: 'fact_drift', original: missing2.join(', '), rewritten: '(missing)', fix: `Restore these exact values into the text: ${missing2.join(', ')}` });
                 let radicalFinal = radical;
                 if (issues2.length) {
                     const issuesList2 = issues2.map((iss, i) => `ISSUE ${i + 1} [${iss.type}]:\n  Original: "${iss.original || ''}"\n  Rewritten: "${iss.rewritten || ''}"\n  Fix: ${iss.fix || 'Repair as described'}`).join('\n\n');
                     const fR2 = await callChat([{ role: 'system', content: FIX_SYS }, { role: 'user', content: `ISSUES TO FIX:\n${issuesList2}\n\n---\n\nTEXT:\n${radical}` }], false, null, { ...opts, think: false, samplingProfile: 'creative' });
-                    const fixed2 = (fR2.content || '').trim();
-                    if (fixed2.length >= radical.length * 0.5)
+                    let fixed2 = (fR2.content || '').trim();
+                    // same leak strip + restore check as the normal fix pass
+                    fixed2 = fixed2.replace(/^restore these exact values into the text:.*$/gim, '').trim();
+                    if (fixed2.length >= radical.length * 0.5 && !claimsSurvived(original, fixed2).length)
                         radicalFinal = fixed2;
                 }
                 const dR2 = await callChat([{ role: 'system', content: DETECTOR_SYS }, { role: 'user', content: radicalFinal }], false, null, { ...opts, think: false, samplingProfile: 'json' });
@@ -254,7 +275,7 @@ export async function humanizeText(callChat, text, opts = {}) {
                 log({ level: 'info', msg: `[humanize] radical rewrite — detector score: ${score2} (verdict: ${det2.verdict})`, source: 'humanize', ts: Date.now() });
                 if (score2 < score) {
                     current = radicalFinal;
-                    if (score2 <= threshold) {
+                    if (score2 <= threshold && !claimsSurvived(original, radicalFinal).length) {
                         log({ level: 'success', msg: `[humanize] radical rewrite hit ${score2} <= ${threshold} — done`, source: 'humanize', ts: Date.now() });
                         return { text: current + refTail, iterations: iter, finalScore: score2, history, ok: true };
                     }
@@ -268,6 +289,9 @@ export async function humanizeText(callChat, text, opts = {}) {
         }
     }
     log({ level: 'warn', msg: `[humanize] hit max iterations (${maxIterations}) — final score ${history.at(-1)?.aiScore ?? '?'}`, source: 'humanize', ts: Date.now() });
-    return { text: current + refTail, iterations: maxIterations, finalScore: history.at(-1)?.aiScore ?? 100, history, ok: history.at(-1)?.aiScore <= threshold };
+    // never ship lost numbers: if the last text is missing claims, fall back
+    // to the best complete text (the original if no rewrite kept everything)
+    const finalText = claimsSurvived(original, current).length ? best.text : current;
+    return { text: finalText + refTail, iterations: maxIterations, finalScore: history.at(-1)?.aiScore ?? 100, history, ok: history.at(-1)?.aiScore <= threshold };
 }
 export { AI_TELL_WORDS, extractClaims, claimsSurvived };

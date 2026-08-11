@@ -466,5 +466,49 @@ function check(name, cond, detail = '') {
   check('partial model leaves null IV alone', !rep.includes('intrinsic value'), rep);
 }
 
+// ---- run-21: LLM claims extraction dropped the EPS fact — the raw
+// summary ("diluted earnings per share of $1.76") must fill the gap ----
+{
+  const claims = [
+    'NVDA stock price is $217.55.',
+    'Revenue grew 8.6% year over year.',
+    'NVDA beta is 1.84.',
+  ];
+  const raw = [
+    'In February 2026, Nvidia reported record fourth-quarter revenue of $68.1 billion for fiscal year 2026, with diluted earnings per share of $1.76.',
+  ];
+  const m = runQuantModel(claims, raw);
+  check('raw summary fills EPS the claims dropped', m.eps === 1.76, `got ${m.eps}`);
+  check('full model computed with raw-filled EPS', m.ok === true, `ok=${m.ok}`);
+  check('claim price still wins over raw', m.price === 217.55, `got ${m.price}`);
+}
+
+// ---- run-21: "earnings of $1.76 per share" (number BEFORE the phrase) ----
+{
+  const m = runQuantModel(['Nvidia reported earnings of $1.76 per share for the quarter.']);
+  check('EPS harvested with number before "per share"', m.eps === 1.76, `got ${m.eps}`);
+  const m2 = runQuantModel(['Nvidia reported earnings of $43 billion per share for the quarter.']);
+  check('"earnings of $43 billion per share" NOT harvested (no decimal)', m2.eps === null, `got ${m2.eps}`);
+}
+
+// ---- run-21: stale raw market cap must FILL a missing price but never
+// REJECT a quoted one ----
+{
+  const claims = ['NVDA stock price is $217.55.', 'Revenue grew 8.6% year over year.', 'Diluted EPS for fiscal year 2026 stood at $6.53.'];
+  const raw = ['In 2023, Nvidia had a market cap of $1.2 trillion and 24.20 billion shares outstanding.'];
+  const m = runQuantModel(claims, raw);
+  check('stale raw implied price does not reject quoted price', m.price === 217.55, `got ${m.price}`);
+  const m2 = runQuantModel(['Revenue grew 8.6% year over year.', 'Diluted EPS for fiscal year 2026 stood at $6.53.'], raw);
+  check('raw implied price fills a missing price', m2.price != null && m2.price > 40 && m2.price < 60, `got ${m2.price}`);
+}
+
+// ---- run-21: stale raw 52-week range must not reject a quoted price ----
+{
+  const claims = ['NVDA stock price is $217.55.', 'Revenue grew 8.6% year over year.', 'Diluted EPS for fiscal year 2026 stood at $6.53.'];
+  const raw = ['In 2022, NVDA traded between $50 and $100.'];
+  const m = runQuantModel(claims, raw);
+  check('stale raw range does not reject quoted price', m.price === 217.55, `got ${m.price}`);
+}
+
 console.log(`\nquantEngine: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

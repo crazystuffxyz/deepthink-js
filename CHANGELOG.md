@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.17
+
+### Fixed
+- **EPS: NOT FOUND despite the fact being in the sources** — run 21: the Wikipedia summary said "diluted earnings per share of $1.76" but the LLM claims-extraction step dropped the EPS fact, so the quant engine (which harvests only from verified claims) reported EPS: NOT FOUND and the DCF stayed uncomputable. The engine now also harvests from the raw source summaries (`citedSummary`) as a fallback layer: claims stay primary (verified + curated), raw fills the gaps the extraction dropped. Consensus logic (mode/cluster) keeps a stale raw value from outvoting fresh claims.
+- **Stale raw values could reject good prices** — a raw-sourced market cap (e.g. a 2023 "market cap of $1.2T") ÷ current shares would have produced a bogus implied price that REJECTED the real $217.55 quote. Raw-sourced implied prices and 52-week ranges may now FILL a missing price but never reject a quoted one — only claim-sourced values can reject.
+- **"earnings of $1.76 per share" not harvested** — the contiguous "earnings per share" anchor never precedes the number in that phrasing, so the EPS regexes missed it. Added a number-before-"per share" pattern (decimal requirement keeps "earnings of $43 billion per share" out).
+
 ## v1.8.16
 
 ### Fixed

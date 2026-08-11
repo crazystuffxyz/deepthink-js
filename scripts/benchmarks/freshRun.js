@@ -149,9 +149,25 @@ function loadDone() {
   }
   fs.appendFileSync(CSV, lines.join('\n') + '\n', 'utf-8');
 
-  // summary from full csv (all completed rows)
+  // summary from full csv (all completed rows). quote-aware parse — raw
+  // answers can contain commas inside quotes, and a naive split shifts the
+  // ok column (that's how 34/35 became 33/35 in the old summaries).
+  function parseCsvLine(l) {
+    const c = []; let cur = '', inQ = false;
+    for (let i = 0; i < l.length; i++) {
+      const ch = l[i];
+      if (inQ) {
+        if (ch === '"') { if (l[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
+        else cur += ch;
+      } else if (ch === '"') inQ = true;
+      else if (ch === ',') { c.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    c.push(cur);
+    return c;
+  }
   const allRows = fs.readFileSync(CSV, 'utf-8').split('\n').slice(1).filter(Boolean).map((l) => {
-    const c = l.split(',');
+    const c = parseCsvLine(l);
     return { id: c[0], kind: c[1], mode: c[2], ok: c[5] === '1' };
   });
   const byMode = (m) => allRows.filter((r) => r.mode === m);

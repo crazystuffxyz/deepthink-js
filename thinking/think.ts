@@ -236,8 +236,14 @@ export async function runThink(
     ...opts,
     options: { ...(opts.options || {}), temperature: 0.7 }
   };
+  // evolved guidance rides into the probes: the trained techniques are
+  // reasoning moves, exactly what a probe should try. it's system-content,
+  // so the KV-cache sharing across probes is preserved.
+  const guide = (opts.evolvedGuide as string) || '';
+  const probeSys = (p: { body: string; fmt: string }) =>
+    `${THINK_SYS}\n${p.body}\nOutput format:\n${p.fmt}` + (guide ? `\n\nAlso apply these techniques to your reasoning:\n${guide}` : '');
   const settled = await Promise.allSettled(
-    probesDef.map((p) => probe(callChat, `${THINK_SYS}\n${p.body}\nOutput format:\n${p.fmt}`, inputText, probeOpts))
+    probesDef.map((p) => probe(callChat, probeSys(p), inputText, probeOpts))
   );
 
   const chunks: string[] = [];

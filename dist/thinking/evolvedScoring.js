@@ -292,7 +292,11 @@ async function scoreOne(callChat, output, item, opts = {}) {
             out.score = 0;
         }
     }
-    out.weighted = (out.score + thinkBonus) * (item.weight || 1);
+    // thinkBonus only on CORRECT answers — otherwise a wrong answer that
+    // rambles about techniques ("poincare-incubate: I hit the wall...")
+    // still banks +0.04-0.08, which is exactly how the iq run gamed it:
+    // pattern-name prose earned fitness on answers that were never right.
+    out.weighted = (out.score > 0 ? out.score + thinkBonus : 0) * (item.weight || 1);
     return out;
 }
 async function scoreAgainstBench(callChat, outputs, bench, opts = {}) {

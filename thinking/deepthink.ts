@@ -754,11 +754,12 @@ export class Deepthink extends EventEmitter {
       return parseDataType(r, type !== 'string' ? type : 'string');
     }
 
-    if (mergedOpts.evolvedApply) {
-      const best = loadBest(mergedOpts.evolvedApply);
-      const r = await applyEvolvedPrompt(this.callChat.bind(this), best.systemPrompt, input, mergedOpts);
-      return parseDataType(r, type !== 'string' ? type : 'string');
-    }
+    // NOTE: evolvedApply must NOT short-circuit here. it falls through to the
+    // pipeline path below which injects the trained prompt as thinking guidance
+    // into the FULL pipeline — probes, code, checks, revisions. an early return
+    // here turns it into a single raw call with no checks and no format pin
+    // (the iqHard evolved run measured 1 call/350 tok, dt 10/20 vs plain 20/20 —
+    // a bogus number from exactly this bug).
 
     if (mergedOpts.tools === true || (mergedOpts.tools && typeof mergedOpts.tools === 'object')) {
       const toolOpts = { ...mergedOpts, tools: Array.isArray(mergedOpts.tools) ? mergedOpts.tools : DEFAULT_TOOLS };
@@ -831,12 +832,16 @@ export class Deepthink extends EventEmitter {
     let finalMessages = baseMessages.map(cloneMessage as (m: ChatMessage) => ChatMessage);
     // evolvedApply in the FULL pipeline: the trained prompt rides as thinking
     // guidance for the final answer (and every check-loop revision), instead
-    // of short-circuiting to a plain-mode answer. the caller's format prompt
-    // (ANSWER: etc.) still wins — it is injected later and merged last.
+    // of short-circuiting to a plain-mode answer. injection happens AFTER the
+    // think-context dump so the merged system message reads:
+    //   [format pin] [evolved guidance] [background thinking] [persona]
+    // directives front-loaded, background context trailing — the trained
+    // prompt frames the reasoning instead of drowning in thinkCtx.
+    let evolvedGuide = '';
     if (mergedOpts.evolvedApply) {
       try {
         const best = loadBest(mergedOpts.evolvedApply);
-        finalMessages = insertSystemPrompt(finalMessages, best.systemPrompt);
+        evolvedGuide = best.systemPrompt;
         this._log('info', 'evolved', `evolvedApply: ${best.id} (fitness ${(best.fitness ?? 0).toFixed(3)}) injected into pipeline`);
       } catch (e) {
         this._log('warn', 'evolved', `evolvedApply failed: ${(e as Error).message}`);
@@ -864,7 +869,13 @@ export class Deepthink extends EventEmitter {
     }
     let thinkCtxMsg: ChatMessage | null = null;
     if (depth > 0) {
-      const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, { ...mergedOpts, _phase: 'think', _depth: 2 });
+      // the trained prompt ALSO rides into the probes themselves: they are
+      // the deep-think engine, and the evolved techniques (poincare-incubate,
+      // mid-flight-reconsider...) are exactly the reasoning moves the probes
+      // should make. probe framing lives in think.ts via opts.evolvedGuide.
+      const thinkOpts = { ...mergedOpts, _phase: 'think', _depth: 2 };
+      if (evolvedGuide) thinkOpts.evolvedGuide = evolvedGuide;
+      const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, thinkOpts);
       if (brain) brain.add('think_stages', Object.keys(thinkResults).join(', '), 6);
       let thinkCtx = 'BACKGROUND THINKING PROCESS (do not repeat this in your answer):\n';
       for (const [k, v] of Object.entries(thinkResults)) {
@@ -878,6 +889,11 @@ export class Deepthink extends EventEmitter {
       thinkCtxMsg = { role: 'system', content: thinkCtx };
       finalMessages = insertSystemPrompt(finalMessages, thinkCtx);
     }
+    // evolved guidance sits AFTER thinkCtx in the stack but consolidates
+    // BEFORE it (consolidateSystemMessages merges system msgs in array
+    // order), so the merged system message ends up:
+    //   [pin] [evolved] [thinkCtx] [persona...]
+    if (evolvedGuide) finalMessages = insertSystemPrompt(finalMessages, evolvedGuide);
     let codeExec: { result: string; sandboxValidated?: boolean } | null = null;
     let sandboxPrefix: ChatMessage[] = [];
     if (depth > 0 && mergedOpts.enableCode !== false) {

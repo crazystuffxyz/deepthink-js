@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.8.21
+
+### Added
+- **IQ retrain #2 (fixed fitness)** — full-bank evolution with thinkBonus gated to correct answers. New best: `c-0007`, fitness **1.055** (old: 0.937), OOD probe **0.975**, gap 0.080 — generalizes to the untrained set. The new prompt is a five-stage workflow (CLASSIFY → DECOMPOSE → ATTACK → RECONSIDER → VERIFY) with a required `<thinking>` block, secondary moves (feynman-decompose, erdos-counterexample, kahneman-system2, fable-think-format, commit-and-defend), and knuth-worst-case cross-method verification ("if the methods disagree, the second method wins").
+
+### Changed
+- **Evolved prompt now rides into the think probes** — the probes are the deep-think engine, but they ran a fixed THINK_SYS and never saw the trained techniques. `opts.evolvedGuide` now appends the trained prompt to every probe's system content (after THINK_SYS + body + fmt). KV-cache sharing is preserved: all probes still share an identical prefix, so the trained guidance costs nothing extra at prompt-eval.
+- **Evolved prompt injection reordered** — the trained prompt was injected before the thinkCtx dump, so in the merged system message it sat AFTER the 10k+ char thinkCtx and got truncated out of the trace window. Injection now happens after the thinkCtx insertion; `consolidateSystemMessages` merges in array order, so the final system message reads **[format pin] [evolved guidance] [background thinking] [persona]** — directives front-loaded, background context trailing.
+
+### Fixed
+- **freshRun summary miscounted rows with commas in quoted answers** — the summary/table used a naive `split(',')` on the CSV, so a raw answer containing a comma shifted the `ok` column and the summary reported 33/35 where the CSV actually held 34/35. The summary now uses a quote-aware line parser (same one the grader uses).
+
+### IQ validation (gemma4:31b-cloud, depth 2 checks 1, full pipeline, new prompt + new pipeline)
+| Set | plain | **dt + evolved prompt** |
+|---|---:|---:|
+| iqHard (20, OOD, hardest) | 20/20 | **20/20** |
+| freshSet (35, OOD, untrained) | 34/35 | **35/35** — dt fixes the 1 item plain misses (f21, verbal: "Ice" vs "Water"), +2.9 pts |
+
+Same scores as the old prompt on both sets — no regression — and the new prompt is the richer, more general workflow, so it replaces the old one. (The v1.8.20 table's "33/35, +5.7" was the naive-split artifact; the honest number was 34/35, +2.9 all along.)
+
+## v1.8.20
+
+### Fixed
+- **`evolvedApply` short-circuited the whole pipeline** — the best-prompt path hit an early return that turned `generate({ evolvedApply })` into a single raw chat call: no MCTS probes, no checks loop, no format pin. The honest iqHard evolved run therefore measured 1 call/350 tok per problem and dt cratered to 10/20 against plain 20/20 — a bogus number from a real bug. The early return is gone; `evolvedApply` now falls through to the pipeline path that injects the trained prompt as thinking guidance for probes/checks/revisions, exactly as the comment at that site always claimed.
+- **thinkBonus scored wrong answers** — `scoreOne` added the think bonus (`+0.04 <thinking>`, `+0.02` hedges, `+0.02` rigor words) to the weighted score even when the item was wrong. The IQ evolution gamed it: pattern-name prose ("poincare-incubate: I hit the wall…") banked fitness on answers that were never right, and the best prompt it produced told the model to describe techniques instead of solving. The bonus now applies only to correct answers (`score > 0`).
+- **`iqValidate.js` measured the wrong protocol** — it ran the evolved prompt as a raw single-shot with no ANSWER pin and no pipeline, so its 8/20 iqHard number was never comparable to the 19/20 baseline (which used freshRun's PLAIN_SYS pin + full pipeline). It now applies the same pin and uses the shared `parseAnswer`/`answersMatch` grader, plus a `--control` mode (default prompt) for apples-to-apples.
+
+### IQ validation (gemma4:31b-cloud, depth 2 checks 1, full pipeline)
+| Set | baseline dt* | **dt + evolved prompt** |
+|---|---:|---:|
+| iqHard (20, OOD, hardest) | 19/20 | **20/20** — h12 fixed (answered prose instead of the choice number; the evolved prompt's step-checking lands the number) |
+| freshSet (35, OOD, untrained) | 34/35 | **35/35** — no regression, and dt fixes the 1 item plain misses (f21, verbal: "Ice" vs "Water"; +2.9 pts delta) |
+
+\* baseline re-scored against the corrected golds. h04 (HH-vs-HT) appears as a baseline miss in the old table but that was a gold error in the data (fixed in 5d7b604, an hour after the baseline ran) — the model had the right answer ("equally likely") all along.
+
 ## v1.8.19
 
 ### Fixed

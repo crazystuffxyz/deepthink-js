@@ -671,10 +671,14 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
       `  - Expected price in one year E[S_T] = S₀e^{μT}: $${quantModel.expectedPrice.toFixed(2)}\n` +
       `  - A "## Quantitative Model" section with full derivations is appended automatically — write prose consistent with it.`;
   } else if (opts.mode === 'stock') {
-    // engine couldn't compute (missing price/EPS/beta in claims): the writer
-    // MUST NOT invent math to fill the gap — that is how "Merton
-    // jump-diffusion" hallucinations enter reports.
-    quantNote = `\n\nTHE PIPELINE COULD NOT COMPUTE A QUANTITATIVE MODEL — the verified claims are missing inputs (current price, EPS, beta, or growth). Do NOT invent quantitative models (no Monte Carlo, no jump-diffusion, no unstated DCF values, no invented expected returns, Sharpe ratios, or VaR figures). State ONLY what the cited sources support, and attribute every number to its source.`;
+    // engine couldn't compute (missing inputs in claims): the writer MUST
+    // NOT invent math to fill the gap — that is how "Merton jump-diffusion"
+    // hallucinations enter reports. name the EXACT missing inputs so the
+    // writer can't over-generalize (run 20: price/EPS/beta were all found,
+    // only growth was missing, and the exec summary claimed all four were
+    // absent).
+    const missingNames = ['current price', 'EPS', 'beta', 'growth rate'].filter((k, i) => [quantModel.price, quantModel.eps, quantModel.beta, quantModel.growth][i] == null);
+    quantNote = `\n\nTHE PIPELINE COULD NOT COMPUTE A QUANTITATIVE MODEL — the verified claims are missing: ${missingNames.join(', ') || 'inputs'}. Do NOT invent quantitative models (no Monte Carlo, no jump-diffusion, no unstated DCF values, no invented expected returns, Sharpe ratios, or VaR figures). State ONLY what the cited sources support, and attribute every number to its source.`;
   }
   const stockNote = opts.mode === 'stock'
     ? `\n\nSTOCK REPORT REQUIREMENTS (non-negotiable):\n  - If you run a DCF or Monte Carlo, STATE the resulting intrinsic value estimate in dollars per share.\n  - Apply Ito's lemma concretely: derive the expected log-return (μ - σ²/2)T and use it in your expected-return math. Do not just name-drop the equation.\n  - Every risk metric (VaR, Sharpe) must be consistent with the stated volatility: 1-day 95% VaR = 1.645 * σ / sqrt(252).\n  - State the expected return over your target horizon and the volatility that justifies the recommendation.${quantNote}`

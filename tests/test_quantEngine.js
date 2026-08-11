@@ -242,5 +242,58 @@ function check(name, cond, detail = '') {
   check('EPS growth % untouched', rep.includes('EPS growth of 5%'), rep);
 }
 
+// ---- run-15: "TTM EPS growth is 214.42%" — the EPS window crossed
+// "growth is" and captured the growth RATE as the EPS value ($214.42 EPS
+// → IV $52,671). rates are never EPS: growth/cagr words in the window and
+// a % right after the number both disqualify ----
+{
+  const m = runQuantModel([
+    'NVDA Trailing Twelve Months (TTM) diluted earnings per share is $6.53 as of 2026.',
+    'NVIDIA\'s TTM EPS growth is 214.42% as of 2026.',
+    'NVDA diluted EPS TTM CAGR is 71.00%.',
+    'NVDA long-term diluted EPS CAGR over 10 years is 75.00%.',
+    'NVDA diluted EPS for the quarter ending 2026-03-31 was $2.39.',
+    'NVDA stock price is $217.55.',
+    'NVDA beta is 1.87.',
+    'NVDA volatility is 40.1%.',
+    'risk-free rate 4.2%, equity risk premium 5.5%',
+  ]);
+  check('EPS growth % NOT harvested as EPS', m.eps === 6.53, `got ${m.eps}`);
+  check('EPS CAGR NOT harvested as EPS', m.eps === 6.53, `got ${m.eps}`);
+  check('IV sane with capped growth', m.intrinsicValue != null && m.intrinsicValue < 1000, `got ${m.intrinsicValue}`);
+}
+
+// ---- run-15: "54% expect that growth to be 11% or more" — the loose
+// growth window crossed "2026, and" and grabbed the survey share (54%)
+// as the growth rate. the %→growth-word gap is tight now, and the
+// post-growth window is digit-safe ----
+{
+  const m = runQuantModel([
+    'About 93% of leaders expect revenue growth in 2026, and 54% expect that growth to be 11% or more.',
+    'NVDA stock price is $217.55.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'NVDA 3-year EPS CAGR is 64%.',
+    'NVDA beta is 1.87.',
+    'NVDA volatility is 40.1%.',
+    'risk-free rate 4.2%, equity risk premium 5.5%',
+  ]);
+  check('survey share NOT harvested as growth', m.growth != null && Math.abs(m.growth - 0.54) > 0.01, `got ${m.growth}`);
+  check('CAGR fallback feeds the DCF', m.intrinsicValue != null, `got ${m.intrinsicValue}`);
+}
+
+// ---- run-15: the EPS after-window must not cross into the next claim
+// ("...$6.53. Revenue grew 50%") and see its % ----
+{
+  const m = runQuantModel([
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'NVDA stock price is $217.55.',
+    'NVDA beta is 1.87.',
+    'NVDA volatility is 40.1%.',
+    'risk-free rate 4.2%, equity risk premium 5.5%',
+  ]);
+  check('EPS kept when next claim has a %', m.eps === 6.53, `got ${m.eps}`);
+}
+
 console.log(`\nquantEngine: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

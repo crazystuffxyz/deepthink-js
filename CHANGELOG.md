@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.8
+
+### Fixed
+- **Growth rates harvested as EPS** — run 15: "TTM EPS growth is 214.42%" — the EPS window crossed "growth is" and captured the growth RATE as the EPS value ($214.42 EPS → IV $52,671/share on a $217 stock). The EPS harvest now bans growth/cagr/rate words between the anchor and the number, and a `%` sign within 8 chars after it (the window is short so it can't cross into the next claim's percentage). Same guard class as the P/E multiple ban in v1.8.4.
+- **Survey shares harvested as growth** — run 15: "54% expect that growth to be 11% or more" — the loose `[\s\S]` growth windows crossed "2026, and" and grabbed the survey share (54%) as the growth rate. The `%`→growth-word gap is now tight (a "26% increase" is 0-2 chars; "54% expect that growth" is 13), and the post-growth window is digit-safe so it can't cross a year to reach a later number. EPS CAGR ("3-year EPS CAGR of 64%") is added as a legit annualized-growth fallback.
+- **Unbounded DCF growth** — the constant-growth DCF projected whatever CAGR the sources claimed for a full decade (71% TTM EPS CAGR → IV $4,309). The projection is now capped at 30% (sustainable-growth assumption, stated in the section) and fades linearly to the 3% terminal rate over the horizon — standard analyst practice, and the verdict becomes insensitive to which CAGR claim the harvest happens to pick first.
+
 ## v1.8.7
 
 ### Fixed

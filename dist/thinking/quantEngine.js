@@ -215,6 +215,30 @@ export function runQuantModel(claims) {
         ...scanPriceForwardAll(text),
     ]);
     let priceSource = 'quoted price';
+    // run 16: the $8.00 glitch struck again, but this time no shares-outstanding
+    // claim was harvested, so the implied-price cross-check had nothing to
+    // divide by. the same claims DID carry the 52-week range ($164.07–$236.54)
+    // — a quote 2x below the 52-week LOW or above the HIGH is implausible the
+    // same way a quote 2x off the implied price is. when the range rejects the
+    // quote, the implied price (if any) wins; otherwise the price is dropped
+    // and the recovery crawl fires for a real quote.
+    const rangeM = text.match(/(?:52[- ]?week|52week)[^0-9]{0,25}?\$?([\d,]+\.?\d*)[^0-9]{0,25}?\$?([\d,]+\.?\d*)/i)
+        ?? text.match(/(?:traded|trading|swung|ranged|range)[^0-9]{0,15}?between[^0-9]{0,15}?\$?([\d,]+\.?\d*)[^0-9]{0,15}?(?:and|to)[^0-9]{0,15}?\$?([\d,]+\.?\d*)/i);
+    if (price != null && rangeM) {
+        const lo = parseFloat(rangeM[1].replace(/,/g, ''));
+        const hi = parseFloat(rangeM[2].replace(/,/g, ''));
+        if (lo > 0 && hi > lo && (price < lo * 0.5 || price > hi * 2)) {
+            const orig = price;
+            if (impliedPrice != null) {
+                price = impliedPrice;
+                priceSource = `implied from market cap ÷ shares (quote $${orig.toFixed(2)} rejected — outside 52-week range $${lo.toFixed(2)}–$${hi.toFixed(2)})`;
+            }
+            else {
+                price = null;
+                priceSource = `rejected — quote $${orig.toFixed(2)} outside 52-week range $${lo.toFixed(2)}–$${hi.toFixed(2)}`;
+            }
+        }
+    }
     if (price != null && impliedPrice != null && (price < impliedPrice * 0.5 || price > impliedPrice * 2)) {
         const orig = price;
         price = impliedPrice;
@@ -241,6 +265,17 @@ export function runQuantModel(claims) {
                 if (isNaN(v) || yearLike(v))
                     continue;
                 const ctx = (mm[0] || '').toLowerCase();
+                // run 15: "TTM EPS growth is 214.42%" — the window crossed "growth
+                // is" and captured the growth RATE as the EPS value. a rate is
+                // never the EPS: ban growth/cagr/rate words between the anchor and
+                // the number, and a % sign right after it (same guard class as the
+                // P/E multiple ban in v1.8.4). the after-window is 8 chars — an
+                // EPS value is never followed by % within a few chars, and a longer
+                // window crosses into the NEXT claim ("...$6.53. Revenue grew 50%")
+                // and sees its %.
+                const after = text.slice(mm.index + mm[0].length, mm.index + mm[0].length + 8).toLowerCase();
+                if (/%/.test(after) || /growth|increase|cagr|rate|jump|surge|rise/.test(ctx))
+                    continue;
                 const quarterly = /q[1-4]|quarterly|quarter\b/.test(ctx) ? 1 : 0;
                 const annual = /annual|full[- ]year|\bttm\b|trailing|fiscal year/.test(ctx) ? 1 : 0;
                 cands.push({ v, q: annual - quarterly });
@@ -251,9 +286,17 @@ export function runQuantModel(claims) {
         cands.sort((x, y) => y.q - x.q);
         return cands[0].v;
     })();
+    // run 15: "54% expect that growth to be 11% or more" — the loose [\s\S]
+    // windows crossed "2026, and" and grabbed the survey share (54%) as the
+    // growth rate. the %→growth-word gap is now tight (a "26% increase" is
+    // 0-2 chars; "54% expect that growth" is 13), and the post-growth window
+    // is digit-safe so it can't cross a year to reach a later number.
     let growth = pct(text.match(/(?:revenue|sales|earnings)[\s\S]{0,80}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
-        ?? pct(text.match(/(?:revenue|sales|earnings)[\s\S]{0,40}?\s+(?:grew|growth|increased|increase|jumped)[\s\S]{0,60}?([\d.]+)\s*%/i))
-        ?? pct(text.match(/(?:representing|represented)[\s\S]{0,50}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i));
+        ?? pct(text.match(/(?:revenue|sales|earnings)[^0-9]{0,40}?\s+(?:grew|growth|increased|increase|jumped)[^0-9]{0,60}?([\d.]+)\s*%/i))
+        ?? pct(text.match(/(?:representing|represented)[\s\S]{0,50}?([\d.]+)\s*%\s*(?:increase|growth|jump|surge|rise)/i))
+        // EPS CAGR is a legit annualized-growth proxy when no explicit growth %
+        // is cited — "3-year EPS CAGR of 64%" feeds the DCF the same way
+        ?? pct(text.match(/(?:cagr|compound annual growth rate)[^0-9]{0,40}?([\d.]+)\s*%/i));
     let growthSource = 'explicit growth %';
     if (growth == null) {
         // fallback: PEG = forward P/E / expected growth  →  g = PE / PEG.
@@ -300,13 +343,23 @@ export function runQuantModel(claims) {
     // ---- compute ----
     const costOfEquity = beta != null ? rf + beta * erp : null;
     const vol = sigma ?? (beta != null ? beta * 0.18 : null); // beta-based fallback: market vol ~18%
-    const intrinsicValue = eps != null && costOfEquity != null && growth != null && costOfEquity > TERMINAL_GROWTH
+    // DCF growth: cap + fade. run 15: the recovery crawl surfaced "TTM EPS
+    // CAGR 71%" and the constant-growth DCF projected 71% for a decade —
+    // IV $4,309/share on a $217 stock. no company sustains that; analysts
+    // cap the projection at a sustainable rate and fade it down to the
+    // terminal rate over the horizon. the cap is a modeling assumption, so
+    // the section text says so explicitly.
+    const GROWTH_CAP = 0.30;
+    const gDcf = growth != null ? Math.min(growth, GROWTH_CAP) : null;
+    const intrinsicValue = eps != null && costOfEquity != null && gDcf != null && costOfEquity > TERMINAL_GROWTH
         ? (() => {
-            // 10-yr DCF: project EPS at g, discount at Re, Gordon terminal value
+            // 10-yr DCF: project EPS at g fading linearly to the terminal
+            // rate, discount at Re, Gordon terminal value
             let pv = 0;
             let cf = eps;
             for (let t = 1; t <= HORIZON_YRS; t++) {
-                cf = cf * (1 + growth);
+                const g_t = gDcf + (TERMINAL_GROWTH - gDcf) * (t - 1) / (HORIZON_YRS - 1);
+                cf = cf * (1 + g_t);
                 pv += cf / Math.pow(1 + costOfEquity, t);
             }
             const tv = cf * (1 + TERMINAL_GROWTH) / (costOfEquity - TERMINAL_GROWTH);
@@ -333,7 +386,8 @@ export function runQuantModel(claims) {
         L.push(`**Cost of equity (CAPM):** cannot compute — beta not found in sources.`);
     }
     if (intrinsicValue != null) {
-        L.push(`**Discounted Cash Flow:** EPS ${eps.toFixed(2)} projected ${HORIZON_YRS} years at ${(growth * 100).toFixed(1)}\\% growth, discounted at ${(costOfEquity * 100).toFixed(2)}\\%; terminal value via Gordon growth at ${(TERMINAL_GROWTH * 100).toFixed(0)}\\% — **intrinsic value ≈ $${intrinsicValue.toFixed(2)}/share** (${upside != null ? (upside >= 0 ? '+' : '') + (upside * 100).toFixed(1) + '%' : 'n/a'} vs the current price).`);
+        const capped = growth > GROWTH_CAP ? ` (capped from ${(growth * 100).toFixed(1)}\\% — sustainable-growth assumption)` : '';
+        L.push(`**Discounted Cash Flow:** EPS ${eps.toFixed(2)} projected ${HORIZON_YRS} years at ${(gDcf * 100).toFixed(1)}\\% growth${capped}, fading linearly to ${(TERMINAL_GROWTH * 100).toFixed(0)}\\% terminal, discounted at ${(costOfEquity * 100).toFixed(2)}\\%; terminal value via Gordon growth — **intrinsic value ≈ $${intrinsicValue.toFixed(2)}/share** (${upside != null ? (upside >= 0 ? '+' : '') + (upside * 100).toFixed(1) + '%' : 'n/a'} vs the current price).`);
     }
     else {
         L.push('**Discounted Cash Flow:** cannot compute — need EPS, growth, and cost of equity from sources.');
@@ -350,7 +404,7 @@ export function runQuantModel(claims) {
     L.push('*All figures above are computed deterministically by the research pipeline from the cited inputs — no estimation. The report prose must use these exact numbers.*');
     return {
         ok: price != null && eps != null && growth != null && beta != null && vol != null && intrinsicValue != null,
-        price, eps, growth, beta, rf, erp, costOfEquity, sigma: vol,
+        price, priceSource, eps, growth, beta, rf, erp, costOfEquity, sigma: vol,
         intrinsicValue, expectedReturn, expectedLogReturn, expectedPrice,
         sharpe, var95_1d, var99_1d, var95_1y, upside,
         section: L.join('\n'),

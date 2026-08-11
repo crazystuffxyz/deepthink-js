@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8.9
+
+### Fixed
+- **52-week-range price sanity check** — run 16: the $8.00 quote glitch struck a third time, and this time no shares-outstanding claim was harvested, so the market-cap ÷ shares cross-check had nothing to divide by. The same claims carried the 52-week range ("traded between $164.07 and $236.54") — a quote more than 2× below the 52-week LOW or above the HIGH is now rejected the same way an off-by-2× implied-price quote is. The implied price wins when available; otherwise the price is dropped and the quote-recovery crawl fires. `priceSource` is now returned on the model so the rejection is visible.
+- **Section overlap from order-based chunking** — run 15: 5 chunks × 4 subheadings each = 21 `##` sections, with "Industry Status Quo" appearing in 3 different chunks because claims were chunked by ORDER, not theme. Claims are now theme-clustered (one LLM call groups them into K distinct-theme clusters; every index must be covered exactly once or the original order is kept) before chunking, and the writer's subheadings drop to `###` so the `##` level stays reserved for top-level sections.
+- **Coverage-gaps disclaimer shipped before the Executive Summary** — run 15: "## Coverage Gaps" was the report's first section, violating the "Executive Summary must lead" structural rule. The disclaimer now lands after the Conclusion, before References — transparency kept, placement fixed.
+- **Citation tag spam** — run 15: "[Source 1, Source 1, Source 1...]" ×16 — the same source page produced several claims that all merged into one node, and the duplicate URLs all mapped to the same ref id. `mergeDuplicateClaims` now dedupes URLs/srcMeta on merge, and the writer dedupes ref ids per claim.
+- **Login-wall titles in References** — run 15: a reference titled "Create Account - FinanceCharts.com" (the page's `<title>` tag behind a login wall). `sanitizeTitle` rejects login/bot-blocker titles ("Create Account", "Just a moment...", "Access Denied", "404"...), and the ref builder falls back to a URL-derived title ("eps-diluted-ttm" → "EPS Diluted TTM").
+- **Domain expert critic parse failures** — run 16: the critic's JSON failed to parse in every loop because LLMs mangle enum values ("minor revision" with a space, "Critical" capitalized) and one bad value kills the whole Zod parse. All LLM-facing enums now normalize case/whitespace before validation (`normEnum`).
+- **Humanize internals silent** — the humanize loop's per-iteration logs (detector scores, radical escalation) never reached the pipeline log because `opts.log` was never passed through. Now wired.
+
 ## v1.8.8
 
 ### Fixed

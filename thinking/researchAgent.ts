@@ -562,8 +562,14 @@ function mergeDuplicateClaims(nodes: any[]): any[] {
       // holds for "diluted EPS 6.53" vs "diluted EPS 6.54".
       if (sharedNums >= 2 || (sharedNums >= 1 && sharedWords >= 1)) {
         used.add(j);
-        merged.urls.push(b.url);
-        merged.srcMeta.push({ url: b.url, title: b.title, citation: b.citation, publicationDate: b.publicationDate });
+        // dedupe URLs — the same source page can produce several claims that
+        // all merge into one node, and run 15 shipped "[Source 1, Source 1,
+        // Source 1...]" ×16 because the duplicate URLs all mapped to the
+        // same ref id.
+        if (!merged.urls.includes(b.url)) {
+          merged.urls.push(b.url);
+          merged.srcMeta.push({ url: b.url, title: b.title, citation: b.citation, publicationDate: b.publicationDate });
+        }
         log({ level: 'info', msg: `[STEP 6] Merged duplicate claim (${sharedNums} shared nums, ${sharedWords} shared words): "${(a.claim || '').slice(0, 60)}..." + "${(b.claim || '').slice(0, 60)}..."`, source: 'researchAgent', ts: Date.now() });
       }
     }
@@ -592,12 +598,55 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
       if (refMap.has(m.url)) continue;
       const cData = m.citation?.data || {};
       const siteFallback = (() => { try { const h = new URL(m.url).hostname; return h || (m.url.startsWith('file://') ? m.title : m.url); } catch { return m.url; } })();
-      refMap.set(m.url, { id: refMap.size + 1, url: m.url, title: cData.title || m.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || m.publicationDate || 'n.d.', site: cData.site || siteFallback });
+      // login-wall pages yield 'Untitled' (sanitizeTitle) — fall back to a
+      // URL-derived title so the References section still names the page
+      // ("eps-diluted-ttm" → "EPS Diluted TTM").
+      const urlTitle = (() => {
+        try {
+          const seg = decodeURIComponent(new URL(m.url).pathname.split('/').filter(Boolean).pop() || '');
+          return seg.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
+        } catch { return ''; }
+      })();
+      const title = cData.title && cData.title !== 'Untitled' ? cData.title : (m.title && m.title !== 'Untitled' ? m.title : (urlTitle || node.citedSummary || 'Untitled'));
+      refMap.set(m.url, { id: refMap.size + 1, url: m.url, title, author: cData.author || '', year: cData.year || m.publicationDate || 'n.d.', site: cData.site || siteFallback });
     }
   }
   for (const [, ref] of refMap) ref.apa = buildAPACitation(ref);
+  // theme-cluster the claims before chunking (run 15: 5 chunks × 4
+  // subheadings each = 21 overlapping ## sections — "Industry Status
+  // Quo" appeared in 3 different chunks because claims were chunked by
+  // ORDER, not theme). one LLM call groups the claims into K thematic
+  // clusters; each cluster becomes one section with a distinct theme.
+  // every index must be covered exactly once — any drop falls back to
+  // the original order.
+  const k = Math.max(1, Math.ceil(deduped.length / chunk));
+  let clustered = deduped;
+  try {
+    const cR = await callChat(
+      [{ role: 'system', content: `You are a research librarian. Group the given claims into ${k} thematic clusters. Each cluster must have a DISTINCT theme (e.g. "Financial Performance", "Competitive Moat", "Industry Outlook" — never two clusters on the same theme). Every claim index must appear in EXACTLY ONE cluster. Output ONLY valid JSON — no markdown fences:\n[{"theme": "short theme name", "indices": [0, 2, 5]}]` },
+       { role: 'user', content: `CLAIMS:\n${deduped.map((n: any, i: number) => `[${i}] ${n.claim}`).join('\n')}` }],
+      false, null, { ...opts, think: false, samplingProfile: 'json' });
+    const parsed = parseJsonSafe(cR.content || '', z.array(z.object({ theme: z.string(), indices: z.array(z.number()) })));
+    if (parsed) {
+      const seen = new Set<number>();
+      const ordered: any[] = [];
+      for (const cl of parsed) {
+        for (const idx of cl.indices) {
+          if (idx >= 0 && idx < deduped.length && !seen.has(idx)) { seen.add(idx); ordered.push(deduped[idx]); }
+        }
+      }
+      if (seen.size === deduped.length) {
+        clustered = ordered;
+        log({ level: 'info', msg: `[STEP 6] Theme-clustered ${deduped.length} claims into ${parsed.length} groups`, source: 'researchAgent', ts: Date.now() });
+      } else {
+        log({ level: 'warn', msg: `[STEP 6] Theme clustering covered ${seen.size}/${deduped.length} claims — using original order`, source: 'researchAgent', ts: Date.now() });
+      }
+    }
+  } catch (e) {
+    log({ level: 'warn', msg: `[STEP 6] Theme clustering failed (${(e as Error).message}) — using original order`, source: 'researchAgent', ts: Date.now() });
+  }
   const chunks: any[][] = [];
-  for (let i = 0; i < deduped.length; i += chunk) chunks.push(deduped.slice(i, i + chunk));
+  for (let i = 0; i < clustered.length; i += chunk) chunks.push(clustered.slice(i, i + chunk));
   log({ level: 'info', msg: `[STEP 6] Writing ${chunks.length} sections...`, source: 'researchAgent', ts: Date.now() });
   const sections: string[] = [];
   let previousTail = '';
@@ -634,13 +683,13 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
     const chunkSlice = chunks[ci];
     const isFirst = ci === 0;
     const taggedClaims = chunkSlice.map((node: any) => {
-      const refIds = (node.urls || [node.url]).map((u: string) => refMap.get(u)?.id ?? '?');
+      const refIds = [...new Set((node.urls || [node.url]).map((u: string) => refMap.get(u)?.id ?? '?'))];
       const pubTag = node.publicationDate && node.publicationDate !== 'unknown' ? ` [published ${node.publicationDate}]` : '';
       return `[Source ${refIds.join(', Source ')}${pubTag}] ${node.claim}`;
     }).join('\n');
     const continuityNote = isFirst ? `Begin with a 3-sentence Executive Summary answering: "${topic}"` : `Continue the report seamlessly. The previous section ended with:\n"...${previousTail}"`;
     const r = await callChat(
-      [{ role: 'system', content: `You are writing section ${ci + 1} of ${chunks.length} of a research report.\n\nORIGINAL QUESTION: "${topic}"\n${requiredNote}\n${timeNote}${stockNote}\n\nSECTION RULES:\n  1. Write complete, detailed prose for EVERY claim — do not skip any.\n  2. Do NOT save tokens. Do NOT summarize. Write fully.\n  3. Keep every [Source N] inline citation tag exactly as given.\n  4. Use ## subheadings to group claims by theme.\n  5. Do NOT write a conclusion — that comes in the final section.\n  6. Do NOT write a references section.\n  7. Do NOT repeat content from the previous section.\n  8. Each [Source N] tag includes a published date. When citing historical data,\n     clearly label it: "As of [date], ...". Do NOT present old data as current.\n\n${continuityNote}` },
+      [{ role: 'system', content: `You are writing section ${ci + 1} of ${chunks.length} of a research report.\n\nORIGINAL QUESTION: "${topic}"\n${requiredNote}\n${timeNote}${stockNote}\n\nSECTION RULES:\n  1. Write complete, detailed prose for EVERY claim — do not skip any.\n  2. Do NOT save tokens. Do NOT summarize. Write fully.\n  3. Keep every [Source N] inline citation tag exactly as given.\n  4. Use ### subheadings to group claims by theme (the ## level is reserved for the report's top-level sections).\n  5. Do NOT write a conclusion — that comes in the final section.\n  6. Do NOT write a references section.\n  7. Do NOT repeat content from the previous section.\n  8. Each [Source N] tag includes a published date. When citing historical data,\n     clearly label it: "As of [date], ...". Do NOT present old data as current.\n\n${continuityNote}` },
        { role: 'user', content: `Claims for section ${ci + 1}:\n\n${taggedClaims}\n\nWrite the section now. Answer: "${topic}"` }],
       false, null, { ...opts, think: false, samplingProfile: 'creative' });
     const sectionText = (r.content || '').trim();
@@ -656,8 +705,13 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
     false, null, { ...opts, think: true, samplingProfile: 'reasoning' });
   const conclusion = (conclusionR.content || '').trim();
   const refsSection = '\n\n---\n## References\n\n' + [...refMap.values()].sort((a: any, b: any) => a.id - b.id).map((ref: any) => `[${ref.id}] ${ref.apa}`).join('\n');
-  const preamble = coverageGaps ? coverageGaps : '';
-  let fullReport = preamble + concatenated + '\n\n---\n## Conclusion\n\n' + conclusion + refsSection;
+  // coverage-gaps disclaimer goes AFTER the conclusion, not before the exec
+  // summary — run 15 shipped "## Coverage Gaps" as the report's first section,
+  // violating the "Executive Summary must lead" structural rule. transparency
+  // is kept, placement is fixed.
+  const preamble = '';
+  const gapsTail = coverageGaps ? '\n\n---\n' + coverageGaps.replace(/\n---\s*$/, '') : '';
+  let fullReport = concatenated + '\n\n---\n## Conclusion\n\n' + conclusion + gapsTail + refsSection;
   // citation integrity: every source must be cited in the body, every tag must
   // resolve, and the References section must list every source. the writer is
   // told to keep tags — this makes sure it actually did.
@@ -1300,7 +1354,7 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
     // damage each rewrite causes, looping until clean.
     if (opts.humanize) {
       log({ level: 'info', msg: '[HUMANIZE] Running humanize loop on final report...', source: 'researchAgent', ts: Date.now() });
-      const h = await humanizeText(callChat, finalReport, opts);
+      const h = await humanizeText(callChat, finalReport, { ...opts, log });
       finalReport = h.text;
       stepSummary.humanize = { iterations: h.iterations, finalScore: h.finalScore, ok: h.ok };
       log({ level: 'success', msg: `[HUMANIZE] Done — ${h.iterations} iterations, detector score ${h.finalScore}`, source: 'researchAgent', ts: Date.now() });

@@ -67,6 +67,21 @@ If the rewrite is fine, output {"issues": [], "ok": true}.`;
 const FIX_SYS = `You are a careful editor. Apply ONLY the listed fixes to the text. Do not rewrite anything else. Do not change style, tone, or structure beyond the fixes. Preserve every [Source N] tag.
 
 Output ONLY the complete corrected text. No preamble, no explanation.`;
+// plateau escalation: when the tells feedback converges above 0, the normal
+// humanizer has run out of moves — one radical persona rewrite transplants a
+// completely different register (run 14: stuck at 15% with the standard
+// prompt). if the radical pass scores better, the loop keeps going.
+const RADICAL_SYS = `You are a specific human professional — a senior analyst at a boutique research firm writing a client memo at the end of a long day. Rewrite the text completely in your own voice, as if you typed it yourself at your desk.
+
+RULES:
+1. Write like you talk: contractions, run-ons, fragments, parenthetical asides. Real people do not write in perfect paragraphs.
+2. Vary sentence length violently — some sentences are 3 words, some are 50.
+3. Kill every trace of AI register: no "furthermore", no "in conclusion", no "it is important to note", no em-dash pairs, no "Not only... but also", no bullet-point parallelism, no hedging.
+4. Use concrete, specific language. Where the text has a number, keep the number EXACTLY.
+5. Keep the structure the text needs (headings, lists) but make the prose inside feel like a person typed it.
+6. NEVER change facts, numbers, names, dates, or citations. Every [Source N] tag must survive verbatim.
+7. Do not add new claims. Do not remove claims.
+8. Output ONLY the rewritten text. No preamble, no explanation.`;
 const DETECTOR_SYS = `You are an AI-text detector with a sharp eye. Judge how likely the given text was written by an AI.
 
 SIGNALS OF AI WRITING:
@@ -179,7 +194,47 @@ export async function humanizeText(callChat, text, opts = {}) {
         const prev = history.at(-2)?.aiScore;
         const prev2 = history.at(-3)?.aiScore;
         if (prev != null && prev2 != null && score >= prev && prev >= prev2) {
-            log({ level: 'warn', msg: `[humanize] score plateaued (${prev2} -> ${prev} -> ${score}) — stopping early`, source: 'humanize', ts: Date.now() });
+            // escalation: one radical persona rewrite can break the register
+            // plateau (run 14: stuck at 15% — the normal humanizer converged but
+            // the text still read as AI). if the radical pass improves, keep
+            // looping; if not, stop.
+            log({ level: 'warn', msg: `[humanize] score plateaued (${prev2} -> ${prev} -> ${score}) — trying radical persona rewrite`, source: 'humanize', ts: Date.now() });
+            const rR = await callChat([{ role: 'system', content: RADICAL_SYS }, { role: 'user', content: current }], false, null, { ...opts, think: false, samplingProfile: 'creative' });
+            const radical = (rR.content || '').trim();
+            if (radical.length >= current.length * 0.3) {
+                // the radical pass gets the same integrity treatment as a normal
+                // rewrite — facts must survive the voice transplant
+                const iR2 = await callChat([{ role: 'system', content: INTEGRITY_SYS }, { role: 'user', content: `ORIGINAL:\n${current}\n\n---\n\nREWRITE:\n${radical}` }], false, null, { ...opts, think: false, samplingProfile: 'json' });
+                const integrity2 = parseJsonSafe(iR2.content || '', IntegritySchema) || { issues: [], ok: true };
+                const issues2 = Array.isArray(integrity2.issues) ? integrity2.issues : [];
+                const missing2 = claimsSurvived(current, radical);
+                if (missing2.length)
+                    issues2.push({ type: 'fact_drift', original: missing2.join(', '), rewritten: '(missing)', fix: `Restore these exact values into the text: ${missing2.join(', ')}` });
+                let radicalFinal = radical;
+                if (issues2.length) {
+                    const issuesList2 = issues2.map((iss, i) => `ISSUE ${i + 1} [${iss.type}]:\n  Original: "${iss.original || ''}"\n  Rewritten: "${iss.rewritten || ''}"\n  Fix: ${iss.fix || 'Repair as described'}`).join('\n\n');
+                    const fR2 = await callChat([{ role: 'system', content: FIX_SYS }, { role: 'user', content: `ISSUES TO FIX:\n${issuesList2}\n\n---\n\nTEXT:\n${radical}` }], false, null, { ...opts, think: false, samplingProfile: 'creative' });
+                    const fixed2 = (fR2.content || '').trim();
+                    if (fixed2.length >= radical.length * 0.5)
+                        radicalFinal = fixed2;
+                }
+                const dR2 = await callChat([{ role: 'system', content: DETECTOR_SYS }, { role: 'user', content: radicalFinal }], false, null, { ...opts, think: false, samplingProfile: 'json' });
+                const det2 = parseJsonSafe(dR2.content || '', DetectorSchema) || { aiScore: 100, tells: [], verdict: 'ai' };
+                const score2 = Math.max(0, Math.min(100, det2.aiScore == null ? 100 : Number(det2.aiScore)));
+                history.push({ iteration: iter, aiScore: score2, tells: det2.tells || [], issuesFixed: issues2.length, radical: true });
+                log({ level: 'info', msg: `[humanize] radical rewrite — detector score: ${score2} (verdict: ${det2.verdict})`, source: 'humanize', ts: Date.now() });
+                if (score2 < score) {
+                    current = radicalFinal;
+                    if (score2 <= threshold) {
+                        log({ level: 'success', msg: `[humanize] radical rewrite hit ${score2} <= ${threshold} — done`, source: 'humanize', ts: Date.now() });
+                        return { text: current + refTail, iterations: iter, finalScore: score2, history, ok: true };
+                    }
+                    continue; // improved — keep the normal loop going
+                }
+                log({ level: 'warn', msg: `[humanize] radical rewrite did not improve (${score} -> ${score2}) — stopping early`, source: 'humanize', ts: Date.now() });
+                return { text: current + refTail, iterations: iter, finalScore: score, history, ok: score <= threshold };
+            }
+            log({ level: 'warn', msg: '[humanize] radical rewrite suspiciously short — stopping early', source: 'humanize', ts: Date.now() });
             return { text: current + refTail, iterations: iter, finalScore: score, history, ok: score <= threshold };
         }
     }

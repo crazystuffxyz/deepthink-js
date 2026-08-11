@@ -30,6 +30,23 @@ function sanitizeAuthor(raw) {
         return 'Unknown Author'; // "by", "ed", "me"
     return s;
 }
+// login walls and bot-blockers serve junk <title> tags ("Create Account",
+// "Just a moment...", "Access Denied") — run 15 shipped a reference titled
+// "Create Account - FinanceCharts.com". reject those titles outright; the
+// caller falls back to a URL-derived title.
+function sanitizeTitle(raw) {
+    const s = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!s || s.length > 200)
+        return 'Untitled';
+    const junk = /^(create account|sign in|log in|login|register|access denied|forbidden|page not found|not found|just a moment|attention required|verify you are a human|sorry, you have been blocked|access to this page has been denied|subscribe|membership|unlock|enable javascript|checking your browser|one more step|under maintenance|site is down|error \d{3}|404|403|401|500|welcome|home|homepage|index)$/i;
+    if (junk.test(s))
+        return 'Untitled';
+    // "Create Account - FinanceCharts.com" — junk prefix before a separator
+    const base = s.split(/\s*[|–—-]\s*/)[0].trim();
+    if (junk.test(base))
+        return 'Untitled';
+    return s;
+}
 function formatCitations(data) {
     const { author, title, year, site, url, accessed } = data;
     const a = author === 'Unknown Author' ? '' : author;
@@ -90,7 +107,7 @@ export async function generateCitation(url) {
         const accessed = formatDate(new Date());
         const data = {
             author: sanitizeAuthor(author),
-            title: title.replace(/\s+/g, ' ').trim(),
+            title: sanitizeTitle(title),
             year: finalYear,
             site: site.replace(/\s+/g, ' ').trim(),
             url,

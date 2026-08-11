@@ -216,6 +216,22 @@ function check(name, cond, detail = '') {
   check('per-URL metadata kept', merged[0].srcMeta && merged[0].srcMeta.length === 2 && merged[0].srcMeta[1].title === 'Nvidia Stock Beta - B.org', JSON.stringify(merged[0].srcMeta));
 }
 
+// ---- run 15: the same source page produced several claims that all merged
+// into one node — duplicate URLs mapped to the same ref id and the writer
+// emitted "[Source 1, Source 1, Source 1...]" ×16. urls must dedupe ----
+{
+  const nodes = [
+    { claim: 'NVDA revenue hit $215.9 billion in FY2026.', url: 'https://a.com/nvda', title: 'NVDA Financials - A.com', citation: { data: { title: 'NVDA Financials - A.com' } }, publicationDate: '2026-01-01' },
+    { claim: 'NVDA revenue was $215.9 billion for fiscal 2026.', url: 'https://a.com/nvda', title: 'NVDA Financials - A.com', citation: { data: { title: 'NVDA Financials - A.com' } }, publicationDate: '2026-01-01' },
+    { claim: 'NVDA reported $215.9B in revenue last fiscal year.', url: 'https://a.com/nvda', title: 'NVDA Financials - A.com', citation: { data: { title: 'NVDA Financials - A.com' } }, publicationDate: '2026-01-01' },
+    { claim: 'NVDA revenue reached 215.9 billion dollars in FY26.', url: 'https://b.org/nvda', title: 'NVDA Revenue - B.org', citation: { data: { title: 'NVDA Revenue - B.org' } }, publicationDate: '2026-02-01' },
+  ];
+  const merged = mergeDuplicateClaims(nodes);
+  check('all 4 merged into one', merged.length === 1, `got ${merged.length}`);
+  check('duplicate URLs deduped', (merged[0].urls || []).length === 2, JSON.stringify(merged[0].urls));
+  check('srcMeta deduped too', merged[0].srcMeta.length === 2, JSON.stringify(merged[0].srcMeta));
+}
+
 // ---- the References section is metadata — NEVER swept (run 8: beta rule
 // matched "beta" in a URL and rewrote "[5]" into "[2.21]") ----
 {
@@ -240,6 +256,48 @@ function check(name, cond, detail = '') {
   check('%-move untouched', rep.includes('fell 5% to $210'), rep);
   check('year-like price untouched', rep.includes('since 2021'), rep);
   check('EPS growth % untouched', rep.includes('EPS growth of 5%'), rep);
+}
+
+// ---- run-16: the $8.00 glitch struck again with NO shares-outstanding
+// claim — the implied-price check had nothing to divide by. the 52-week
+// range ($164.07–$236.54) is the cross-check that still works ----
+{
+  const m = runQuantModel([
+    'NVDA is trading at $8.00 on August 7, 2026.',
+    'Over the past year, NVDA stock traded between $164.07 and $236.54.',
+    'The market cap sat at roughly $5,269,279 million.',
+    'Diluted EPS for fiscal year 2026 stood at $4.90.',
+    'Revenue grew 85% year over year.',
+    'The beta is 1.84.',
+  ]);
+  check('quote outside 52-week range rejected', m.price == null || m.price > 150, `got ${m.price}`);
+  check('priceSource says rejected', m.priceSource != null && m.priceSource.includes('52-week'), m.priceSource);
+}
+
+// ---- range check with implied price available: implied wins ----
+{
+  const m = runQuantModel([
+    'NVDA hit $8.00 on August 7, 2026.',
+    'Over the past year, NVDA stock traded between $164.07 and $236.54.',
+    'Nvidia has a market capitalization of 4.86 trillion USD.',
+    'The company has 24.20 billion shares outstanding.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('implied price wins over range-rejected quote', m.price != null && m.price > 150 && m.price < 250, `got ${m.price}`);
+}
+
+// ---- a quote INSIDE the 52-week range is kept ----
+{
+  const m = runQuantModel([
+    'NVDA is trading at $217.55.',
+    'Over the past year, NVDA stock traded between $164.07 and $236.54.',
+    'Diluted EPS for fiscal year 2026 stood at $6.53.',
+    'Revenue grew 50% year over year.',
+    'The beta is 1.87.',
+  ]);
+  check('in-range quote kept', m.price === 217.55, `got ${m.price}`);
 }
 
 // ---- run-15: "TTM EPS growth is 214.42%" — the EPS window crossed

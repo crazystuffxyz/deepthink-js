@@ -2,6 +2,13 @@
 // Zod schemas for every LLM-emitted JSON shape. pair these with parseJsonSafe
 // (parse/json.ts) at every call site instead of inline regex + JSON.parse.
 import { z } from 'zod';
+// LLMs mangle enum values ("minor revision" with a space, "Critical"
+// capitalized) and one bad value kills the whole parse — run 16's domain
+// expert critic failed to parse in every loop because of it. normalize
+// case/whitespace before the enum check.
+function normEnum(vals) {
+    return z.preprocess((v) => typeof v === 'string' ? v.trim().toLowerCase().replace(/\s+/g, '_') : v, z.enum(vals));
+}
 export const ToolCallSchema = z.object({
     tool: z.string(),
     params: z.record(z.string(), z.unknown()).optional()
@@ -39,7 +46,7 @@ export const ClaimSchema = z.object({
 });
 export const VerificationSchema = z.object({
     claim: z.string(),
-    verdict: z.enum(['supported', 'unsupported', 'unclear']),
+    verdict: normEnum(['supported', 'unsupported', 'unclear']),
     rationale: z.string().optional()
 });
 export const DomainSchema = z.object({
@@ -74,7 +81,7 @@ export const LooseJsonSchema = z.union([
 ]);
 // research agent schemas
 export const AnswerFormatSpecSchema = z.object({
-    answerType: z.enum(['list', 'comparison', 'explanation', 'recommendation', 'analysis', 'data']).default('analysis'),
+    answerType: normEnum(['list', 'comparison', 'explanation', 'recommendation', 'analysis', 'data']).default('analysis'),
     requiredFields: z.array(z.string()).default([]),
     timeConstraints: z.array(z.string()).default([]),
     entityTypes: z.array(z.string()).default([]),
@@ -103,7 +110,7 @@ export const VerifyResultSchema = z.object({
 });
 export const SourceFidelityIssueSchema = z.object({
     claimIndex: z.number().optional(),
-    severity: z.enum(['critical', 'major', 'minor']).default('minor'),
+    severity: normEnum(['critical', 'major', 'minor']).default('minor'),
     type: z.string().default('other'),
     description: z.string().default(''),
     suggestion: z.string().default('')
@@ -115,7 +122,7 @@ export const SourceFidelitySchema = z.object({
 });
 export const MathLogicIssueSchema = z.object({
     location: z.string().default(''),
-    severity: z.enum(['critical', 'major', 'minor']).default('minor'),
+    severity: normEnum(['critical', 'major', 'minor']).default('minor'),
     type: z.string().default('other'),
     description: z.string().default(''),
     correction: z.string().default('')
@@ -127,13 +134,13 @@ export const MathLogicSchema = z.object({
 });
 export const ExpertCritiqueIssueSchema = z.object({
     location: z.string().default(''),
-    severity: z.enum(['critical', 'major', 'minor']).default('minor'),
+    severity: normEnum(['critical', 'major', 'minor']).default('minor'),
     type: z.string().default('other'),
     description: z.string().default(''),
     recommendation: z.string().default('')
 });
 export const ExpertCritiqueSchema = z.object({
-    overallAssessment: z.enum(['accept', 'major_revision', 'minor_revision', 'reject']).default('minor_revision'),
+    overallAssessment: normEnum(['accept', 'major_revision', 'minor_revision', 'reject']).default('minor_revision'),
     issues: z.array(ExpertCritiqueIssueSchema).default([]),
     strengths: z.array(z.string()).default([]),
     missingTopics: z.array(z.string()).default([])
@@ -141,9 +148,9 @@ export const ExpertCritiqueSchema = z.object({
 export const AdversarialVulnerabilitySchema = z.object({
     claim: z.string().default(''),
     attackVector: z.string().default(''),
-    severity: z.enum(['critical', 'major', 'minor']).default('minor'),
+    severity: normEnum(['critical', 'major', 'minor']).default('minor'),
     counterEvidence: z.string().default(''),
-    verdict: z.enum(['likely_wrong', 'possibly_wrong', 'weak_support', 'acceptable']).default('acceptable')
+    verdict: normEnum(['likely_wrong', 'possibly_wrong', 'weak_support', 'acceptable']).default('acceptable')
 });
 export const AdversarialSchema = z.object({
     vulnerabilities: z.array(AdversarialVulnerabilitySchema).default([]),

@@ -116,11 +116,12 @@ async function fetchSearxngPage(query, pageNo, baseUrl, retries = 1) {
     return { results: [], hasMore: false, actualResultsOnPage: 0 };
 }
 export async function getMullvadLetaResults(query, desiredResultCount = 20, maxPagesToFetch = 5, perPageRetries = 1, engine = 'google') {
-    if (!query || String(query).trim() === '')
+    const q = String(query ?? '').trim();
+    if (!q)
         return [];
     const tTotal = Date.now();
     if (process.stdout?.write)
-        process.stdout.write(`[mullvad] getMullvadLetaResults: query="${query.slice(0, 60)}" want=${desiredResultCount} maxPages=${maxPagesToFetch}\n`);
+        process.stdout.write(`[mullvad] getMullvadLetaResults: query="${q.slice(0, 60)}" want=${desiredResultCount} maxPages=${maxPagesToFetch}\n`);
     const instances = await getWorkingSearxngInstances();
     if (instances.length === 0) {
         if (process.stdout?.write)
@@ -149,7 +150,7 @@ export async function getMullvadLetaResults(query, desiredResultCount = 20, maxP
         let pagesFetchedCount = 0;
         let gotResultsFromThisInstance = false;
         while (pagesFetchedCount < maxPagesToFetch && keepFetching && allResults.length < desiredResultCount) {
-            const pageData = await fetchSearxngPage(query, currentPage, baseUrl, perPageRetries);
+            const pageData = await fetchSearxngPage(q, currentPage, baseUrl, perPageRetries);
             pagesFetchedCount++;
             if (pageData.results.length > 0) {
                 gotResultsFromThisInstance = true;

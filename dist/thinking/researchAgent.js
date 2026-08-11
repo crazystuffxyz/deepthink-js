@@ -163,7 +163,14 @@ async function crawlerAgent(queries, maxConcurrency = 5, opts = {}) {
     const seenUrls = new Set();
     for (let i = 0; i < queries.length; i += maxConcurrency) {
         const batch = queries.slice(i, i + maxConcurrency);
-        const batchResults = await Promise.allSettled(batch.map(async ({ query, goal, depth, topic }) => {
+        const batchResults = await Promise.allSettled(batch.map(async (item) => {
+            // recoverStockQuote passes plain strings; plannerAgent passes
+            // {query,goal,depth,topic} objects. run 14: destructuring a string
+            // gave query=undefined, the search crashed on query.slice(), and the
+            // recovery crawl silently returned 0 URLs — the quant model died.
+            const { query, goal, depth, topic } = typeof item === 'string'
+                ? { query: item, goal: '', depth: 0, topic: 'general' }
+                : (item || {});
             const searchResults = await getSearchResults(query, opts);
             if (!Array.isArray(searchResults))
                 return [];
@@ -581,8 +588,14 @@ function mergeDuplicateClaims(nodes) {
             // holds for "diluted EPS 6.53" vs "diluted EPS 6.54".
             if (sharedNums >= 2 || (sharedNums >= 1 && sharedWords >= 1)) {
                 used.add(j);
-                merged.urls.push(b.url);
-                merged.srcMeta.push({ url: b.url, title: b.title, citation: b.citation, publicationDate: b.publicationDate });
+                // dedupe URLs — the same source page can produce several claims that
+                // all merge into one node, and run 15 shipped "[Source 1, Source 1,
+                // Source 1...]" ×16 because the duplicate URLs all mapped to the
+                // same ref id.
+                if (!merged.urls.includes(b.url)) {
+                    merged.urls.push(b.url);
+                    merged.srcMeta.push({ url: b.url, title: b.title, citation: b.citation, publicationDate: b.publicationDate });
+                }
                 log({ level: 'info', msg: `[STEP 6] Merged duplicate claim (${sharedNums} shared nums, ${sharedWords} shared words): "${(a.claim || '').slice(0, 60)}..." + "${(b.claim || '').slice(0, 60)}..."`, source: 'researchAgent', ts: Date.now() });
             }
         }
@@ -619,14 +632,63 @@ async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opt
             catch {
                 return m.url;
             } })();
-            refMap.set(m.url, { id: refMap.size + 1, url: m.url, title: cData.title || m.title || node.citedSummary || 'Untitled', author: cData.author || '', year: cData.year || m.publicationDate || 'n.d.', site: cData.site || siteFallback });
+            // login-wall pages yield 'Untitled' (sanitizeTitle) — fall back to a
+            // URL-derived title so the References section still names the page
+            // ("eps-diluted-ttm" → "EPS Diluted TTM").
+            const urlTitle = (() => {
+                try {
+                    const seg = decodeURIComponent(new URL(m.url).pathname.split('/').filter(Boolean).pop() || '');
+                    return seg.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+                }
+                catch {
+                    return '';
+                }
+            })();
+            const title = cData.title && cData.title !== 'Untitled' ? cData.title : (m.title && m.title !== 'Untitled' ? m.title : (urlTitle || node.citedSummary || 'Untitled'));
+            refMap.set(m.url, { id: refMap.size + 1, url: m.url, title, author: cData.author || '', year: cData.year || m.publicationDate || 'n.d.', site: cData.site || siteFallback });
         }
     }
     for (const [, ref] of refMap)
         ref.apa = buildAPACitation(ref);
+    // theme-cluster the claims before chunking (run 15: 5 chunks × 4
+    // subheadings each = 21 overlapping ## sections — "Industry Status
+    // Quo" appeared in 3 different chunks because claims were chunked by
+    // ORDER, not theme). one LLM call groups the claims into K thematic
+    // clusters; each cluster becomes one section with a distinct theme.
+    // every index must be covered exactly once — any drop falls back to
+    // the original order.
+    const k = Math.max(1, Math.ceil(deduped.length / chunk));
+    let clustered = deduped;
+    try {
+        const cR = await callChat([{ role: 'system', content: `You are a research librarian. Group the given claims into ${k} thematic clusters. Each cluster must have a DISTINCT theme (e.g. "Financial Performance", "Competitive Moat", "Industry Outlook" — never two clusters on the same theme). Every claim index must appear in EXACTLY ONE cluster. Output ONLY valid JSON — no markdown fences:\n[{"theme": "short theme name", "indices": [0, 2, 5]}]` },
+            { role: 'user', content: `CLAIMS:\n${deduped.map((n, i) => `[${i}] ${n.claim}`).join('\n')}` }], false, null, { ...opts, think: false, samplingProfile: 'json' });
+        const parsed = parseJsonSafe(cR.content || '', z.array(z.object({ theme: z.string(), indices: z.array(z.number()) })));
+        if (parsed) {
+            const seen = new Set();
+            const ordered = [];
+            for (const cl of parsed) {
+                for (const idx of cl.indices) {
+                    if (idx >= 0 && idx < deduped.length && !seen.has(idx)) {
+                        seen.add(idx);
+                        ordered.push(deduped[idx]);
+                    }
+                }
+            }
+            if (seen.size === deduped.length) {
+                clustered = ordered;
+                log({ level: 'info', msg: `[STEP 6] Theme-clustered ${deduped.length} claims into ${parsed.length} groups`, source: 'researchAgent', ts: Date.now() });
+            }
+            else {
+                log({ level: 'warn', msg: `[STEP 6] Theme clustering covered ${seen.size}/${deduped.length} claims — using original order`, source: 'researchAgent', ts: Date.now() });
+            }
+        }
+    }
+    catch (e) {
+        log({ level: 'warn', msg: `[STEP 6] Theme clustering failed (${e.message}) — using original order`, source: 'researchAgent', ts: Date.now() });
+    }
     const chunks = [];
-    for (let i = 0; i < deduped.length; i += chunk)
-        chunks.push(deduped.slice(i, i + chunk));
+    for (let i = 0; i < clustered.length; i += chunk)
+        chunks.push(clustered.slice(i, i + chunk));
     log({ level: 'info', msg: `[STEP 6] Writing ${chunks.length} sections...`, source: 'researchAgent', ts: Date.now() });
     const sections = [];
     let previousTail = '';
@@ -664,12 +726,12 @@ async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opt
         const chunkSlice = chunks[ci];
         const isFirst = ci === 0;
         const taggedClaims = chunkSlice.map((node) => {
-            const refIds = (node.urls || [node.url]).map((u) => refMap.get(u)?.id ?? '?');
+            const refIds = [...new Set((node.urls || [node.url]).map((u) => refMap.get(u)?.id ?? '?'))];
             const pubTag = node.publicationDate && node.publicationDate !== 'unknown' ? ` [published ${node.publicationDate}]` : '';
             return `[Source ${refIds.join(', Source ')}${pubTag}] ${node.claim}`;
         }).join('\n');
         const continuityNote = isFirst ? `Begin with a 3-sentence Executive Summary answering: "${topic}"` : `Continue the report seamlessly. The previous section ended with:\n"...${previousTail}"`;
-        const r = await callChat([{ role: 'system', content: `You are writing section ${ci + 1} of ${chunks.length} of a research report.\n\nORIGINAL QUESTION: "${topic}"\n${requiredNote}\n${timeNote}${stockNote}\n\nSECTION RULES:\n  1. Write complete, detailed prose for EVERY claim — do not skip any.\n  2. Do NOT save tokens. Do NOT summarize. Write fully.\n  3. Keep every [Source N] inline citation tag exactly as given.\n  4. Use ## subheadings to group claims by theme.\n  5. Do NOT write a conclusion — that comes in the final section.\n  6. Do NOT write a references section.\n  7. Do NOT repeat content from the previous section.\n  8. Each [Source N] tag includes a published date. When citing historical data,\n     clearly label it: "As of [date], ...". Do NOT present old data as current.\n\n${continuityNote}` },
+        const r = await callChat([{ role: 'system', content: `You are writing section ${ci + 1} of ${chunks.length} of a research report.\n\nORIGINAL QUESTION: "${topic}"\n${requiredNote}\n${timeNote}${stockNote}\n\nSECTION RULES:\n  1. Write complete, detailed prose for EVERY claim — do not skip any.\n  2. Do NOT save tokens. Do NOT summarize. Write fully.\n  3. Keep every [Source N] inline citation tag exactly as given.\n  4. Use ### subheadings to group claims by theme (the ## level is reserved for the report's top-level sections).\n  5. Do NOT write a conclusion — that comes in the final section.\n  6. Do NOT write a references section.\n  7. Do NOT repeat content from the previous section.\n  8. Each [Source N] tag includes a published date. When citing historical data,\n     clearly label it: "As of [date], ...". Do NOT present old data as current.\n\n${continuityNote}` },
             { role: 'user', content: `Claims for section ${ci + 1}:\n\n${taggedClaims}\n\nWrite the section now. Answer: "${topic}"` }], false, null, { ...opts, think: false, samplingProfile: 'creative' });
         const sectionText = (r.content || '').trim();
         sections.push(sectionText);
@@ -682,8 +744,13 @@ async function reportWriterAgent(callChat, topic, answerSpec, verifiedNodes, opt
         { role: 'user', content: `Research report (final portion):\n${concatenated.slice(-4000)}\n\nWrite ONE conclusion paragraph that directly answers: "${topic}"` }], false, null, { ...opts, think: true, samplingProfile: 'reasoning' });
     const conclusion = (conclusionR.content || '').trim();
     const refsSection = '\n\n---\n## References\n\n' + [...refMap.values()].sort((a, b) => a.id - b.id).map((ref) => `[${ref.id}] ${ref.apa}`).join('\n');
-    const preamble = coverageGaps ? coverageGaps : '';
-    let fullReport = preamble + concatenated + '\n\n---\n## Conclusion\n\n' + conclusion + refsSection;
+    // coverage-gaps disclaimer goes AFTER the conclusion, not before the exec
+    // summary — run 15 shipped "## Coverage Gaps" as the report's first section,
+    // violating the "Executive Summary must lead" structural rule. transparency
+    // is kept, placement is fixed.
+    const preamble = '';
+    const gapsTail = coverageGaps ? '\n\n---\n' + coverageGaps.replace(/\n---\s*$/, '') : '';
+    let fullReport = concatenated + '\n\n---\n## Conclusion\n\n' + conclusion + gapsTail + refsSection;
     // citation integrity: every source must be cited in the body, every tag must
     // resolve, and the References section must list every source. the writer is
     // told to keep tags — this makes sure it actually did.
@@ -907,20 +974,8 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
             log({ level: 'success', msg: `[CRITIQUE LOOP ${loop}] Issue score below threshold (${issueScore} < ${issueThreshold}) — report accepted`, source: 'researchAgent', ts: Date.now() });
             break;
         }
-        // convergence guard: if the last repair pass barely moved the score
-        // (<20% improvement), more loops just burn calls — the report has
-        // reached what this model can fix. a REGRESSION (score went up) means
-        // the pass made it worse: restore the best-scoring version, don't ship
-        // the damage.
-        const prevScore = critiqueHistory.length > 1 ? critiqueHistory[critiqueHistory.length - 2].issueScore : null;
-        if (prevScore != null && issueScore >= prevScore * 0.8) {
-            log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair converged or regressed (score ${prevScore} -> ${issueScore}, <20% improvement) — restoring best report (score ${bestScore})`, source: 'researchAgent', ts: Date.now() });
-            currentReport = bestReport;
-            break;
-        }
-        allIssues.sort((a, b) => (severityWeights[b.severity] || 1) - (severityWeights[a.severity] || 1));
-        currentReport = await constrainedRepairAgent(callChat, currentReport, allIssues, topic, opts);
-        // repair agents are told to keep [Source N] tags — enforce it
+        // citation integrity data — computed once per loop, used by both the
+        // normal repair and the regression retry below
         const refCount = new Set(verifiedNodes.map((n) => n.url)).size;
         const claimsByRef = new Map();
         const urlToId = new Map();
@@ -933,6 +988,39 @@ async function critiqueAndRepairLoop(callChat, report, verifiedNodes, topic, opt
                 claimsByRef.set(id, []);
             claimsByRef.get(id).push(node.claim);
         }
+        // convergence guard: if the last repair pass barely moved the score
+        // (<20% improvement), more loops just burn calls — the report has
+        // reached what this model can fix. a REGRESSION (score went up) means
+        // the pass made it worse: restore the best-scoring version, don't ship
+        // the damage.
+        const prevScore = critiqueHistory.length > 1 ? critiqueHistory[critiqueHistory.length - 2].issueScore : null;
+        if (prevScore != null && issueScore > prevScore) {
+            // regression retry: the full repair pass made things worse (run 14:
+            // 37 -> 54). restore the best report and retry with a SURGICAL pass
+            // that fixes only the critical issues — a smaller issue list means a
+            // smaller rewrite, which means less chance of introducing new damage.
+            const criticals = allIssues.filter((i) => i.severity === 'critical');
+            if (criticals.length && loop < maxLoops) {
+                log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair regressed (${prevScore} -> ${issueScore}) — surgical retry on ${criticals.length} critical issues only`, source: 'researchAgent', ts: Date.now() });
+                currentReport = bestReport;
+                const surgical = await constrainedRepairAgent(callChat, currentReport, criticals, topic, opts);
+                const integrity2 = await enforceCitations(callChat, surgical, refCount, claimsByRef, opts);
+                if (integrity2.restored.length)
+                    log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Surgical repair dropped ${integrity2.restored.length} citations — restored: [Source ${integrity2.restored.join('], [Source ')}]`, source: 'researchAgent', ts: Date.now() });
+                currentReport = integrity2.report;
+                continue; // re-critique the surgical result next loop
+            }
+            log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair regressed (score ${prevScore} -> ${issueScore}) — restoring best report (score ${bestScore})`, source: 'researchAgent', ts: Date.now() });
+            currentReport = bestReport;
+            break;
+        }
+        if (prevScore != null && issueScore >= prevScore * 0.8) {
+            log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair converged (score ${prevScore} -> ${issueScore}, <20% improvement) — restoring best report (score ${bestScore})`, source: 'researchAgent', ts: Date.now() });
+            currentReport = bestReport;
+            break;
+        }
+        allIssues.sort((a, b) => (severityWeights[b.severity] || 1) - (severityWeights[a.severity] || 1));
+        currentReport = await constrainedRepairAgent(callChat, currentReport, allIssues, topic, opts);
         const integrity = await enforceCitations(callChat, currentReport, refCount, claimsByRef, opts);
         if (integrity.restored.length)
             log({ level: 'warn', msg: `[CRITIQUE LOOP ${loop}] Repair dropped ${integrity.restored.length} citations — restored: [Source ${integrity.restored.join('], [Source ')}]`, source: 'researchAgent', ts: Date.now() });
@@ -1305,7 +1393,7 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
         // damage each rewrite causes, looping until clean.
         if (opts.humanize) {
             log({ level: 'info', msg: '[HUMANIZE] Running humanize loop on final report...', source: 'researchAgent', ts: Date.now() });
-            const h = await humanizeText(callChat, finalReport, opts);
+            const h = await humanizeText(callChat, finalReport, { ...opts, log });
             finalReport = h.text;
             stepSummary.humanize = { iterations: h.iterations, finalScore: h.finalScore, ok: h.ok };
             log({ level: 'success', msg: `[HUMANIZE] Done — ${h.iterations} iterations, detector score ${h.finalScore}`, source: 'researchAgent', ts: Date.now() });

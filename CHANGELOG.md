@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.8.16
+
+### Fixed
+- **Conformance sweep skipped on partial models** — run 20: growth missing made `ok=false`, so the deterministic number-alignment sweep never ran and the report shipped "at a price of $217.36" against the engine's $217.55 (the critique loop's LLM repairs can't be trusted to fix numbers). The sweep now runs whenever the engine computed anything — every rule no-ops on null values, so a partial model aligns price/EPS/beta/Re/Sharpe/VaR and leaves the uncomputable DCF alone.
+- **Humanizer could re-introduce number drift** — the humanize loop runs after the post-critique sweep, and its integrity check is LLM-based (run 20's $217.36 slipped through). A final deterministic conformance sweep now runs after humanize, locking the engine's values in as the last word before the quant section is appended.
+
+## v1.8.15
+
+### Fixed
+- **Critique issues invisible in the meta file** — the meta recorded only counts (issueCount/score/critical), so diagnosing what the critics flagged required re-reading the report. Each critique-history entry now carries the compact issue list (agent, severity, type, description) so every run's meta is a real diagnostic.
+
 ## v1.8.14
 
 ### Fixed

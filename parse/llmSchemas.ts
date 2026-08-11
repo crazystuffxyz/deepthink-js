@@ -14,6 +14,23 @@ function normEnum(vals: readonly [string, ...string[]]) {
   );
 }
 
+// LLMs also emit numbers as strings ("73.3") — run 17: three of five
+// critics failed to parse because a quoted score killed the Zod check.
+// coerce strings to numbers and clamp to [min, max].
+function num(min: number, max: number) {
+  return z.preprocess(
+    (v) => {
+      if (typeof v === 'number') return v;
+      if (typeof v === 'string') {
+        const n = parseFloat(v.replace(/[^0-9.\-]/g, ''));
+        return isNaN(n) ? undefined : n;
+      }
+      return undefined;
+    },
+    z.number().min(min).max(max)
+  );
+}
+
 export const ToolCallSchema = z.object({
   tool: z.string(),
   params: z.record(z.string(), z.unknown()).optional()
@@ -152,7 +169,7 @@ export const VerifyResultSchema = z.object({
 export type VerifyResult = z.infer<typeof VerifyResultSchema>;
 
 export const SourceFidelityIssueSchema = z.object({
-  claimIndex: z.number().optional(),
+  claimIndex: z.preprocess((v) => (typeof v === 'string' ? parseInt(v, 10) : v), z.number().optional()),
   severity: normEnum(['critical', 'major', 'minor']).default('minor'),
   type: z.string().default('other'),
   description: z.string().default(''),
@@ -160,8 +177,8 @@ export const SourceFidelityIssueSchema = z.object({
 });
 export const SourceFidelitySchema = z.object({
   issues: z.array(SourceFidelityIssueSchema).default([]),
-  totalChecked: z.number().default(0),
-  fidelityScore: z.number().min(0).max(100).default(100)
+  totalChecked: num(0, 100000).default(0),
+  fidelityScore: num(0, 100).default(100)
 });
 export type SourceFidelity = z.infer<typeof SourceFidelitySchema>;
 
@@ -174,8 +191,8 @@ export const MathLogicIssueSchema = z.object({
 });
 export const MathLogicSchema = z.object({
   issues: z.array(MathLogicIssueSchema).default([]),
-  hasMathContent: z.boolean().default(false),
-  mathRigorScore: z.number().min(0).max(100).default(100)
+  hasMathContent: z.preprocess((v) => (v === 'true' || v === 'True' ? true : v === 'false' || v === 'False' ? false : v), z.boolean().default(false)),
+  mathRigorScore: num(0, 100).default(100)
 });
 export type MathLogic = z.infer<typeof MathLogicSchema>;
 
@@ -205,6 +222,6 @@ export const AdversarialSchema = z.object({
   vulnerabilities: z.array(AdversarialVulnerabilitySchema).default([]),
   weakestArgument: z.string().default(''),
   alternativeConclusion: z.string().default(''),
-  overallVulnerabilityScore: z.number().min(0).max(100).default(0)
+  overallVulnerabilityScore: num(0, 100).default(0)
 });
 export type Adversarial = z.infer<typeof AdversarialSchema>;

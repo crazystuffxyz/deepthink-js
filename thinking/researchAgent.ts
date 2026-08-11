@@ -583,7 +583,7 @@ async function reportWriterAgent(callChat: any, topic: string, answerSpec: any, 
   const chunk = opts.chunkSize ?? 20;
   const tail = opts.tailChars ?? 1500;
   const coverageGaps = buildCoverageGapsDisclaimer(plannedQueries, verifiedNodes);
-  if (coverageGaps) log({ level: 'warn', msg: '[STEP 6] Coverage gaps detected — disclaimer will be prepended', source: 'researchAgent', ts: Date.now() });
+  if (coverageGaps) log({ level: 'warn', msg: '[STEP 6] Coverage gaps detected — disclaimer will be appended after the conclusion', source: 'researchAgent', ts: Date.now() });
   const deduped = mergeDuplicateClaims(verifiedNodes);
   if (deduped.length < verifiedNodes.length) log({ level: 'info', msg: `[STEP 6] Claim dedup: ${verifiedNodes.length} -> ${deduped.length}`, source: 'researchAgent', ts: Date.now() });
   const refMap = new Map<string, any>();
@@ -1356,7 +1356,7 @@ export default async function runDeepResearch(callChat: any, topic: string, opts
       log({ level: 'info', msg: '[HUMANIZE] Running humanize loop on final report...', source: 'researchAgent', ts: Date.now() });
       const h = await humanizeText(callChat, finalReport, { ...opts, log });
       finalReport = h.text;
-      stepSummary.humanize = { iterations: h.iterations, finalScore: h.finalScore, ok: h.ok };
+      stepSummary.humanize = { iterations: h.iterations, finalScore: h.finalScore, ok: h.ok, history: h.history };
       log({ level: 'success', msg: `[HUMANIZE] Done — ${h.iterations} iterations, detector score ${h.finalScore}`, source: 'researchAgent', ts: Date.now() });
     }
     // the computed quant section is appended AFTER the critique loop AND the

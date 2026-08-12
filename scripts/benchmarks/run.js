@@ -166,16 +166,26 @@ async function main() {
   const plain = dt.buildClient(null);
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  const out = fs.openSync(outPath, 'w');
-  fs.writeSync(out, 'bench,id,gold,plain_answer,plain_correct,dt_answer,dt_correct,dt_seconds\n');
+  // resume-safe: ids already in the csv are skipped, and the file is
+  // appended to instead of truncated (a killed run keeps its rows)
+  const doneIds = new Set();
+  if (fs.existsSync(outPath)) {
+    for (const l of fs.readFileSync(outPath, 'utf-8').split('\n').slice(1)) {
+      if (!l.trim()) continue;
+      const m = l.match(/^[^,]+,[^,]+/);
+      if (m) doneIds.add(m[0].split(',')[1]);
+    }
+  }
+  const out = fs.openSync(outPath, doneIds.size ? 'a' : 'w');
+  if (!doneIds.size) fs.writeSync(out, 'bench,id,gold,plain_answer,plain_correct,dt_answer,dt_correct,dt_seconds\n');
 
   const summary = [];
 
   for (const b of benches) {
     const items = loadBench(b);
-    const slice = limitArg > 0 ? items.slice(0, limitArg) : items;
+    const slice = (limitArg > 0 ? items.slice(0, limitArg) : items).filter((it) => !doneIds.has(it.id));
     let pN = 0, dN = 0;
-    console.log(`\n== ${b} (${slice.length}/${items.length}) ==`);
+    console.log(`\n== ${b} (${slice.length}/${items.length}, ${doneIds.size} already done) ==`);
 
     let done = 0;
     for (const it of slice) {

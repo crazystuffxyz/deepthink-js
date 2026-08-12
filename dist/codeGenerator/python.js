@@ -235,14 +235,19 @@ export async function generateAndRunCode(callChat, task, inputText, opts = {}) {
             }
         }
     }
-    const result = pyResult !== null ? await reconcileResults(jsResult, pyResult) : jsResult;
+    const disagree = pyResult !== null && !compareResults(jsResult, pyResult);
+    // when they disagree, keep the JS value as the headline (it's the primary
+    // implementation) but surface BOTH — the final call must know there's a
+    // conflict, not be handed one side arbitrarily (g03: JS 4 correct, PY 20
+    // wrong — the old code presented PY's 20 and the hand-derivation failed).
+    const result = disagree ? jsResult : (pyResult !== null ? await reconcileResults(jsResult, pyResult) : jsResult);
     // only cross-validated results are ground truth: JS and Python must agree.
     // a single implementation that merely ran without crashing is a candidate —
     // stamping it "validated" forced wrong answers down the whole pipeline.
     const validated = pyResult !== null && compareResults(jsResult, pyResult);
-    if (!validated && pyResult !== null) {
+    if (disagree) {
         // eslint-disable-next-line no-console
         console.warn(`[SANDBOX] JS "${jsResult}" vs PY "${pyResult}" disagree — treating as candidate, not ground truth`);
     }
-    return { result, jsResult, pyResult, sandboxValidated: validated };
+    return { result, jsResult, pyResult, sandboxValidated: validated, disagreement: disagree ? { js: jsResult, py: pyResult } : null };
 }

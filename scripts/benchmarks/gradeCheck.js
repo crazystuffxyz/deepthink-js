@@ -103,5 +103,15 @@ for (const r of rows.slice(1)) {
   }
   out.push([bench, id, csvEscape(gold), csvEscape(plainA), pNew, csvEscape(dtA), dNew, dtSec].join(','));
 }
-if (!DRY) fs.writeFileSync(CSV, out.join('\n') + '\n', 'utf-8');
+if (!DRY) {
+  fs.writeFileSync(CSV, out.join('\n') + '\n', 'utf-8');
+  // regenerate the runner's summary json with the corrected grades
+  const sumPath = CSV.replace(/\.csv$/, '.summary.json');
+  if (fs.existsSync(sumPath)) {
+    let sum = {};
+    try { sum = JSON.parse(fs.readFileSync(sumPath, 'utf-8')); } catch { /* keep empty */ }
+    sum.rows = [{ bench: SET, total: n, plain: pOk / n, dt: dOk / n, delta: (dOk - pOk) / n }];
+    fs.writeFileSync(sumPath, JSON.stringify(sum, null, 2), 'utf-8');
+  }
+}
 console.log(`[${SET}] ${n} rows — plain ${pOk}/${n} (${(pOk / n * 100).toFixed(1)}%)  dt ${dOk}/${n} (${(dOk / n * 100).toFixed(1)}%)  delta ${(dOk - pOk) >= 0 ? '+' : ''}${(dOk - pOk)}  ${changed} cells changed${DRY ? ' (dry)' : ''}`);

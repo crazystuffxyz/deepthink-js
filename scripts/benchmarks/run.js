@@ -120,7 +120,10 @@ async function runOnce(dt, prompt) {
 
 function csvEscape(s) {
   if (s === null || s === undefined) return '';
-  const t = String(s).replace(/\r?\n/g, ' ').slice(0, 2000);
+  // 20k chars: long enough that the answer tail (verified stamp) always
+  // survives the csv — 2000 chars cut answers mid-proof and made rescoring
+  // blind to the real answer
+  const t = String(s).replace(/\r?\n/g, ' ').slice(0, 20000);
   if (t.includes(',') || t.includes('"')) return '"' + t.replace(/"/g, '""') + '"';
   return t;
 }

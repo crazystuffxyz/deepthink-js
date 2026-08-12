@@ -33,6 +33,7 @@ type EvolveOpts = {
     dataDir?: string;
     runId?: string;
     tournamentK?: number;
+    seedPrompt?: string;
     [k: string]: unknown;
 };
 declare function seedPopulation(n: number, rand?: () => number): Candidate[];

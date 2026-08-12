@@ -8,9 +8,11 @@ export declare function runThink(callChat: CallChat, inputText: string, depth: n
     answers?: Array<{
         tag: string;
         answer: string | null;
+        conf?: number;
     }>;
     consensus?: string | null;
     agreement?: number;
+    consensusText?: string | null;
 }>;
 export {};
 //# sourceMappingURL=think.d.ts.map

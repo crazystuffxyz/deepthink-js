@@ -43,16 +43,41 @@ function loadBench(file) {
   const items = fs.readFileSync(path.join(DATA, file), 'utf-8')
     .split('\n').filter(Boolean).map((l) => JSON.parse(l));
   // aime-style rows: {id, source, kind, problem, answer} → BenchItem
+  // kind "math-aime" is the raw data's label — the scorer only knows
+  // 'math'/'science', and an unknown kind falls to default → score 0
+  // (that's how a whole retrain ran blind at fitness 0.000 once. ouch.)
+  // putnam rows carry kind 'deduction' (proof answers scored by the
+  // conclusion phrase) or 'math' (numeric answers like A4's k=3).
   if (items[0] && items[0].problem && !items[0].prompt) {
-    return items.map((o) => ({
-      id: o.id, kind: o.kind || 'math', prompt: o.problem,
-      reference: Number(o.answer), numericTolerance: 0, weight: 1
-    }));
+    return items.map((o) => {
+      const kind = o.kind === 'math-aime' ? 'math' : (o.kind || 'math');
+      if (kind === 'deduction') {
+        return { id: o.id, kind, prompt: o.problem, reference: String(o.answer).toLowerCase(), weight: 1 };
+      }
+      // object answer = multi-number ref ({a0: x, a1: y}): ANY number in the
+      // output may match, so trailing detail ("p = 7 works: a = 5, r = 3")
+      // still scores — the last-number heuristic would grab the 3.
+      if (o.answer && typeof o.answer === 'object') {
+        return { id: o.id, kind, prompt: o.problem, reference: o.answer, numericTolerance: 0.01, weight: 1 };
+      }
+      return { id: o.id, kind, prompt: o.problem, reference: Number(o.answer), numericTolerance: 0, weight: 1 };
+    });
   }
   return items;
 }
 const TRAIN_FILE = arg('train', 'iqTrain.jsonl');
 const OOD_FILE = arg('ood', 'freshSet.jsonl');
+// --seed <population-gen-*.json>: warm-start the population with the
+// best candidate from a previous run (e.g. the AIME-evolved prompt)
+const SEED_FILE = arg('seed', '');
+let seedPrompt = '';
+if (SEED_FILE) {
+  const pop = JSON.parse(fs.readFileSync(SEED_FILE, 'utf-8'));
+  const best = pop.reduce((a, b) => ((b.fitness ?? -1) > (a.fitness ?? -1) ? b : a), pop[0]);
+  seedPrompt = best?.systemPrompt || '';
+  if (!seedPrompt) { console.error(`[iqTrain] --seed ${SEED_FILE}: no systemPrompt found`); process.exit(1); }
+  console.log(`[iqTrain] seeded from ${SEED_FILE} → ${best.id} (fitness ${best.fitness?.toFixed(3) ?? '?'})`);
+}
 const train = loadBench(TRAIN_FILE);
 
 // ---- test holdout: fresh set → BenchItem format
@@ -94,7 +119,8 @@ const callChat = (msgs, stream, onChunk, opts) => queue.add(() => dt.callChat(ms
     dataDir: OUT,
     runId: 'iq-' + new Date().toISOString().replace(/[:.]/g, '-'),
     tournamentK: 3,
-    evalSample: EVAL_SAMPLE
+    evalSample: EVAL_SAMPLE,
+    seedPrompt: seedPrompt || undefined
   });
   const mins = ((Date.now() - t0) / 60000).toFixed(1);
   console.log(`\n[iqTrain] done in ${mins} min`);

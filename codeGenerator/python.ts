@@ -108,7 +108,9 @@ export async function fixCodeRuntime(callChat: any, task: string, code: string, 
 }
 
 export async function runMCTSApproaches(callChat: any, task: string, inputText: string, opts: any = {}): Promise<{ result: string; count: number; total: number; confidence: string; sandboxValidated: boolean } | null> {
-  if (!process.env.PYTHON_BIN) return null;
+  // use the PATH-detected constant, not the raw env var — the env var was
+  // never set, so MCTS + python cross-validation silently never ran.
+  if (!PYTHON_BIN) return null;
   const isSimpleMath = /calculate|multiply|add|subtract|sum/i.test(task) && task.length < 50;
   if (isSimpleMath) return null;
   const NUM = opts.mctsNumApproaches ?? 4;
@@ -223,7 +225,7 @@ export async function generateAndRunCode(callChat: any, task: string, inputText:
     }
   }
   let pyResult: string | null = null;
-  if (process.env.PYTHON_BIN) {
+  if (PYTHON_BIN) {
     let pyCode = await engineerAgent(callChat, spec, task, inputText, 'python', opts);
     for (let a = 0; a < max; a++) {
       try {

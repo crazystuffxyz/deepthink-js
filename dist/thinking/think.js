@@ -27,8 +27,11 @@
 const PROBE_OPTS = { think: true, autoSystemPrompt: false, options: { num_predict: 1000 } };
 const THINK_SYS = 'You are performing INTERNAL REASONING ONLY. Be short and concise.';
 // the answer contract: "at most 10 lines" + "mandatory" is the phrasing
-// that actually makes gemma finish with the ANSWER line (tested).
-const ANSWER_LINE = 'Keep the reasoning tight (at most 10 lines). Then end with the final answer on a line starting with "ANSWER: " — the ANSWER line is mandatory and must be the last line.';
+// that actually makes gemma finish with the ANSWER line (tested). the
+// CONFIDENCE line feeds the weighted vote — a confident probe outweighs
+// a hand-wavy one, so a 2/3 vote of unsure probes can't beat 1 sure probe.
+const ANSWER_LINE = 'Keep the reasoning tight (at most 10 lines). Then end with "ANSWER: <value>" and "CONFIDENCE: <0 to 1>" — both lines are mandatory and must be the last two lines.';
+const CONF_RE = /CONFIDENCE\s*:\s*(\d+(?:\.\d+)?|\.\d+)/i;
 const SCRATCHPAD_BODY = 'Use a structured scratchpad: KNOWN FACTS, GOAL, CONSTRAINTS, STEPS. Keep at most 5 live quantities; ' +
     'compress fully-verified sub-results into named chunks and refer to them by name. Verify the result against every constraint.';
 const COMPUTE_BODY = 'If computational (probability, counting, arithmetic, any numeric quantity): COMPUTE explicitly — ' +
@@ -106,6 +109,18 @@ function extractAnswer(text) {
     const m = text.match(/ANSWER\s*:\s*([^\n]+)/i);
     return m ? m[1].trim() : null;
 }
+/** pull the CONFIDENCE: 0-1 line; missing → neutral 0.5 */
+function extractConfidence(text) {
+    if (!text)
+        return 0.5;
+    const m = text.match(CONF_RE);
+    if (!m)
+        return 0.5;
+    const v = parseFloat(m[1]);
+    if (isFinite(v))
+        return Math.min(Math.max(v, 0), 1);
+    return 0.5;
+}
 /** loose equality for answer grouping: case, whitespace, trailing period */
 function normAnswer(s) {
     return String(s).trim().toLowerCase().replace(/[.\s]+$/g, '').replace(/\s+/g, ' ');
@@ -146,13 +161,15 @@ export async function runThink(callChat, inputText, depth, opts) {
     if (opts.hard && !opts.codeProbe)
         roster.push(EXTRA.analogy);
     // wave 1: all probes in parallel — identical prefix, KV cache shared.
-    // temp 0.7 for path diversity; independent draws, not a chain.
-    const probeOpts = {
-        ...opts,
-        options: { ...(opts.options || {}), temperature: 0.7 }
-    };
+    // temperature SWEEP across probes (0.3 → 0.9): diverse sampling shows
+    // sampling diversity beats raw count — identical temps collapse onto the
+    // same error path. independent draws, not a chain.
+    const TEMPS = [0.3, 0.5, 0.7, 0.9, 0.6, 0.8, 0.4];
     const runWave = async (defs) => {
-        const settled = await Promise.allSettled(defs.map((p) => probe(callChat, probeSys(p), inputText, probeOpts)));
+        const settled = await Promise.allSettled(defs.map((p, i) => probe(callChat, probeSys(p), inputText, {
+            ...opts,
+            options: { ...(opts.options || {}), temperature: TEMPS[i % TEMPS.length] }
+        })));
         const out = [];
         settled.forEach((r, i) => {
             if (r.status === 'fulfilled' && r.value)
@@ -170,27 +187,33 @@ export async function runThink(callChat, inputText, depth, opts) {
             wave = [...wave, ...more];
         }
     }
-    const answers = wave.map((w) => ({ tag: w.tag, answer: extractAnswer(w.text) }));
+    const answers = wave.map((w) => ({ tag: w.tag, answer: extractAnswer(w.text), conf: extractConfidence(w.text) }));
+    // confidence-weighted vote: each probe's confidence is its ballot weight.
+    // consensus fires when the top answer's weight ≥ 2 (≈ two sure probes, or
+    // three 0.7s) — a lone confident probe does NOT outvote a pair.
     const groups = new Map();
     for (const a of answers) {
         if (!a.answer)
             continue;
         const k = normAnswer(a.answer);
-        groups.set(k, (groups.get(k) || 0) + 1);
+        const g = groups.get(k) || { w: 0, n: 0 };
+        g.w += a.conf;
+        g.n++;
+        groups.set(k, g);
     }
     let consensus = null;
     let agreement = 0;
     if (groups.size) {
         let best = '';
-        let bestN = 0;
-        for (const [k, n] of groups)
-            if (n > bestN) {
-                bestN = n;
+        let bestW = 0;
+        for (const [k, g] of groups)
+            if (g.w > bestW) {
+                bestW = g.w;
                 best = k;
             }
-        if (bestN >= 2) {
+        if (bestW >= 2) {
             consensus = best;
-            agreement = bestN / answers.length;
+            agreement = bestW / answers.length;
         }
     }
     const chunks = wave.map((w) => `${w.tag.toUpperCase()}:\n${w.text}`);
@@ -204,24 +227,37 @@ export async function runThink(callChat, inputText, depth, opts) {
             chunks.push(`CONSOLIDATED:\n${synth}`);
             const sAns = extractAnswer(synth);
             if (sAns) {
-                answers.push({ tag: 'synthesis', answer: sAns });
-                // the synthesis answer votes too — if it lands on a probe's value,
-                // that pair is now a consensus.
+                // synthesis is the coordinator — it votes with full weight (it saw
+                // every pass, so its judgement outweighs any single probe).
+                answers.push({ tag: 'synthesis', answer: sAns, conf: 1 });
                 const k = normAnswer(sAns);
-                groups.set(k, (groups.get(k) || 0) + 1);
+                const g = groups.get(k) || { w: 0, n: 0 };
+                g.w += 1;
+                g.n++;
+                groups.set(k, g);
                 let best = '';
-                let bestN = 0;
-                for (const [kk, n] of groups)
-                    if (n > bestN) {
-                        bestN = n;
+                let bestW = 0;
+                for (const [kk, gg] of groups)
+                    if (gg.w > bestW) {
+                        bestW = gg.w;
                         best = kk;
                     }
-                if (bestN >= 2) {
+                if (bestW >= 2) {
                     consensus = best;
-                    agreement = bestN / answers.length;
+                    agreement = bestW / answers.length;
                 }
             }
         }
+    }
+    // the winning group's actual reasoning — the caller hands it to an
+    // external step-grader so a confidently-wrong consensus gets caught
+    // before the final call commits to it. probe texts only; if the winner
+    // is the synthesis pass itself, there's nothing to grade → null.
+    if (consensus) {
+        const winTags = answers.filter(a => a.answer && normAnswer(a.answer) === consensus).map(a => a.tag);
+        const winTexts = wave.filter(w => winTags.includes(w.tag)).map(w => w.text).filter(Boolean);
+        if (winTexts.length)
+            results.consensusText = winTexts.join('\n\n---\n\n');
     }
     results.analysis = chunks.join('\n\n');
     results.answers = answers;

@@ -11,6 +11,116 @@ function norm(text: string): string {
   return stripCodeFences(stripThinkBlocks(String(text || ''))).trim();
 }
 
+/** models answer Putnam-style problems in LaTeX — \frac{1}{\pi} never
+ *  contains the literal "1/π" the key uses. normalize math notation to
+ *  plain text before matching: \frac{a}{b} → a/b, \pi → π, x_1 → x1,
+ *  drop $ { } \left \right. */
+function normalizeMath(s: string): string {
+  let t = String(s || '');
+  for (let i = 0; i < 3; i++) {
+    const n = t.replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, (m, a, b) => `${a}/${b}`);
+    if (n === t) break;
+    t = n;
+  }
+  return t
+    .replace(/\\pi\b/g, 'π')
+    .replace(/\\cdot\b/g, '·')
+    .replace(/\\times\b/g, '×')
+    .replace(/\\pm\b/g, '±')
+    .replace(/\\le\b|\\leq\b|\\leqslant\b/g, '≤')
+    .replace(/\\ge\b|\\geq\b|\\geqslant\b/g, '≥')
+    .replace(/\\ne\b|\\neq\b/g, '≠')
+    .replace(/\\infty\b/g, '∞')
+    .replace(/\\sqrt\{([^{}]*)\}/g, 'sqrt($1)')
+    .replace(/\\ldots\b|\\dots\b|\\cdots\b/g, '...')
+    .replace(/\\text\{([^{}]*)\}/g, '$1')
+    .replace(/\\left\b|\\right\b/g, '')
+    .replace(/\\quad\b|\\qquad\b/g, ' ')
+    .replace(/\\,/g, ' ')
+    .replace(/\\;/g, ' ')
+    .replace(/\\!/g, '')
+    .replace(/\\[a-zA-Z]+\b/g, '')
+    .replace(/[{}$]/g, '')
+    .replace(/_/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+/** \frac{a}{b} → (a)/(b) with a balanced-brace scan — the regex form dies on
+ *  nested braces (\frac{1 - e^{-2}}{2} has e^{-2} inside the numerator). */
+function fracToParens(s: string): string {
+  function readBalanced(start: number): { body: string; end: number } | null {
+    let d = 0;
+    for (let i = start; i < s.length; i++) {
+      if (s[i] === '{') d++;
+      else if (s[i] === '}') { d--; if (d === 0) return { body: s.slice(start + 1, i), end: i }; }
+    }
+    return null;
+  }
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s.startsWith('\\frac{', i)) {
+      const a = readBalanced(i + 5); // the { of \frac{ sits at i+5
+      if (a && s[a.end + 1] === '{') {
+        const b = readBalanced(a.end + 1);
+        if (b) { out += `(${a.body})/(${b.body})`; i = b.end; continue; }
+      }
+    }
+    out += s[i];
+  }
+  return out;
+}
+
+/** symbolic answers: the model writes (1 - e^{-2})/2, never 0.4323. evaluate
+ *  balanced-paren expressions (plus trailing operator chains) numerically and
+ *  compare against the reference. safe scope: Math only, no globals. */
+function evalSymbolic(text: string, ref: number, tol: number): boolean {
+  // evaluation-specific normalization: \frac{a}{b} → (a)/(b) — parens matter
+  // for arithmetic ((1 - e^{-2})/2 ≠ 1 - e^{-2}/2). phrase matching uses the
+  // paren-free form; evaluation needs the parens.
+  let s = fracToParens(String(text || ''));
+  s = normalizeMath(s);
+  const groups: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '(') continue;
+    let d = 0;
+    for (let j = i; j < s.length; j++) {
+      if (s[j] === '(') d++;
+      else if (s[j] === ')') { d--; if (d === 0) { groups.push({ start: i, end: j }); break; } }
+    }
+  }
+  const cands: string[] = [];
+  for (const g of groups) {
+    // maximal span: extend left/right through math tokens (parens included)
+    // so implicit multiplication (1/2(1 - e^-2)), trailing chains
+    // ((1 - e^-2)/2) and paren denominators ((1 - e^-2)/(2)) all evaluate.
+    let a = g.start, b = g.end;
+    while (a > 0 && /[0-9πe.\-*/^()]/.test(s[a - 1])) a--;
+    while (b < s.length - 1 && /[0-9πe.\-*/^()]/.test(s[b + 1])) b++;
+    cands.push(s.slice(a, b + 1));
+  }
+  // bare answers with no parens at all (-1/2, 1/π → no group): try the
+  // whole normalized text when it's short enough to be a standalone answer.
+  if (s.length <= 80 && /\d/.test(s)) cands.push(s);
+  for (const span of cands) {
+    if (!/\d/.test(span)) continue;
+    const js = span
+      .replace(/\)\s*\(/g, ')*(')
+      .replace(/\)\s*(\d|π)/g, ')*$1')
+      .replace(/(\d|π)\s*\(/g, '$1*(')
+      .replace(/e\^-?\d+/g, (mm) => 'Math.exp(' + mm.slice(2) + ')')
+      .replace(/sqrt\(/g, 'Math.sqrt(')
+      .replace(/π/g, 'Math.PI')
+      .replace(/\^/g, '**');
+    try {
+      const v = Function('Math', 'return (' + js + ')')(Math);
+      if (typeof v === 'number' && isFinite(v)) {
+        if (ref === 0 ? Math.abs(v) <= tol : Math.abs(v - ref) / Math.abs(ref) <= tol) return true;
+      }
+    } catch { /* not an expression */ }
+  }
+  return false;
+}
+
 function extractNumber(text: string): number {
   const t = norm(text);
   const direct = parseDataType(t, 'double') as number;
@@ -178,7 +288,8 @@ async function scoreOne(callChat: CallChat, output: string, item: BenchItem, opt
 
   switch (item.kind) {
     case 'math':
-    case 'science': {
+    case 'science':
+    case 'math-aime': {
       const refObj = item.reference && typeof item.reference === 'object' && !Array.isArray(item.reference) ? item.reference as Record<string, unknown> : null;
       if (refObj && (refObj.time || refObj.distanceFromX != null)) {
         let timeOk = 0, distOk = 0;
@@ -216,8 +327,12 @@ async function scoreOne(callChat: CallChat, output: string, item: BenchItem, opt
       const ans = t.match(/ANSWER:\s*(.+)$/i)?.[1] || t;
       const frac = ans.match(/^(\d+)\s*\/\s*(\d+)$/);
       const num = frac ? parseInt(frac[1], 10) / parseInt(frac[2], 10) : extractNumber(text);
-      out.components.numeric = numericScore(num, item.reference as number, item.numericTolerance || 0.01);
-      out.score = out.components.numeric as number;
+      let numeric = numericScore(num, item.reference as number, item.numericTolerance || 0.01);
+      // exact symbolic forms ((1 - e^{-2})/2) never appear as decimals — fall
+      // back to evaluating expressions in the output.
+      if (numeric === 0 && evalSymbolic(text, item.reference as number, item.numericTolerance || 0.01)) numeric = 1;
+      out.components.numeric = numeric;
+      out.score = numeric;
       out.extracted = { number: num };
       break;
     }
@@ -254,11 +369,15 @@ async function scoreOne(callChat: CallChat, output: string, item: BenchItem, opt
       break;
     }
     case 'deduction': {
-      const t = norm(text).toLowerCase();
-      const ref = String(item.reference).toLowerCase();
-      out.components.deduction = t.includes(ref) ? 1 : 0;
+      // space-insensitive ("n^2 + n" matches ref "n^2+n"); array reference =
+      // any acceptable phrasing ("x1 < x2" or its mirror "x2 > x1")
+      const t = normalizeMath(norm(text)).toLowerCase().replace(/\s+/g, '');
+      const refs = Array.isArray(item.reference) ? item.reference : [item.reference];
+      const refsNorm = refs.map((r) => String(r).toLowerCase().replace(/\s+/g, ''));
+      const hit = refsNorm.some((r) => t.includes(r));
+      out.components.deduction = hit ? 1 : 0;
       out.score = out.components.deduction as number;
-      out.extracted = { mentionsRef: t.includes(ref) };
+      out.extracted = { mentionsRef: hit };
       break;
     }
     case 'code': {
@@ -291,6 +410,8 @@ async function scoreOne(callChat: CallChat, output: string, item: BenchItem, opt
       break;
     }
     default: {
+      // unknown kind = silent zero (the math-aime trap). shout instead.
+      if (process.stdout?.write) process.stdout.write(`  [score] WARN unknown kind "${item.kind}" for ${item.id} — scoring 0\n`);
       out.score = 0;
     }
   }

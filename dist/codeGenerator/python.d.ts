@@ -18,5 +18,9 @@ export declare function generateAndRunCode(callChat: any, task: string, inputTex
     pyResult: string | null;
     sandboxValidated: boolean;
     mctsConsensus?: any;
+    disagreement?: {
+        js: string;
+        py: string;
+    } | null;
 }>;
 //# sourceMappingURL=python.d.ts.map

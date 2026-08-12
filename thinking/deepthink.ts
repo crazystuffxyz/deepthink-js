@@ -1068,7 +1068,7 @@ export class Deepthink extends EventEmitter {
     // order), so the merged system message ends up:
     //   [pin] [evolved] [thinkCtx] [persona...]
     if (evolvedGuide) finalMessages = insertSystemPrompt(finalMessages, evolvedGuide);
-    let codeExec: { result: string; sandboxValidated?: boolean } | null = null;
+    let codeExec: { result: string; sandboxValidated?: boolean; disagreement?: { js: string; py: string } | null } | null = null;
     let sandboxPrefix: ChatMessage[] = [];
     if (depth > 0 && mergedOpts.enableCode !== false) {
       // skip the compute-detection LLM call for inputs with no arithmetic
@@ -1109,6 +1109,12 @@ export class Deepthink extends EventEmitter {
               // lone guess. the old "one implementation" framing made the
               // final call re-derive by hand and introduced errors (a26i-09).
               trustLine = `${mcts.count} independent implementations agree on [${codeExec.result}]. Treat it as the leading candidate — verify the reasoning, but do NOT discard it without cause.`;
+            } else if (codeExec.disagreement) {
+              // JS and Python ran but disagree — one is wrong. the final call
+              // must see BOTH values and the conflict, not one side picked
+              // arbitrarily (g03: JS 4 correct, PY 20 wrong — presenting PY's
+              // 20 alone made the hand-derivation fail).
+              trustLine = `JS and Python disagree (JS: ${codeExec.disagreement.js}, PY: ${codeExec.disagreement.py}) — at most one is right. Re-derive carefully; do not trust either blindly.`;
             } else {
               trustLine = 'This is a candidate result from one implementation — independently verify it before finalizing.';
             }
@@ -1165,7 +1171,11 @@ export class Deepthink extends EventEmitter {
     }
     if (codeExec?.sandboxValidated) {
       const gt = String(codeExec.result).trim();
-      if (gt && !rawText.includes(gt)) rawText += `\n\n**Verified Answer: ${gt}**`;
+      // always stamp — the machine-verified value is ground truth even when
+      // the model already wrote it mid-reasoning (the extractor keys on the
+      // stamp; a bare mention in prose is not an answer, and the last-number
+      // rule then grabs whatever trailing number the prose ends on)
+      if (gt) rawText += `\n\n**Verified Answer: ${gt}**`;
     }
     if (brain) brain.add('first_response', rawText, 6);
 
@@ -1235,7 +1245,7 @@ export class Deepthink extends EventEmitter {
         }
         if (codeExec?.sandboxValidated) {
           const gtv = String(codeExec.result).trim();
-          if (gtv && !rawText.includes(gtv)) rawText += `\n\n**Verified Answer: ${gtv}**`;
+          if (gtv) rawText += `\n\n**Verified Answer: ${gtv}**`;
         }
         // commitment-boundary escape: the answer value stopped changing
         // across revisions — it has stabilized, more revising just churns

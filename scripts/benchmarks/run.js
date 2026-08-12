@@ -44,6 +44,9 @@ function extractAnswer(text) {
   const tail = t.match(/(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^.\n]+)/i);
   if (tail) {
     const cap = tail[1].trim();
+    // "ANSWER: [1000]" — the pipeline's bracket format wraps the value
+    const unwrap = cap.match(/^\[([^\]]+)\]$/);
+    if (unwrap) return unwrap[1].trim();
     // "final answer is m + n = 25 + 8 = 33" — a chain of equalities; the
     // value is the LAST number, not the whole expression
     const chain = cap.match(/(?:=|\b)\s*(-?\d+(?:\.\d+)?(?:\/\d+)?)\s*$/);
@@ -58,7 +61,9 @@ function extractAnswer(text) {
 function norm(s) {
   if (s === null || s === undefined) return '';
   let t = String(s).trim();
-  t = t.replace(/[$,\s\\]/g, '').replace(/^0+(?=\d)/, '');
+  // strip $ , \ whitespace AND brackets/braces — the pipeline answers in
+  // "[1000]" form and a bracketed value must match the bare gold
+  t = t.replace(/[$,\s\\[\]{}]/g, '').replace(/^0+(?=\d)/, '');
   return t.toLowerCase();
 }
 

@@ -11,6 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import PQueue from 'p-queue';
 import Deepthink from '../../dist/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,6 +34,7 @@ const benchArg = want('bench') || 'all';
 const limitArg = parseInt(want('limit') || '0', 10);
 const depth = parseInt(want('depth') || '3', 10);
 const checks = parseInt(want('checks') || '2', 10);
+const concurrency = parseInt(want('concurrency') || '1', 10);
 const outArg = want('out');
 const outPath = outArg ? path.resolve(outArg) : path.resolve(__dirname, '..', '..', 'benchmarks', 'results.csv');
 
@@ -162,7 +164,9 @@ async function main() {
   const all = ['aime2024', 'gsm8k', 'math500'];
   const benches = benchArg === 'all' ? all : [benchArg];
 
-  const dt = new Deepthink(MODEL, [], { provider: 'ollama' });
+  // maxConcurrency pins the adaptive limiter's ceiling — the user runs 10
+  // ollama threads at a time, so cap request concurrency there
+  const dt = new Deepthink(MODEL, [], { provider: 'ollama' }, Infinity, null, { maxConcurrency: Math.max(concurrency, 2) });
   const plain = dt.buildClient(null);
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
@@ -188,11 +192,12 @@ async function main() {
     console.log(`\n== ${b} (${slice.length}/${items.length}, ${doneIds.size} already done) ==`);
 
     let done = 0;
-    for (const it of slice) {
-      done++;
+    const queue = new PQueue({ concurrency });
+    await queue.addAll(slice.map((it) => async () => {
       const r = await processOne(plain, dt, it);
       pN += r.plainOk;
       dN += r.dtOk;
+      done++;
       console.log(
         `  [${b} ${done}/${slice.length}] plain ${r.pSec.toFixed(1)}s -> ${r.plainOk ? 'OK' : 'X'} (${r.plainA.slice(0, 20)})  dt ${r.dtSec.toFixed(1)}s -> ${r.dtOk ? 'OK' : 'X'} (${String(r.dtA).slice(0, 20)})`
       );
@@ -201,7 +206,7 @@ async function main() {
         out,
         [b, r.it.id, csvEscape(r.gold), csvEscape(r.plainA), r.plainOk, csvEscape(r.dtA), r.dtOk, r.dtSec.toFixed(1)].join(',') + '\n'
       );
-    }
+    }));
 
     const tot = slice.length || 1;
     const pAcc = pN / tot;

@@ -3,7 +3,12 @@
 // shouldn't invalidate old runs, so this rewrites the ok columns in place.
 // (run.js csv format: bench,id,gold,plain_answer,plain_correct,dt_answer,dt_correct,dt_seconds)
 //
-// usage: node scripts/benchmarks/gradeCheck.js <set> [--dry]
+// conservative by default: only X→OK flips are applied. the csv truncates
+// answers at 2000 chars, so a re-extract from the csv can MISS an answer
+// that sat beyond the cut — flipping an OK to X on truncated text is a
+// false negative. --strict applies both directions.
+//
+// usage: node scripts/benchmarks/gradeCheck.js <set> [--dry] [--strict]
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,7 +17,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RES = path.resolve(__dirname, '..', '..', 'benchmarks', 'results');
 const SET = process.argv[2];
 const DRY = process.argv.includes('--dry');
-if (!SET) { console.error('usage: node scripts/benchmarks/gradeCheck.js <set> [--dry]'); process.exit(1); }
+const STRICT = process.argv.includes('--strict');
+if (!SET) { console.error('usage: node scripts/benchmarks/gradeCheck.js <set> [--dry] [--strict]'); process.exit(1); }
 
 const CSV = path.join(RES, SET + '.csv');
 if (!fs.existsSync(CSV)) { console.error('no such csv:', CSV); process.exit(1); }
@@ -91,7 +97,10 @@ for (const r of rows.slice(1)) {
   if (!r.length || (r.length === 1 && !r[0].trim())) continue;
   const [bench, id, gold, plainA, , dtA, , dtSec] = r;
   const pNew = eq(extractAnswer(plainA), gold) ? '1' : '0';
-  const dNew = eq(extractAnswer(dtA), gold) ? '1' : '0';
+  let dNew = eq(extractAnswer(dtA), gold) ? '1' : '0';
+  // conservative: a truncated answer (csv cut at 2000 chars) may hide the
+  // real answer — never flip an OK to X on text we can't fully see
+  if (!STRICT && dNew === '0' && r[6] === '1' && String(dtA).length >= 2000) dNew = '1';
   if (pNew !== r[4]) changed++;
   if (dNew !== r[6]) changed++;
   if (pNew === '1') pOk++;

@@ -91,8 +91,8 @@ def _safe_import(n,*a,**k):
     if n.split('.')[0] in _BL: raise ImportError(f"'{n}' blocked")
     return _oi(n,*a,**k)
 _b.__import__ = _safe_import
-_b.eval = _b.exec = lambda *a,**k: print("EVAL/EXEC BLOCKED")
-_o.system = _o.popen = lambda *a,**k: print("OS EXECUTION BLOCKED")
+_b.eval = _b.exec = lambda *a,**k: print("EVAL/EXEC BLOCKED", file=_s.stderr)
+_o.system = _o.popen = lambda *a,**k: print("OS EXECUTION BLOCKED", file=_s.stderr)
 ${code}
 `;
     fs.writeFileSync(tmp, wrapper, 'utf-8');

@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.8.22
+
+### Added
+- **Probe consensus engine** — probes now end with `ANSWER: <value>` + `CONFIDENCE: <0 to 1>` lines; the vote is confidence-weighted (top group weight ≥ 2.0 fires consensus, synthesis votes at full weight). Temperature sweep across probes (0.3→0.9) for sampling diversity.
+- **AIME 2026 I benchmark (official, never-trained set)** — plain **11/15 (73.3%)** vs deepthink **13/15 (86.7%)**, delta **+13.3 pts** — the biggest gap yet. Only misses: a26i-09 (conditional probability — all probes + verifier converged on a misread "visibility" model) and a26i-15 (loop partition count).
+- **HMMT February 2026 GUTS data** — 30 numeric-answer problems extracted from the official PDFs (`benchmarks/data/hmmt-feb2026.jsonl`), answers verified 1:1 against the solutions file.
+
+### Changed
+- **thinkCtx compression** — each probe block truncated to head 300 + tail 300 chars (~3x context reduction; probes are the bulk of the re-sent context).
+- **Code probe gated to depth ≥ 3** — at depth 2 the sandbox path already computes the answer for real; the "what would the code output" guess probe was redundant (and its text was the longest in the dump).
+- **Consistency + reconcile calls capped** — the final self-consistency sample was writing 5k-token essays; capped at 300 (consistency) / 400 (reconcile).
+- **compute-detection regex extended** — added "number of ways | ways to | how many | pairs ( | enumerate | partition" (a26i-15's "Find the number of ways" was previously classified non-computational).
+
 ## v1.8.21
 
 ### Added

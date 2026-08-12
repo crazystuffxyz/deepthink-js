@@ -139,8 +139,7 @@ async function oneGeneration(callChat, population, bench, opts, log) {
         const parent = tournamentSelect(evaluated, opts.tournamentK || 3);
         const kids = await mutate(parent, { callChat, opts, leaderboard });
         for (const k of kids) {
-            if (!k.id)
-                k.id = nextId('c');
+            k.id = nextId('c'); // fresh id — kids must not inherit the parent's
             k.fitness = null;
             children.push(k);
         }
@@ -187,6 +186,17 @@ async function evolvePrompts(callChat, opts = {}) {
     fs.mkdirSync(runDir, { recursive: true });
     const log = { gen: 0, history: [] };
     let population = seedPopulation(popSize);
+    // warm start: an external best prompt (e.g. from a prior run) becomes
+    // population member #1 — it gets evaluated in gen 0 like everyone else
+    if (opts.seedPrompt) {
+        population[0] = {
+            id: nextId('c'),
+            parent: null,
+            operator: 'seed:external',
+            systemPrompt: opts.seedPrompt,
+            ...fingerprint(opts.seedPrompt)
+        };
+    }
     fs.writeFileSync(path.join(runDir, 'population-gen-000.json'), JSON.stringify(population, null, 2), 'utf-8');
     for (let g = 0; g < generations; g++) {
         population = await oneGeneration(callChat, population, bench, opts, log);

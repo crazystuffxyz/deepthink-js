@@ -3,7 +3,7 @@
 import { EventEmitter } from 'node:events';
 import PQueue from 'p-queue';
 import { buildProviderClient } from '../providers/index.js';
-import { createDefaultSystemPrompt, messagesToText, normalizeInputToMessages, parseDataType, stripThinkBlocks } from './dataTypes.js';
+import { createDefaultSystemPrompt, messagesToText, normalizeInputToMessages, parseDataType, stripThinkBlocks, extractJSON } from './dataTypes.js';
 import { cloneMessage } from './dataTypes.js';
 import { runMoA } from './mixtureOfAgents.js';
 import { runThink } from './think.js';
@@ -271,7 +271,7 @@ function tracePrompt(messages: ChatMessage[]): string {
 function looksComputational(inputText: string): boolean {
   return (
     /\d/.test(inputText) ||
-    /calculate|compute|solve|evaluate|sum|difference|product|quotient|multiply|divide|add |subtract|count|convert|parse|fibonacci|prime|factorial|greatest|least common|probability|integral|derivative|generate a (list|table|sequence)|sort |sorting|matrix|equation/i.test(inputText)
+    /calculate|compute|solve|evaluate|sum|difference|product|quotient|multiply|divide|add |subtract|count|convert|parse|fibonacci|prime|factorial|greatest|least common|probability|integral|derivative|generate a (list|table|sequence)|sort |sorting|matrix|equation|number of ways|ways to|how many|pairs? \(|enumerate|partition/i.test(inputText)
   );
 }
 
@@ -335,6 +335,26 @@ function parseRetryAfter(err: unknown): number | null {
   const hit = m.match(/retry[- ]?after[:\s]+(\d+)/i);
   if (hit) return Math.min(Number(hit[1]) * 1000, 60_000);
   return null;
+}
+
+/** detect a response that got cut off mid-thought. small models emit EOS
+ *  mid-formula on hard proofs; shipping the fragment as the final answer is
+ *  worse than retrying. signals: unclosed math delimiters, dangling LaTeX
+ *  braces/backslashes, or a long response that never reaches a conclusion
+ *  and ends mid-sentence. */
+function looksTruncated(text: string): boolean {
+  const t = String(text || '').trim();
+  if (t.length < 60) return false;
+  const dollars = (t.match(/\$/g) || []).length;
+  if (dollars % 2 === 1) return true;                    // unclosed math
+  if (/\$\$\s*$/.test(t)) return true;                   // unclosed display math
+  if (/\\[a-zA-Z]+\{\s*$/.test(t)) return true;          // dangling \frac{ etc
+  if (/\\begin\{[a-z]*\*?\s*$/.test(t)) return true;     // unclosed environment
+  if (/[{(\\[]\s*$/.test(t)) return true;                // ends mid-expression
+  if (t.length > 400 && /[a-z0-9]$/.test(t) && !/(therefore|hence|conclusion|we conclude|thus|qed|□|proved|shown|answer)/i.test(t)) {
+    return true;                                         // long, no conclusion, mid-sentence
+  }
+  return false;
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -616,29 +636,83 @@ export class Deepthink extends EventEmitter {
   }
 
   async detectComputeNeeds(input: unknown, opts: DeepthinkOptions = {}): Promise<{ mode: 'none' | 'single' | 'parallel'; task?: string; tasks?: string[] }> {
-    const r = await this.callChat([{
-      role: 'system',
-      content: 'You are a Compute Orchestrator. Your goal is to determine if a request requires precise computational verification via a sandbox to prevent hallucinations.\n\n' +
-        'CLASSIFICATION PROTOCOL:\n' +
-        '  - mode: "none" -> The request is conceptual, qualitative, or an open-ended reasoning task.\n' +
-        '  - mode: "single" -> The request requires a single, definite numeric, symbolic, or algorithmic result (e.g., "What is 2^100?", "Calculate the 50th Fibonacci number").\n' +
-        '  - mode: "parallel" -> The request requires multiple independent computations that can be run concurrently (e.g., "Calculate the first 5 primes and their sum").\n\n' +
-        'SENSITIVITY GUIDE:\n' +
-        '  - If the answer depends on a precise mathematical property, an iterative loop, or a complex combination, use "single" or "parallel".\n' +
-        '  - If the task is a "sanity check" on a number, use "single".\n\n' +
-        'Output ONLY valid JSON - no markdown, no prose:\n' +
-        '{"mode":"none" | "single" | "parallel", "task":"<the precise executable task>", "tasks":["<task1>", "<task2>"]}'
-    }, { role: 'user', content: messagesToText(input) }], false, null, { ...opts, think: false, samplingProfile: 'json', _phase: 'compute', _depth: 2 });
-    try {
-      const txt = (r.content || '').replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
-      const p = JSON.parse(txt);
-      if (!p.mode || p.mode === 'none') return { mode: 'none' };
+    const inputText = messagesToText(input);
+    const sys = 'You are a Compute Orchestrator. Your goal is to determine if a request requires precise computational verification via a sandbox to prevent hallucinations.\n\n' +
+      'CLASSIFICATION PROTOCOL:\n' +
+      '  - mode: "none" -> The request is conceptual, qualitative, or an open-ended reasoning task.\n' +
+      '  - mode: "single" -> The request requires a single, definite numeric, symbolic, or algorithmic result (e.g., "What is 2^100?", "Calculate the 50th Fibonacci number").\n' +
+      '  - mode: "parallel" -> The request requires multiple independent computations that can be run concurrently (e.g., "Calculate the first 5 primes and their sum").\n\n' +
+      'SENSITIVITY GUIDE:\n' +
+      '  - If the answer depends on a precise mathematical property, an iterative loop, or a complex combination, use "single" or "parallel".\n' +
+      '  - If the request asks "how many", "number of ways", "find the number", or "count the" — the answer is a definite integer → use "single" or "parallel".\n' +
+      '  - If the task is a "sanity check" on a number, use "single".\n' +
+      '  - "task" must be a SHORT (1-2 sentence) description of the computation to run — never code, never reasoning.\n\n' +
+      'Output ONLY valid JSON - no markdown, no prose:\n' +
+      '{"mode":"none" | "single" | "parallel", "task":"<the precise executable task>", "tasks":["<task1>", "<task2>"]}';
+    const r = await this.callChat([{ role: 'system', content: sys }, { role: 'user', content: inputText }], false, null, { ...opts, think: false, samplingProfile: 'json', _phase: 'compute', _depth: 2 });
+    // the orchestrator embeds the task as a JSON string — when the task is
+    // code, a raw backslash (\d in a regex, \n inside a python string) breaks
+    // the whole parse and silently kills codegen (a26ii-13: orchestrator
+    // derived 107, parse threw, hand-reasoning returned 16). never throw:
+    // fall back to brace-matched extraction, then repair bad escapes.
+    const parse = (txt: string): { mode: 'none' | 'single' | 'parallel'; task?: string; tasks?: string[] } => {
+      const t = (txt || '').replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+      const tryParse = (s: string): any => {
+        try { return JSON.parse(s); } catch { return null; }
+      };
+      let p: any = tryParse(t);
+      if (!p) {
+        // brace-matched object scan — survives prose around the JSON
+        const start = t.indexOf('{');
+        if (start >= 0) {
+          let depth = 0, inStr = false, esc = false;
+          for (let i = start; i < t.length; i++) {
+            const c = t[i];
+            if (inStr) {
+              if (esc) esc = false;
+              else if (c === '\\') esc = true;
+              else if (c === '"') inStr = false;
+            } else if (c === '"') inStr = true;
+            else if (c === '{') depth++;
+            else if (c === '}') {
+              depth--;
+              if (depth === 0) {
+                const cand = t.slice(start, i + 1);
+                p = tryParse(cand);
+                if (!p) {
+                  // repair: backslash before a non-JSON-escape char → double
+                  // it; \u followed by non-hex → double it too
+                  p = tryParse(
+                    cand
+                      .replace(/\\([^"\\/bfnrtu])/g, '\\\\$1')
+                      .replace(/\\(u)(?![0-9a-fA-F]{4})/g, '\\\\$1')
+                  );
+                }
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (!p || !p.mode || p.mode === 'none') return { mode: 'none' };
       if (p.mode === 'parallel' && Array.isArray(p.tasks) && p.tasks.length >= 2) return { mode: 'parallel', tasks: p.tasks.slice(0, 4) };
       if (p.mode === 'single' && p.task) return { mode: 'single', task: p.task };
-    } catch {
-      // fallthrough
+      return { mode: 'none' };
+    };
+    const first = parse(r.content || '');
+    if (first.mode !== 'none') return first;
+    // counting problems are definite-integer answers — the orchestrator
+    // sometimes classifies them as conceptual (a26i-15: "number of ways"
+    // → none, then the model hand-counted wrong). re-ask with a nudge.
+    if (/number of ways|how many|find the number|in how many|count the number/i.test(inputText)) {
+      const r2 = await this.callChat(
+        [{ role: 'system', content: sys }, { role: 'user', content: inputText + '\n\nNOTE: this request asks for a definite count. It requires a numeric answer — classify as "single" or "parallel", not "none".' }],
+        false, null, { ...opts, think: false, samplingProfile: 'json', _phase: 'compute', _depth: 2 }
+      );
+      const second = parse(r2.content || '');
+      if (second.mode !== 'none') return second;
     }
-    return { mode: 'none' };
+    return first;
   }
 
   async runChecks(input: unknown, response: string, checksCount: number, opts: DeepthinkOptions = {}, groundTruth: { value: unknown; sandboxValidated?: boolean } | null = null, sandboxPrefix: ChatMessage[] = []): Promise<CheckResult[]> {
@@ -913,6 +987,11 @@ export class Deepthink extends EventEmitter {
     let thinkCtxMsg: ChatMessage | null = null;
     let probeConsensus: string | null = null;
     let probeAgreement = 0;
+    // probe consensus is trusted ONLY when an external grader verified the
+    // winner's reasoning. confidently-wrong probes share one error, and the
+    // old code let a wrong consensus both anchor the final call AND skip the
+    // consistency sample — double blind spot.
+    let probeConsensusTrusted = true;
     if (depth > 0) {
       // the trained prompt ALSO rides into the probes themselves: they are
       // the deep-think engine, and the evolved techniques (poincare-incubate,
@@ -930,6 +1009,36 @@ export class Deepthink extends EventEmitter {
       const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, thinkOpts);
       probeConsensus = thinkResults.consensus ?? null;
       probeAgreement = thinkResults.agreement ?? 0;
+      // external step-grader on the consensus (cheap PRM): the probes self-
+      // report confidence, and confident probes can share ONE error. a fast
+      // grader scores the winner's actual reasoning; a flawed winner gets
+      // red-flagged so the final call re-derives instead of rubber-stamping.
+      // sound winner → trust it, and keep skipping the redundant consistency
+      // call. only the consensus path grades — the synthesis path already
+      // re-examined every probe.
+      probeConsensusTrusted = !!probeConsensus;
+      if (probeConsensus && thinkResults.consensusText) {
+        try {
+          const verdict = await this.callChat(
+            [
+              { role: 'system', content: 'You are a step-level math grader. Score each step of the reasoning 0.0-1.0 and judge whether the conclusion follows from the steps. Output ONLY JSON: {"total": 0.0-1.0, "flaw": "specific error, or empty string", "verdict": "SOUND"|"FLAWED"}' },
+              { role: 'user', content: `Problem:\n${inputText}\n\nSolution attempt:\n${compressProbeDump(thinkResults.consensusText)}\n\n` }
+            ],
+            false, null,
+            { ...mergedOpts, think: false, autoSystemPrompt: false, samplingProfile: 'verify', _phase: 'probe_verdict', _depth: 1, options: { ...(mergedOpts.options || {}), temperature: 0.2, num_predict: 250 } }
+          );
+          const vj = extractJSON(verdict.content || '') as Record<string, unknown>;
+          const total = Number(vj?.total ?? NaN);
+          const flaw = String(vj?.flaw || '').trim();
+          const sound = isFinite(total) && total >= 0.6 && String(vj?.verdict).toUpperCase() !== 'FLAWED';
+          probeConsensusTrusted = sound;
+          this._log('info', 'probe_verdict', `consensus [${probeConsensus}] → ${sound ? `SOUND (${total.toFixed(2)})` : `FLAWED (${total.toFixed(2)})${flaw ? ' — ' + flaw : ''}`}`);
+          if (brain) brain.add('probe_verdict', `${sound ? 'SOUND' : 'FLAWED'} ${total.toFixed(2)}`, 8);
+        } catch (e) {
+          // grader error = no evidence of a flaw → keep trusting the consensus
+          this._log('warn', 'probe_verdict', `grader failed: ${(e as Error).message}`);
+        }
+      }
       if (brain) brain.add('think_stages', Object.keys(thinkResults).join(', '), 6);
       let thinkCtx = 'BACKGROUND THINKING PROCESS (do not repeat this in your answer):\n';
       for (const [k, v] of Object.entries(thinkResults)) {
@@ -937,9 +1046,14 @@ export class Deepthink extends EventEmitter {
       }
       // probe consensus: N independent passes landed on the same value —
       // the strongest self-consistency signal the pipeline has. the final
-      // call must treat it as the leading candidate, not ignore it.
+      // call must treat it as the leading candidate, not ignore it — UNLESS
+      // the external step-grader found a flaw in the winner's reasoning, in
+      // which case the probes likely share one error and re-derivation is
+      // the only honest move.
       if (probeConsensus) {
-        thinkCtx += `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of independent probes arrived at [${probeConsensus}]. Treat this as the leading candidate — verify it, do not ignore it.\n`;
+        thinkCtx += probeConsensusTrusted
+          ? `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of independent probes arrived at [${probeConsensus}], and an external step-level grader confirmed their reasoning is sound. Treat this as the leading candidate — verify it, do not ignore it.\n`
+          : `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of probes arrived at [${probeConsensus}], BUT external step-scoring found a flaw in their shared reasoning. The probes may repeat ONE error. Re-derive from scratch — do NOT assume [${probeConsensus}].\n`;
       }
       if (brain) {
         await this.consolidateBrainMemory(brain, mergedOpts);
@@ -977,7 +1091,7 @@ export class Deepthink extends EventEmitter {
             // independently cross-validated; one weak link poisons the lot.
             const allValidated = results.every(r => r.sandboxValidated);
             codeExec = { result: results.map(r => r.result).join(' | '), sandboxValidated: allValidated };
-            sandboxPrefix = [{ role: 'system', content: sandbox + `PARALLEL SANDBOX RESULTS${combined}\n\n${allValidated ? 'These values are cross-validated. Do NOT contradict them.' : 'Treat these as candidate results — verify before finalizing.'}` }];
+            sandboxPrefix = [{ role: 'system', content: (allValidated ? sandbox : '<<<SANDBOX_CANDIDATE>>>\n') + `PARALLEL SANDBOX RESULTS${combined}\n\n${allValidated ? 'These values are cross-validated. Do NOT contradict them.' : 'Treat these as candidate results — verify before finalizing.'}` }];
           } catch (e: unknown) {
             finalMessages = insertSystemPrompt(finalMessages, `PARALLEL CODE FAILED: ${(e as Error).message}. Use reasoning.`);
           }
@@ -986,12 +1100,29 @@ export class Deepthink extends EventEmitter {
             codeExec = await callCode(needs.task);
             if (brain) brain.add('code_result', `${needs.task} = ${codeExec.result}`, 10);
             const validated = !!codeExec.sandboxValidated;
+            const mcts = codeExec.mctsConsensus as { count?: number } | null | undefined;
+            let trustLine: string;
+            if (validated) {
+              trustLine = 'This value is cross-validated by independent implementations. Your answer MUST state [' + codeExec.result + '] exactly.';
+            } else if (mcts && (mcts.count || 0) >= 2) {
+              // 2+ independent implementations agree — a strong signal, not a
+              // lone guess. the old "one implementation" framing made the
+              // final call re-derive by hand and introduced errors (a26i-09).
+              trustLine = `${mcts.count} independent implementations agree on [${codeExec.result}]. Treat it as the leading candidate — verify the reasoning, but do NOT discard it without cause.`;
+            } else {
+              trustLine = 'This is a candidate result from one implementation — independently verify it before finalizing.';
+            }
+            // AIME-style problems ask for integers; a non-integer sandbox
+            // result means the code is wrong, not the answer. flag it so the
+            // final call re-derives instead of rubber-stamping garbage
+            // (a26ii-02: DP returned 90.1 for a √N problem).
+            const res = String(codeExec.result || '').trim();
+            if (!/^-?\d+$/.test(res) && /find (the )?(number|sum|value|integer|smallest|largest)|m ?\+ ?n|how many|√|sqrt|find the number of ways/i.test(inputText)) {
+              trustLine += ` The sandbox result [${res}] is NOT an integer, but this problem asks for an integer — the code is likely wrong. Re-derive the answer yourself.`;
+            }
             sandboxPrefix = [{
               role: 'system',
-              content: sandbox + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\n` +
-                (validated
-                  ? 'This value is cross-validated by independent implementations. Your answer MUST state [' + codeExec.result + '] exactly.'
-                  : 'This is a candidate result from one implementation — independently verify it before finalizing.'),
+              content: (validated ? sandbox : '<<<SANDBOX_CANDIDATE>>>\n') + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\n` + trustLine,
             }];
           } catch (e: unknown) {
             finalMessages = insertSystemPrompt(finalMessages, `CODE FAILED: ${(e as Error).message}. Use reasoning.`);
@@ -1020,6 +1151,18 @@ export class Deepthink extends EventEmitter {
     const finalSamplingProfile = mergedOpts.samplingProfile || (type !== 'string' ? 'verify' : 'creative');
     let result = await this.callChat([...sandboxPrefix, ...preFinal], isStream, onChunk, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'final', _depth: 2 });
     let rawText = stripThinkBlocks(result.content || '');
+    // truncation recovery: a cut-off proof is worse than no answer. retry
+    // once with a bigger budget and a finish directive before the checkers
+    // ever see the fragment.
+    if (looksTruncated(rawText)) {
+      this.emit('log', { level: 'warn', msg: `[FINAL] response looks truncated (${rawText.length}ch) — retrying with finish directive`, source: 'final', ts: Date.now() });
+      // recovery budget must EXCEED the original — a cut-off proof needs room
+      // to finish, and the directive forces a conclusion so even a partial
+      // proof still lands the answer.
+      const finishMsg = { role: 'user', content: `Your previous response was cut off mid-sentence:\n\n"""${rawText.slice(-800)}"""\n\nState the final conclusion in one sentence, then complete the proof concisely. If the full proof is too long, give the conclusion and the key argument.` };
+      result = await this.callChat([...sandboxPrefix, ...preFinal, finishMsg], isStream, isStream ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'final', _depth: 2, options: { ...(mergedOpts.options || {}), num_predict: 2500 } });
+      rawText = stripThinkBlocks(result.content || '');
+    }
     if (codeExec?.sandboxValidated) {
       const gt = String(codeExec.result).trim();
       if (gt && !rawText.includes(gt)) rawText += `\n\n**Verified Answer: ${gt}**`;
@@ -1077,8 +1220,19 @@ export class Deepthink extends EventEmitter {
         const lastIsFeedback = convo.at(-1)?.role === 'user' && convo.at(-1)!.content.includes('checker(s) found issues');
         convo = lastIsFeedback ? [...convo.slice(0, -1), { role: 'user', content: feedback }] : [...convo, { role: 'user', content: feedback }];
         const isLast = iter === maxIter - 1;
-        result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream && isLast, isStream && isLast ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: 400 } });
+        // proofs need room: 400 tokens fits a short answer, not a Putnam
+        // proof. scale the revise budget to the draft it must fix.
+        const reviseBudget = rawText.length > 600 ? 2000 : 400;
+        result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream && isLast, isStream && isLast ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: reviseBudget } });
         rawText = stripThinkBlocks(result.content || '');
+        // truncation recovery inside the loop: a revise that cuts off
+        // mid-proof gets one more shot with a finish directive.
+        if (looksTruncated(rawText)) {
+          this.emit('log', { level: 'warn', msg: `[CHECK LOOP] revise truncated (${rawText.length}ch) — retrying with finish directive`, source: 'checks', ts: Date.now() });
+          const finishMsg = { role: 'user', content: `Your previous response was cut off mid-sentence:\n\n"""${rawText.slice(-800)}"""\n\nState the final conclusion in one sentence, then complete the proof concisely. If the full proof is too long, give the conclusion and the key argument.` };
+          result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo, finishMsg])], isStream && isLast, isStream && isLast ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: 2500 } });
+          rawText = stripThinkBlocks(result.content || '');
+        }
         if (codeExec?.sandboxValidated) {
           const gtv = String(codeExec.result).trim();
           if (gtv && !rawText.includes(gtv)) rawText += `\n\n**Verified Answer: ${gtv}**`;
@@ -1102,9 +1256,11 @@ export class Deepthink extends EventEmitter {
       // "confident but wrong" answers the checkers rubber-stamp. on
       // mismatch, reconcile once and re-check. skipped when the sandbox
       // already machine-verified the answer (machine > model sample) or
-      // when the probes already agreed (agreement IS the consistency
-      // signal — a second sample adds nothing).
-      if (mergedOpts.finalConsistency !== false && !codeExec?.sandboxValidated && !probeConsensus) {
+      // when the probes already agreed AND an external grader verified the
+      // winner's reasoning (agreement IS the consistency signal — a second
+      // sample adds nothing). an unverified or flawed consensus does NOT
+      // skip the sample.
+      if (mergedOpts.finalConsistency !== false && !codeExec?.sandboxValidated && !probeConsensusTrusted) {
         const fmtDir = buildFormatDirective(mergedOpts, type);
         const mine = extractAnswerValue(rawText);
         if (fmtDir && mine && mine.length <= 60) {
@@ -1118,8 +1274,13 @@ export class Deepthink extends EventEmitter {
               this.emit('log', { level: 'warn', msg: `[SELF-CONSISTENCY] independent re-derivation [${theirs}] ≠ pipeline [${mine}] — reconciling`, source: 'checks', ts: Date.now() });
               const reconcileMsg = `An independent re-derivation of the problem produced the answer [${theirs}], but your answer is [${mine}]. At most one is right. Re-derive carefully, find the error, and give the final answer.`;
               convo = [...convo, { role: 'user', content: reconcileMsg }];
-              result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream, isStream ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: 400 } });
+              result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo])], isStream, isStream ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: rawText.length > 600 ? 2000 : 400 } });
               rawText = stripThinkBlocks(result.content || '');
+              if (looksTruncated(rawText)) {
+                const finishMsg = { role: 'user', content: `Your previous response was cut off mid-sentence:\n\n"""${rawText.slice(-800)}"""\n\nState the final conclusion in one sentence, then complete the proof concisely. If the full proof is too long, give the conclusion and the key argument.` };
+                result = await this.callChat([...sandboxPrefix, ...consolidateSystemMessages([...preFinal.filter(m => m.role === 'system'), ...convo, finishMsg])], isStream, isStream ? onChunk : null, { ...mergedOpts, samplingProfile: finalSamplingProfile, _phase: 'revise', _depth: 3, options: { ...(mergedOpts.options || {}), num_predict: 2500 } });
+                rawText = stripThinkBlocks(result.content || '');
+              }
               const recheck = await this.runChecks(input, rawText, checks, mergedOpts, gt, sandboxPrefix);
               const passed2 = recheck.filter(r => r.correct).length;
               this.emit('log', { level: 'info', msg: `[SELF-CONSISTENCY] reconciled answer passed ${passed2}/${checks} checks`, source: 'checks', ts: Date.now() });

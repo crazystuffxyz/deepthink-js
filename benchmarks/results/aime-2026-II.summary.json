@@ -1,0 +1,18 @@
+{
+  "model": "gemma4:31b-cloud",
+  "verifier": "deepseek-v4-flash:0731-cloud",
+  "depth": 2,
+  "checks": 1,
+  "date": "2026-08-11T23:36:55.086Z",
+  "plain": {
+    "n": 15,
+    "correct": 10,
+    "pct": 66.7
+  },
+  "dt": {
+    "n": 15,
+    "correct": 13,
+    "pct": 86.7
+  },
+  "delta": 20
+}

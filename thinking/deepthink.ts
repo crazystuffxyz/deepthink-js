@@ -275,6 +275,16 @@ function looksComputational(inputText: string): boolean {
   );
 }
 
+/** cheap guard: does this input look like a proof problem? — triggers
+ *  proof-specific workflow (case coverage, lemma validation, counterexample search) */
+function isProofProblem(inputText: string): boolean {
+  // proof language without computational markers = proof problem
+  return (
+    /prove that|show that|determine all|find all|for every|for all|must be/i.test(inputText) &&
+    !/compute|evaluate|calculate|what is|find the value/i.test(inputText)
+  );
+}
+
 /** cheap difficulty router: long + proof/quantifier language + math
  *  vocabulary + depth → hard. drives probe escalation + budget forcing. */
 function estimateDifficulty(inputText: string, depth: number): boolean {
@@ -325,6 +335,13 @@ function buildFormatDirective(mergedOpts: any, type: any): string {
   const sysText = typeof mergedOpts.systemPrompt === 'string' ? mergedOpts.systemPrompt : '';
   if (/ANSWER\s*:/.test(sysText) && type !== 'json') {
     return 'OUTPUT FORMAT: end your response with the final answer on a line starting with "ANSWER: ". If the problem lists numbered choices, answer with the choice NUMBER only (e.g. "ANSWER: 3" for choice 3) — never the value itself. Nothing after that line.';
+  }
+  // answer("...") — the benchmark runner's DT_SYS asks for a quoted final
+  // answer so the extractor regex can pull it cleanly off the proof prose.
+  // without this directive the model buries the conclusion mid-proof and
+  // the answer never survives extraction.
+  if (/answer\s*\(/.test(sysText) && type !== 'json') {
+    return 'OUTPUT FORMAT: end your response with exactly one final line in the form answer("your answer here") — the complete answer inside double quotes, LaTeX written cleanly. For a proof, put the proven conclusion inside the quotes. Nothing may follow that line.';
   }
   return '';
 }
@@ -770,7 +787,26 @@ export class Deepthink extends EventEmitter {
         system: 'You are a Step-Level Verifier. Below is a solution broken into numbered steps. For EACH step, judge whether it is correct (sound math, no logical leaps, no misread constraints). A single wrong step invalidates the whole solution. Output ONLY valid JSON: {"step_scores":[0.0,1.0,...],"verdict":"YES/NO","reason":"..."}'
       });
     }
-    const personasFinal = personas.slice(0, Math.min(checksCount, 4));
+    // proof-specific personas — triggered when the input looks like a proof
+    // problem (USAMO/Putnam style: "prove that", "find all", "determine all")
+    if (isProofProblem(inputText)) {
+      personas.push({
+        label: 'CaseCoverage',
+        full: true,
+        system: 'You are a Case Exhaustion Checker for proof problems. Verify that ALL cases are enumerated and covered. Look for: (1) missing boundary cases (n=0, n=1, edge values), (2) unproven "without loss of generality" claims, (3) cases assumed but not checked. If ANY case is missing or unproven, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}'
+      });
+      personas.push({
+        label: 'LemmaValidator',
+        full: true,
+        system: 'You are a Lemma Validator for proof problems. Check that EVERY intermediate claim is justified (not assumed). Look for: (1) "clearly" / "obviously" without proof, (2) circular reasoning, (3) claims that need a lemma but don\'t have one. If ANY lemma is unjustified, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}'
+      });
+      personas.push({
+        label: 'CounterexampleSearch',
+        full: true,
+        system: 'You are a Counterexample Hunter for proof problems. Your ONLY job is to find a counterexample that breaks the claimed result. Try: (1) edge cases (n=0, n=1, large n), (2) special structures (primes, perfect squares), (3) boundary values. If you find ANY counterexample, return NO. Output ONLY valid JSON: {"verdict":"YES/NO","reason":"..."}'
+      });
+    }
+    const personasFinal = personas.slice(0, Math.min(checksCount, 6));  // increased from 4 to 6 to fit proof personas
 
     const shown = claimed ? `<claimed answer>\n${claimed}\n</claimed answer>` : response;
 
@@ -1152,6 +1188,13 @@ export class Deepthink extends EventEmitter {
     if (hard) {
       const lastUser = [...preFinal].reverse().find(m => m.role === 'user');
       if (lastUser) lastUser.content += '\n\nWait. Let me reconsider this step by step.';
+    }
+    // edge-case enumeration for "find all" / "determine all" problems —
+    // forces explicit check of boundary values (n=0, n=1, extremes) before
+    // the final answer. proof problems often miss edge cases.
+    if (/find all|determine all|for all n ≥|for every integer/i.test(inputText)) {
+      const lastUser = [...preFinal].reverse().find(m => m.role === 'user');
+      if (lastUser) lastUser.content += '\n\nBefore finalizing, explicitly list ALL edge cases and boundary values you checked (n=0, n=1, small n, large n, extremes). Verify the result holds for each.';
     }
     const isStream = typeof onChunk === 'function';
     const finalSamplingProfile = mergedOpts.samplingProfile || (type !== 'string' ? 'verify' : 'creative');

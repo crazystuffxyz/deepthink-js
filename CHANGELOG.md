@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.0.0
+
+### Added
+- **Full MCP server (69 tools)** — the MCP surface grew from a handful of LLM/research tools to a complete agent toolkit. Everything runs through one shared context (`src/mcp-server/ctx.js`) wired onto deepthink's own engine, so every tool reuses the same pooled model instances, memory store, worker pool, event log, and rollback log.
+- **Auto-agents** — `deepthink_process` (plan → execute with metacog verify + rollback → synthesize), `deepthink_plan`, `deepthink_agent` (a graph agent runtime with 14 node types: llm/tool/js/regex/set/tap/try/if/while/for/switch/goto/critique_loop/parallel/return), and `deepthink_mcts_search` / `deepthink_beam_search` (MCTS + beam search over candidate tool calls, with a risk gate on host-damaging tools).
+- **Skills subsystem** — `deepthink_list_skills` / `deepthink_run_skill` with built-in csv, markdown, json-spec, html-report, and excel skills (charts rendered via sharp).
+- **Vision loop** — `deepthink_design_svg` drafts → renders → critiques → revises an SVG against a goal, using deepthink's native vision chat.
+- **Document parsing** — `deepthink_parse_document` reads pdf/docx/xlsx/csv/html/markdown/json.
+- **Code intelligence** — `deepthink_search_code`, `deepthink_find_files`, `deepthink_project_overview`, `deepthink_import_map`, `deepthink_list_functions`, `deepthink_audit_deps`.
+- **Memory store** — `deepthink_memory_set/get/search/list/delete/gc` with a persistent JSON store, sha256 content-hash dedup, and TTL sweep.
+- **Sandboxed JS execution** — `deepthink_js_execute` runs code in a fresh Node subprocess with `state` in scope and dangerous globals shadowed.
+- **Runner primitives** — fs (read/write/list/mkdir/delete/copy/rollback), shell/powershell, web search/fetch/http, desktop (screenshot/mouse/keyboard/clipboard), git, node/python run, process/env control.
+- **LLM + research + humanize** — `deepthink_reason`, `deepthink_generate`, `deepthink_json`, `deep_research`, `deepthink_humanize_text`, `deepthink_check_score`, `deepthink_ai_analyze`, `deepthink_analyze_image`, `ollama_chat`, `list_models`, `ollama_health` — all backed by deepthink's native engine, research agent, and humanizer.
+
+### Changed
+- **MCP server rewritten** — `src/mcp.js` now delegates to `src/mcp-server/` (engine, ctx, schemas, index, and one module per tool family). The server runs over stdio (`npm run mcp`) or mounts at `/mcp` on the proxy (streamable HTTP). Tool results are shaped into MCP content; an explicit `ok:false` becomes an error result.
+- **Rebranded** — the tool surface is uniformly `deepthink_*`; no third-party branding remains.
+
 ## v1.8.22
 
 ### Added

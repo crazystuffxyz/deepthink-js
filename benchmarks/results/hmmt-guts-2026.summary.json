@@ -1,0 +1,14 @@
+{
+  "model": "gemma4:31b-cloud",
+  "depth": 2,
+  "checks": 1,
+  "rows": [
+    {
+      "bench": "hmmt-guts-2026",
+      "total": 36,
+      "plain": 0,
+      "dt": 0.5555555555555556,
+      "delta": 0.5555555555555556
+    }
+  ]
+}

@@ -851,7 +851,24 @@ Requests are routed through the full deepthink pipeline: parallel probes, MCTS-s
 
 ### MCP server
 
-Two transports, one tool: `deepthink_reason` — *"Executes deep test-time compute reasoning, sandboxed code verification, MCTS tree search, and adversarial critique to solve hard mathematical, algorithmic, or multi-file coding problems."*
+Two transports, **69 tools**. The MCP surface is a full agent toolkit, all wired onto deepthink's own engine through one shared context — so every tool reuses the same pooled model instances, memory store, worker pool, event log, and rollback log.
+
+The tool families:
+
+| Family | Tools |
+|---|---|
+| LLM + research | `deepthink_reason`, `deepthink_generate`, `deepthink_json`, `deep_research`, `deepthink_humanize_text`, `deepthink_check_score`, `deepthink_ai_analyze`, `deepthink_analyze_image`, `ollama_chat`, `list_models`, `ollama_health` |
+| Auto-agents | `deepthink_process`, `deepthink_plan`, `deepthink_agent`, `deepthink_mcts_search`, `deepthink_beam_search` |
+| Skills | `deepthink_list_skills`, `deepthink_run_skill` (csv, markdown, json-spec, html-report, excel) |
+| Vision | `deepthink_design_svg` |
+| Documents | `deepthink_parse_document` (pdf/docx/xlsx/csv/html/md/json) |
+| Code intelligence | `deepthink_search_code`, `deepthink_find_files`, `deepthink_project_overview`, `deepthink_import_map`, `deepthink_list_functions`, `deepthink_audit_deps` |
+| Memory | `deepthink_memory_set/get/search/list/delete/gc` |
+| Sandbox | `deepthink_js_execute` (fresh Node subprocess, `state` in scope) |
+| Runner | fs (`read/write/list/mkdir/delete/copy/rollback`), shell/powershell, web search/fetch/http, desktop (screenshot/mouse/keyboard/clipboard), git, node/python run, process/env control |
+| Utilities | `get_current_time`, `roll_dice`, `coin_flip`, `echo_message`, `random_number`, `get_event_log` |
+
+The flagship reasoning tool, `deepthink_reason` — *"Executes deep test-time compute reasoning, sandboxed code verification, MCTS tree search, and adversarial critique to solve hard mathematical, algorithmic, or multi-file coding problems."*
 
 | Input | Type | Default | Meaning |
 |---|---|---|---|

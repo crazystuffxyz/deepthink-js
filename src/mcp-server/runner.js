@@ -275,6 +275,8 @@ function fetchUrl(url, redirects = 0) {
         // sites serve gzip/brotli; the old utf8 path garbled them
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
+        res.on('error', reject);
+        res.on('aborted', () => reject(new Error('response aborted')));
         res.on('end', () => {
           const buf = Buffer.concat(chunks);
           const enc = String(res.headers['content-encoding'] || '').toLowerCase();
@@ -378,6 +380,8 @@ async function deepthink_http_request(args) {
     const req = mod.request(opts, (res) => {
       let data = '';
       res.on('data', (c) => (data += c));
+      res.on('error', (e) => resolve({ ok: false, error: e.message }));
+      res.on('aborted', () => resolve({ ok: false, error: 'response aborted' }));
       res.on('end', () => {
         try {
           resolve({ ok: true, status: res.statusCode, body: JSON.parse(data) });
@@ -425,7 +429,18 @@ async function deepthink_mouse_click(args, ctx) {
   const btn = button === 'right' ? 3 : button === 'middle' ? 2 : 1;
   const cmd =
     process.platform === 'win32'
-      ? `powershell -c "Add-Type -Name U -Namespace W -MemberDefinition '[DllImport(\\"user32.dll\\")] public static extern void mouse_event(int f,int x,int y,int c,int i);'; [W.U]::mouse_event(0x8001,${x},${y},0,0)"`
+      ? (() => {
+          // MOUSEEVENTF_ABSOLUTE|MOVE, then down/up for the chosen button
+          const move = 0x8001;
+          const down = 0x8000 | (button === 'right' ? 0x0008 : button === 'middle' ? 0x0020 : 0x0002);
+          const up = 0x8000 | (button === 'right' ? 0x0010 : button === 'middle' ? 0x0040 : 0x0004);
+          const clicks = double ? 2 : 1;
+          const calls = Array.from(
+            { length: clicks },
+            () => `[W.U]::mouse_event(${move},${x},${y},0,0);[W.U]::mouse_event(${down},${x},${y},0,0);[W.U]::mouse_event(${up},${x},${y},0,0)`,
+          ).join(';');
+          return `powershell -c "Add-Type -Name U -Namespace W -MemberDefinition '[DllImport(\\"user32.dll\\")] public static extern void mouse_event(int f,int x,int y,int c,int i);'; ${calls}"`;
+        })()
       : double
         ? `xdotool mousemove ${x} ${y} click --repeat 2 ${btn}`
         : `xdotool mousemove ${x} ${y} click ${btn}`;
@@ -561,12 +576,13 @@ async function deepthink_python_run(args, ctx) {
   };
 
   let result = await runCmd('python3');
-  const errText = (result.stderr || '') + (result.stdout || '') + (result.error || '');
+  // only fall back when the interpreter itself failed to launch — a program
+  // error (nonzero exit) is a real failure, not a missing python3
+  const err = result.error || '';
   const isNotFound =
-    errText.includes('Python was not found') ||
-    errText.includes('not recognized') ||
-    errText.includes('not found') ||
-    errText.includes('ENOENT');
+    err.includes('Python was not found') ||
+    err.includes('not recognized') ||
+    err.includes('ENOENT');
   if (!result.ok && isNotFound) {
     result = await runCmd('python');
   }

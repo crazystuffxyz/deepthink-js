@@ -124,11 +124,25 @@ export class JsWorkerPool {
       w.busy = true;
       return w;
     }
-    // all busy — wait for the first free one
-    return new Promise((resolve) => {
+    // all busy — wait for a free one, respawning dead slots as they surface
+    return new Promise((resolve, reject) => {
       const poll = setInterval(() => {
-        for (const w of this.workers) {
-          if (!w.dead && !w.busy) {
+        if (this._closed) {
+          clearInterval(poll);
+          reject(new Error('worker pool closed'));
+          return;
+        }
+        for (let i = 0; i < this.workers.length; i++) {
+          const w = this.workers[i];
+          if (w.dead) {
+            const fresh = this._spawn();
+            this.workers[i] = fresh;
+            fresh.busy = true;
+            clearInterval(poll);
+            resolve(fresh);
+            return;
+          }
+          if (!w.busy) {
             clearInterval(poll);
             w.busy = true;
             resolve(w);

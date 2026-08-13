@@ -114,7 +114,9 @@ export class MemoryStore {
   setDedup(namespace, key, value, opts) {
     const h = _hash(value);
     const n = this._ns(namespace);
+    const now = Date.now();
     for (const [k, entry] of Object.entries(n)) {
+      if (entry.ttlMs && now - entry.ts > entry.ttlMs) continue;
       if (entry.hash === h && k !== key) {
         return { ok: true, deduped: true, existingKey: k };
       }

@@ -415,7 +415,7 @@ class AgentRuntime {
         case 'try': {
           patch = await this._execTry(node, state, ctx);
           this._mergeState(state, patch);
-          return patch.__tryCaught ? node.catch || node.next || null : node.next || null;
+          return patch && patch.__tryCaught ? node.catch || node.next || null : node.next || null;
         }
         case 'if': {
           const cond = await this._evalCondition(node.condition, state);

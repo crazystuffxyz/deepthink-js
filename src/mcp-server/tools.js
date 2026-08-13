@@ -48,7 +48,7 @@ const engineTools = {
   },
 
   deep_research: async (args, ctx) => {
-    const result = await ctx.engine.deepResearch(args.query, {
+    const result = await ctx.engine.deepResearch(args.topic, {
       model: args.model,
       maxQueries: args.maxQueries,
       maxConcurrency: args.maxConcurrency,
@@ -57,6 +57,8 @@ const engineTools = {
       useOllamaSearch: args.useOllamaSearch,
       academicFilter: args.academicFilter,
       enableCritique: args.enableCritique,
+      files: args.files,
+      mode: args.mode,
     });
     if (!result) return { ok: false, error: 'research returned no result' };
     return result;

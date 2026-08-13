@@ -315,7 +315,11 @@ const rollDice = { sides: optNum('Number of sides (default 6)') };
 const coinFlip = { _unused: optStr('No arguments') };
 const echoMessage = { message: str('Message to echo back') };
 const randomNumber = { min: optNum('Inclusive lower bound'), max: optNum('Inclusive upper bound') };
-const getEventLog = { limit: optNum('How many recent events to return') };
+const getEventLog = {
+  last: optNum('How many recent events to return'),
+  channel: optStr('Only events on this channel'),
+  since: optNum('Only events after this ms timestamp'),
+};
 
 export const SCHEMAS = {
   deepthink_reason: reason,

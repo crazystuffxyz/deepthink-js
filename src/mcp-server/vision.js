@@ -190,6 +190,8 @@ Return ONLY the revised <svg>...</svg> markup. No prose, no fences, no thinking 
     let pngBase64 = '';
     let critique = '';
     let fixes = '';
+    let renderedAny = false;
+    let lastRenderError = '';
 
     // 0 iters = no-op
     if (iterations <= 0) {
@@ -205,16 +207,18 @@ Return ONLY the revised <svg>...</svg> markup. No prose, no fences, no thinking 
         this._emit('error', { iter: i, stage: 'draft', error: draft.error });
         return { ok: false, error: draft.error, model: m, iterations: i, scores };
       }
-      svg = VisionLoop.extractSvg(draft.content);
-      this._emit('drafted', { iter: i, len: svg.length });
+      const draftSvg = VisionLoop.extractSvg(draft.content);
+      this._emit('drafted', { iter: i, len: draftSvg.length });
 
-      const rendered = await tryRender(svg, w, h);
+      const rendered = await tryRender(draftSvg, w, h);
       if (rendered.error) {
+        lastRenderError = rendered.error;
         this._emit('render-failed', { iter: i, error: rendered.error, final: true });
         continue;
       }
-      // render succeeded (possibly after auto-wrap); reflect any wrap back into `svg`
-      svg = rendered.svg || svg;
+      // render succeeded (possibly after auto-wrap); commit svg + png together
+      renderedAny = true;
+      svg = rendered.svg || draftSvg;
       pngBase64 = rendered.base64;
       this._emit('rendered', { iter: i, bytes: rendered.bytes });
 
@@ -224,7 +228,7 @@ Return ONLY the revised <svg>...</svg> markup. No prose, no fences, no thinking 
         model: m,
         base64: img.base64,
         // include rendered as 2nd image so critic sees both
-        images: [img.base64, pngBase64],
+        images: [pngBase64],
         prompt: critPrompt,
       });
       if (!crit.ok) {
@@ -262,7 +266,7 @@ Return ONLY the revised <svg>...</svg> markup. No prose, no fences, no thinking 
       const rev = await engine.chatVision({
         model: m,
         base64: img.base64,
-        images: [img.base64, pngBase64],
+        images: [pngBase64],
         prompt: revPrompt,
       });
       if (rev.ok) {
@@ -274,6 +278,18 @@ Return ONLY the revised <svg>...</svg> markup. No prose, no fences, no thinking 
     }
 
     this._emit('done', { iterations: scores.length });
+    if (!renderedAny) {
+      return {
+        ok: false,
+        error: lastRenderError || 'svg never rendered',
+        model: m,
+        iterations: scores.length,
+        scores,
+        source: img.source,
+        width: w,
+        height: h,
+      };
+    }
     return {
       ok: true,
       svg,

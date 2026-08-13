@@ -1310,7 +1310,7 @@ class ExcelSkill extends Skill {
     if (spec.namedRanges && typeof spec.namedRanges === 'object') {
       for (const [name, ref] of Object.entries(spec.namedRanges)) {
         try {
-          wb.definedNames.add(ref, name);
+          wb.definedNames.add(name, ref);
         } catch {
           /* skip bad refs */
         }
@@ -1361,7 +1361,7 @@ class ExcelSkill extends Skill {
     ws.columns = cols;
 
     const headerRow = ws.getRow(dataStartRow);
-    spec.columns.forEach((c, j) => {
+    cols.forEach((c, j) => {
       headerRow.getCell(j + 1).value = c.header || c.key;
     });
     headerRow.font = { bold: true, color: { argb: HEADER_FONT } };
@@ -1391,7 +1391,7 @@ class ExcelSkill extends Skill {
     const colLetters = cols.map((_, j) => numToColLetter(j + 1));
     for (let i = 0; i < rows.length; i++) {
       const row = ws.getRow(bodyStart + i);
-      spec.columns.forEach((c, j) => {
+      cols.forEach((c, j) => {
         const cell = row.getCell(j + 1);
         if (c.formula) {
           const f = c.formula.replace(/\{row\}/g, String(bodyStart + i)).replace(/\{col\}/g, colLetters[j]);

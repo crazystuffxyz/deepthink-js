@@ -40,11 +40,12 @@ async function handle(msg) {
     return true;
   };
   process.stdout.write = capture;
-  console.log = (s) => capture(s + '\n');
-  console.error = (s) => capture(s + '\n');
-  console.warn = (s) => capture(s + '\n');
-  console.info = (s) => capture(s + '\n');
-  console.debug = (s) => capture(s + '\n');
+  const variadic = (...a) => capture(a.map(String).join(' ') + '\n');
+  console.log = variadic;
+  console.error = variadic;
+  console.warn = variadic;
+  console.info = variadic;
+  console.debug = variadic;
   const sandbox = state && typeof state === 'object' ? { ...state } : {};
   // shadow the dangerous globals — user code gets `undefined` for all of
   // them. process would leak env vars (api keys), require/module/exports

@@ -162,10 +162,12 @@ function listFunctions({ file }) {
     /^\s*(\w+)\s*\([^)]*\)\s*\{/,
     /^\s*(\w+)\s*:\s*(?:async\s+)?function/,
   ];
+  // these match the method-shorthand pattern but aren't functions
+  const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with']);
   for (let i = 0; i < lines.length; i++) {
     for (const p of patterns) {
       const m = lines[i].match(p);
-      if (m && m[1]) {
+      if (m && m[1] && !KEYWORDS.has(m[1])) {
         fns.push({ name: m[1], line: i + 1 });
         break;
       }

@@ -326,6 +326,24 @@ Keep plans highly logical. Avoid empty conversational steps.`;
         }
       }
     }
+    // the model can return valid JSON that just isn't a plan — fall back
+    // rather than let process() dereference a missing `tasks`
+    if (!plan || !Array.isArray(plan.tasks) || plan.tasks.length === 0) {
+      plan = {
+        understanding: userMessage,
+        complexity: 'simple',
+        tasks: [
+          {
+            id: 't1',
+            description: userMessage,
+            agent: 'general',
+            depends_on: [],
+            expected_output: 'completed task',
+          },
+        ],
+        personality: 'direct',
+      };
+    }
     return plan;
   }
 
@@ -356,6 +374,8 @@ Keep plans highly logical. Avoid empty conversational steps.`;
   }
 
   async _executeTask(task, cfg, history, previousResults, feedbackPrompt = '') {
+    // loop detection must only see this task's calls, not the previous one's
+    this.executionHistory = [];
     const agentProfile = AGENT_PROFILES[task.agent] || AGENT_PROFILES.general;
     const prevCtx = previousResults.length
       ? '\n\nPrevious results for downstream context:\n' +
@@ -534,7 +554,12 @@ When the task is complete, verify your work and respond with:
           }
         }
 
-        const toolResult = await this.ctx.run(toolCall.tool, toolCall.params || {});
+        let toolResult;
+        try {
+          toolResult = await this.ctx.run(toolCall.tool, toolCall.params || {});
+        } catch (e) {
+          toolResult = { ok: false, error: e.message };
+        }
         const resultStr = this._compressResult(toolResult, rawStore, ++rawId);
         agentMemory.push({
           role: 'user',

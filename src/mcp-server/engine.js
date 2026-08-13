@@ -43,7 +43,7 @@ function extractJSON(raw) {
   try {
     return JSON.parse(s);
   } catch {}
-  const m = s.match(/[\[{][\s\S]*[\]]/);
+  const m = s.match(/[\[{][\s\S]*[\]}]/);
   if (m) {
     try {
       return JSON.parse(m[0]);
@@ -137,17 +137,17 @@ export function makeEngine() {
         ...messages,
       ];
       let text = '';
-      await rawClient().chat({
+      const stream = await rawClient().chat({
         model: model || DEFAULT_MODEL,
         messages: msgs,
         stream: true,
-        onMessage: (m) => {
-          if (m?.message?.content) {
-            text += m.message.content;
-            if (onToken) onToken(m.message.content);
-          }
-        },
       });
+      for await (const part of stream) {
+        if (part?.message?.content) {
+          text += part.message.content;
+          if (onToken) onToken(part.message.content);
+        }
+      }
       return text;
     },
 

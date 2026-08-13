@@ -37,21 +37,31 @@ const problems = blocks.map(b => ({
 }));
 
 // --- answers: "Answer: X" lines in order ---
-const answers = solutionsTxt
-  .split('\n')
-  .filter(l => /^Answer:/.test(l))
-  .map(l => l.replace(/^Answer:\s*/, '').trim());
-
-if (problems.length !== 36) throw new Error(`expected 36 problems, got ${problems.length}`);
-if (answers.length !== 36) throw new Error(`expected 36 answers, got ${answers.length}`);
-
-// --- clean answers: "≈ " prefix, "X = Y" simplification → right side ---
+// some answers are two-line fractions ("Answer: 53" then "144" on the next
+// line = 53/144) — join a bare-number continuation as the denominator.
 const cleanAnswer = (a) => {
   let t = a.replace(/^≈\s*/, '').trim();
   const eq = t.lastIndexOf(' = ');
   if (eq >= 0) t = t.slice(eq + 3).trim();
   return t;
 };
+
+const solLines = solutionsTxt.split('\n');
+const answers = [];
+for (let i = 0; i < solLines.length; i++) {
+  const l = solLines[i];
+  if (!/^Answer:/.test(l)) continue;
+  let a = cleanAnswer(l.replace(/^Answer:\s*/, ''));
+  const next = solLines[i + 1] || '';
+  if (/^\s*\d+\s*$/.test(next)) {
+    // "(1 − π)/4" needs parens; "7√11/11" doesn't
+    a = /[+\-−·\s]/.test(a) ? '(' + a + ')/' + next.trim() : a + '/' + next.trim();
+  }
+  answers.push(a);
+}
+
+if (problems.length !== 36) throw new Error(`expected 36 problems, got ${problems.length}`);
+if (answers.length !== 36) throw new Error(`expected 36 answers, got ${answers.length}`);
 
 const rows = problems.map((p, i) => ({
   id: `hmmt-g${String(p.num).padStart(2, '0')}`,

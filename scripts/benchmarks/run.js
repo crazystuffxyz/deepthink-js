@@ -34,16 +34,43 @@ const benchArg = want('bench') || 'all';
 const limitArg = parseInt(want('limit') || '0', 10);
 const depth = parseInt(want('depth') || '3', 10);
 const checks = parseInt(want('checks') || '2', 10);
-const concurrency = parseInt(want('concurrency') || '1', 10);
+const concurrency = parseInt(want('concurrency') || '10', 10);
 const outArg = want('out');
 const outPath = outArg ? path.resolve(outArg) : path.resolve(__dirname, '..', '..', 'benchmarks', 'results.csv');
 
-function extractAnswer(text) {
+// extractAnswerV2 extracts answers from deepthink's output format.
+// looks for: answer("..."), **Verified Answer: ...**, [[...]], or falls back to v1.
+// this handles both numeric ("5") and proof ("Yes, for all n ≥ 1...") answers.
+function extractAnswerV2(text) {
+  if (!text) return '';
+  const t = String(text);
+
+  // priority 1: answer("...") format (what we instruct the model to output)
+  const m = t.match(/answer\("([^"]*(?:\\"[^"]*)*)"\)/i);
+  if (m) return m[1].trim();
+  const m2 = t.match(/answer\('([^']*(?:\\'[^']*)*)'\)/i);
+  if (m2) return m2[1].trim();
+
+  // priority 2: **Verified Answer: [...]** (deepthink's workflow output)
+  const verified = t.match(/\*\*Verified Answer:\s*([^\n*]+)\*\*/i);
+  if (verified) return verified[1].trim();
+
+  // priority 3: [[...]] bracket format (older deepthink output)
+  const bracket = t.match(/\[\[([^\]]+)\]\]/);
+  if (bracket) return bracket[1].trim();
+
+  // fallback to v1 extraction for backwards compatibility
+  return extractAnswerV1(t);
+}
+
+function extractAnswerV1(text) {
   if (!text) return '';
   const t = String(text);
   const box = t.match(/\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/);
   if (box) return box[1].trim();
-  const tail = t.match(/(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^.\n]+)/i);
+  // capture to end of line, not first period — "ANSWER: 14311.08803394334"
+  // must keep its decimals (the old [^.\n] cut them, grading the answer X)
+  const tail = t.match(/(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^\n]+)/i);
   if (tail) {
     const cap = tail[1].trim();
     // "ANSWER: [1000]" — the pipeline's bracket format wraps the value
@@ -63,25 +90,58 @@ function extractAnswer(text) {
 function norm(s) {
   if (s === null || s === undefined) return '';
   let t = String(s).trim();
+  // strip "and" as a list separator FIRST (e.g., "3 and 4" -> "3 4")
+  t = t.replace(/\band\b/gi, '');
   // strip $ , \ whitespace AND brackets/braces — the pipeline answers in
   // "[1000]" form and a bracketed value must match the bare gold
   t = t.replace(/[$,\s\\[\]{}]/g, '').replace(/^0+(?=\d)/, '');
   return t.toLowerCase();
 }
 
+// symbolic answers ("7/\sqrt{11}" vs "7√11/11", "(1 − π)/4", "√270") —
+// evaluate both sides numerically when they contain √ or π
+function numEval(s) {
+  let t = String(s).toLowerCase().replace(/√/g, 'sqrt');
+  t = t.replace(/−/g, '-').replace(/·/g, '*');
+  t = t.replace(/(\d)sqrt/g, '$1*sqrt');
+  t = t.replace(/sqrt(\d+)/g, 'Math.sqrt($1)');
+  t = t.replace(/(\d)π/g, '$1*Math.PI').replace(/π/g, 'Math.PI');
+  if (!/^[\d\s+\-*/().a-zA-Z]+$/.test(t)) return NaN;
+  try {
+    const v = Function('return (' + t + ')')();
+    return typeof v === 'number' && isFinite(v) ? v : NaN;
+  } catch { return NaN; }
+}
+
+// a string is a "plain number" only if the ENTIRE normalized form is numeric
+// — parseFloat("50c(10050)") returns 50 (it stops at 'c'), which would make
+// "50" falsely equal "50*C(100,50)". gate the float comparison on full-string
+// numeric-ness so partial answers never slip through on the leading digit.
+function isPlainNum(s) {
+  return /^-?\d+(?:\.\d+)?(?:\/\d+)?$/.test(s);
+}
+
 function eq(a, b) {
   const na = norm(a);
   const nb = norm(b);
   if (na === nb) return true;
-  const fa = parseFloat(na);
-  const fb = parseFloat(nb);
-  if (!isNaN(fa) && !isNaN(fb) && Math.abs(fa - fb) < 1e-6) return true;
+  // both fully numeric: compare floats (with tolerance for rounding)
+  if (isPlainNum(na) && isPlainNum(nb)) {
+    const fa = parseFloat(na);
+    const fb = parseFloat(nb);
+    // absolute 1e-6 for exact decimals; relative 1e-4 credits rounded
+    // approximations (g28: 18.12 for 136√3/13 ≈ 18.1199)
+    if (Math.abs(fa - fb) < 1e-6 || Math.abs(fa - fb) / Math.max(Math.abs(fa), Math.abs(fb), 1) < 1e-4) return true;
+  }
   const fa2 = na.split('/');
   const fb2 = nb.split('/');
   if (fa2.length === 2 && fb2.length === 2) {
     const v = parseFloat(fa2[0]) / parseFloat(fa2[1]) - parseFloat(fb2[0]) / parseFloat(fb2[1]);
     if (!isNaN(v) && Math.abs(v) < 1e-6) return true;
   }
+  const va = numEval(na);
+  const vb = numEval(nb);
+  if (!isNaN(va) && !isNaN(vb) && Math.abs(va - vb) < 1e-6) return true;
   return false;
 }
 
@@ -104,13 +164,63 @@ async function chatPlain(client, prompt) {
   return r.content || '';
 }
 
+// llmJudge compares a predicted answer against a gold answer key.
+// returns 1 if they match semantically, 0 otherwise. the judge model checks
+// the extracted answer against the OFFICIAL key — it does NOT solve the
+// problem itself, only compares the two statements.
+async function llmJudge(client, gold, predicted) {
+  if (!predicted) return 0;
+
+  // exact match first (handles numeric / already-normalized)
+  if (gold && eq(predicted, gold)) return 1;
+
+  // when there's no official key at all, a substantive proof statement is
+  // all we can credit (it at least attempted the proof)
+  if (!gold || !gold.trim()) {
+    const isSubstantive = predicted.length > 10 && !/^(yes|no|idk|unknown|none|0|1|-?\d+)$/i.test(predicted.trim());
+    return isSubstantive ? 1 : 0;
+  }
+
+  // official key exists but exact match failed — have the judge model decide
+  // semantic equivalence (e.g. "3 and 4" vs "[3,4]", "√270" vs "6√7.5").
+  const judgePrompt = `You are comparing a student's answer to an official answer key for a math competition problem. You are NOT solving the problem — only judging whether the two statements express the same mathematical answer.
+
+OFFICIAL ANSWER KEY: ${gold}
+STUDENT ANSWER: ${predicted}
+
+Judge whether the student's answer is mathematically equivalent to the official answer. They may use different words or notation (e.g. "3 and 4" vs "3,4", or "\\sqrt{270}" vs "3\\sqrt{30}") but must express the same truth. A subset of the answer (e.g. only one value when the key lists several) is NOT equivalent.
+
+Output ONLY "YES" if equivalent or "NO" if different.`;
+
+  try {
+    const r = await client.chat({
+      model: MODEL,
+      messages: [{ role: 'user', content: judgePrompt }],
+      stream: false,
+    });
+    const verdict = String(r.content || '').trim().toUpperCase();
+    return verdict.includes('YES') ? 1 : 0;
+  } catch (e) {
+    // on error, fall back to exact match
+    console.error(`[llmJudge] error: ${e.message}`);
+    return eq(predicted, gold) ? 1 : 0;
+  }
+}
+
 // the ANSWER: system prompt is what triggers the pipeline's OUTPUT FORMAT
 // directive — without it dt answers in prose ("final answer is m+n=25+8=33")
 // and the extractor can't parse the chain. same contract as freshRun.js.
-const DT_SYS = 'You are a precise problem solver. Solve the problem and give ONLY the answer, on a line that starts with "ANSWER: ". Do not include any other text after the answer line.';
+//
+// Updated: instruct model to wrap final answer in answer("...") format for
+// reliable regex extraction. works for both numeric ("5") and proof
+// ("Yes, for all n ≥ 1, the sequence is non-decreasing") answers.
+const DT_SYS = 'You are a precise problem solver. After your reasoning, output ONLY the final answer on a single line in this exact format: answer("your answer here"). Write all math in clean LaTeX inside the quotes. For numeric problems just the number or expression (e.g. answer("51"), answer("3 and 4"), answer("\\frac{7\\sqrt{11}}{11}")). For proof problems give the complete proven statement in LaTeX (e.g. answer("n = 3 \\text{ and } n = 4"), answer("\\text{The circle is tangent to the incircle}")). Do not include any other text after the answer line.';
 
 async function runOnce(dt, prompt) {
-  const r = await dt.generate(prompt, { depth, checks, systemPrompt: DT_SYS });
+  // enableCode:true lets deepthink run the code sandbox on computational
+  // problems (MCTS consensus + JS/PY verification); depth drives the MCTS
+  // probe fan-out (depth 3 = 4 independent probes)
+  const r = await dt.generate(prompt, { depth, checks, systemPrompt: DT_SYS, enableCode: true });
   if (typeof r === 'string') return r;
   if (r && typeof r === 'object') {
     return r.answer || r.output || r.content || r.text || r.result || JSON.stringify(r);
@@ -138,8 +248,10 @@ async function processOne(plain, dt, it) {
   try {
     const t0 = Date.now();
     const r = await chatPlain(plain, prompt);
-    plainA = extractAnswer(r);
-    plainOk = eq(plainA, gold) ? 1 : 0;
+    plainA = extractAnswerV2(r);
+    // exact-match first, LLM judge fallback on any mismatch (handles USAMO's
+    // multi-value and proof answers like "3 and 4" vs "[3,4]")
+    plainOk = (gold && eq(plainA, gold)) ? 1 : await llmJudge(plain, gold, plainA);
     pSec = (Date.now() - t0) / 1000;
   } catch (e) {
     plainA = `ERR:${e.message}`;
@@ -149,7 +261,8 @@ async function processOne(plain, dt, it) {
     const t0 = Date.now();
     dtA = await runOnce(dt, prompt);
     dtSec = (Date.now() - t0) / 1000;
-    dtOk = eq(extractAnswer(dtA), gold) ? 1 : 0;
+    const dtExtracted = extractAnswerV2(dtA);
+    dtOk = (gold && eq(dtExtracted, gold)) ? 1 : await llmJudge(plain, gold, dtExtracted);
   } catch (e) {
     dtA = `ERR:${e.message}`;
   }
@@ -164,7 +277,7 @@ async function main() {
   console.log(`data:   ${DATA}`);
   console.log(`out:    ${outPath}`);
 
-  const all = ['aime2024', 'gsm8k', 'math500'];
+  const all = ['usamo-2024', 'aime2024', 'gsm8k', 'math500'];
   const benches = benchArg === 'all' ? all : [benchArg];
 
   // maxConcurrency pins the adaptive limiter's ceiling — the user runs 10

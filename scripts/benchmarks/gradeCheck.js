@@ -29,7 +29,9 @@ function extractAnswer(text) {
   const t = String(text);
   const box = t.match(/\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/);
   if (box) return box[1].trim();
-  const tail = t.match(/(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^.\n]+)/i);
+  // capture to end of line, not first period — "ANSWER: 14311.08803394334"
+  // must keep its decimals (the old [^.\n] cut them, grading the answer X)
+  const tail = t.match(/(?:final\s*answer|answer\s*(?:is|:))\s*[:=]?\s*([^\n]+)/i);
   if (tail) {
     const cap = tail[1].trim();
     const unwrap = cap.match(/^\[([^\]]+)\]$/);
@@ -50,19 +52,39 @@ function norm(s) {
   return t.toLowerCase();
 }
 
+// symbolic answers ("7/\sqrt{11}" vs "7√11/11", "(1 − π)/4", "√270") —
+// evaluate both sides numerically when they contain √ or π
+function numEval(s) {
+  let t = String(s).toLowerCase().replace(/√/g, 'sqrt');
+  t = t.replace(/−/g, '-').replace(/·/g, '*');
+  t = t.replace(/(\d)sqrt/g, '$1*sqrt');
+  t = t.replace(/sqrt(\d+)/g, 'Math.sqrt($1)');
+  t = t.replace(/(\d)π/g, '$1*Math.PI').replace(/π/g, 'Math.PI');
+  if (!/^[\d\s+\-*/().a-zA-Z]+$/.test(t)) return NaN;
+  try {
+    const v = Function('return (' + t + ')')();
+    return typeof v === 'number' && isFinite(v) ? v : NaN;
+  } catch { return NaN; }
+}
+
 function eq(a, b) {
   const na = norm(a);
   const nb = norm(b);
   if (na === nb) return true;
   const fa = parseFloat(na);
   const fb = parseFloat(nb);
-  if (!isNaN(fa) && !isNaN(fb) && Math.abs(fa - fb) < 1e-6) return true;
+  // absolute 1e-6 for exact decimals; relative 1e-4 credits rounded
+  // approximations (g28: 18.12 for 136√3/13 ≈ 18.1199)
+  if (!isNaN(fa) && !isNaN(fb) && (Math.abs(fa - fb) < 1e-6 || Math.abs(fa - fb) / Math.max(Math.abs(fa), Math.abs(fb), 1) < 1e-4)) return true;
   const fa2 = na.split('/');
   const fb2 = nb.split('/');
   if (fa2.length === 2 && fb2.length === 2) {
     const v = parseFloat(fa2[0]) / parseFloat(fa2[1]) - parseFloat(fb2[0]) / parseFloat(fb2[1]);
     if (!isNaN(v) && Math.abs(v) < 1e-6) return true;
   }
+  const va = numEval(na);
+  const vb = numEval(nb);
+  if (!isNaN(va) && !isNaN(vb) && Math.abs(va - vb) < 1e-6) return true;
   return false;
 }
 

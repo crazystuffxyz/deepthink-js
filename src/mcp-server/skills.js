@@ -1284,9 +1284,9 @@ class ExcelSkill extends Skill {
     // exceljs + sharp loaded lazily — both heavy native deps
     let ExcelJS, sharp;
     try {
-      ExcelJS = (await import('exceljs')).default;
+      ExcelJS = (await import('@excel.js/exceljs')).default;
     } catch {
-      return { ok: false, error: 'dependency not installed: exceljs' };
+      return { ok: false, error: 'dependency not installed: @excel.js/exceljs' };
     }
     try {
       sharp = (await import('sharp')).default;

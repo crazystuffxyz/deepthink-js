@@ -34,7 +34,7 @@
     "@iarna/rtf-to-html": "^1.1.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "chart.js": "^4.5.1",
-    "exceljs": "^4.4.0",
+    "@excel.js/exceljs": "0.13.0",
     "pdfkit": "^0.19.1",
     "sharp": "^0.35.3",
     "@mozilla/readability": "^0.6.0",

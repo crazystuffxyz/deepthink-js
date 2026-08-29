@@ -1166,6 +1166,20 @@ export class Deepthink extends EventEmitter {
 
       const [thinkResults, codeResolved] = await Promise.all([thinkTask, codeTask]);
       codeRes = codeResolved;
+      // pipelineThinking: dump the pipeline's own reasoning (probe analyses,
+      // consensus, sandbox) into the thinking channel as it lands — proxies
+      // and UIs that show machine thinking get the full picture by default
+      if (mergedOpts.pipelineThinking && typeof mergedOpts.onChunk === 'function') {
+        try {
+          mergedOpts.onChunk('[pipeline] stages below ran before the final answer\n', { kind: 'thinking' });
+          for (const [k, v] of Object.entries(thinkResults)) {
+            if (k === 'consensusText') continue; // duplicates the winning probe
+            if (typeof v === 'string' && v) mergedOpts.onChunk(`[${k}]\n${v}\n\n`, { kind: 'thinking' });
+          }
+          if (codeRes?.codeExec?.result) mergedOpts.onChunk(`[sandbox]\n${codeRes.codeExec.result}\n\n`, { kind: 'thinking' });
+          if (codeRes?.failInsert) mergedOpts.onChunk(`[code failed] ${codeRes.failInsert}\n`, { kind: 'thinking' });
+        } catch { /* thinking cosmetics must never kill generation */ }
+      }
       let thinkCtx = 'BACKGROUND THINKING PROCESS (do not repeat this in your answer):\n';
       for (const [k, v] of Object.entries(thinkResults)) {
         // consensusText duplicates the winning probe already in analysis —

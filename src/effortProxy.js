@@ -187,6 +187,13 @@ function usageOf(trace) {
   for (const e of trace.toJSON()) { if (e.promptTokens) p += e.promptTokens; if (e.responseTokens) c += e.responseTokens; }
   return { prompt_tokens: p, completion_tokens: c, total_tokens: p + c };
 }
+// the engine streams internally even for non-stream replies, so non-stream
+// frames can still harvest the full think-token stream instead of dropping it
+function thinkingCollector(genOpts) {
+  const box = { t: '' };
+  const opts = { ...genOpts, onChunk: (c, meta) => { if (meta?.kind === 'thinking') box.t += String(c || ''); } };
+  return { box, opts };
+}
 const usageOf2 = (u) => u;
 
 // ---------- passthrough ----------
@@ -263,6 +270,11 @@ async function engineReply(req, reply, framing, body, effort) {
     depth: tier.depth, checks: tier.checks, mcts: tier.mcts,
     systemPrompt: norm.system || undefined,
     _trace: trace,
+    // default ON: the pipeline's own reasoning rides the thinking channel
+    // (opt out with deepthink.pipelineThinking=false); ollamaOutput emits the
+    // raw think blocks as content for clients that want the raw form
+    pipelineThinking: body.deepthink?.pipelineThinking !== false,
+    ...(body.deepthink?.ollamaOutput === true ? { ollamaOutput: true } : {}),
   };
   // ollama stream formats are NDJSON (bare JSON lines, no SSE comments);
   // /v1/messages and /v1/chat/completions stream SSE; gemini streams only
@@ -287,11 +299,14 @@ async function engineReply(req, reply, framing, body, effort) {
       const id = `msg_${randomUUID()}`;
       const emit = (obj) => { if (!reply.raw.destroyed) reply.raw.write(`event: ${obj.type}\ndata: ${JSON.stringify(obj)}\n\n`); };
       if (!wantStream) {
-        const r = await engine.generate(norm.prompt, { ...genOpts });
+        const { box, opts } = thinkingCollector(genOpts);
+        const r = await engine.generate(norm.prompt, opts);
         const u = usageOf(trace);
+        const content = [{ type: 'text', text: String(r).replace(MARKER, '') }];
+        if (box.t) content.unshift({ type: 'thinking', thinking: box.t });
         return reply.send({
           id, type: 'message', role: 'assistant', model,
-          content: [{ type: 'text', text: String(r).replace(MARKER, '') }],
+          content,
           stop_reason: 'end_turn', stop_sequence: null,
           usage: { input_tokens: u.prompt_tokens, output_tokens: u.completion_tokens },
         });
@@ -340,10 +355,13 @@ async function engineReply(req, reply, framing, body, effort) {
         reply.raw.end(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [], usage: usageOf(trace) })}\n\ndata: [DONE]\n\n`);
         return reply;
       }
-      const r = await engine.generate(norm.prompt, genOpts);
+      const { box, opts } = thinkingCollector(genOpts);
+      const r = await engine.generate(norm.prompt, opts);
+      const message = { role: 'assistant', content: String(r).replace(MARKER, '') };
+      if (box.t) message.reasoning_content = box.t;
       return reply.send({
         id, object: 'chat.completion', created, model,
-        choices: [{ index: 0, message: { role: 'assistant', content: String(r).replace(MARKER, '') }, finish_reason: 'stop' }],
+        choices: [{ index: 0, message, finish_reason: 'stop' }],
         usage: usageOf(trace),
       });
     }
@@ -381,12 +399,16 @@ async function engineReply(req, reply, framing, body, effort) {
         reply.raw.end();
         return reply;
       }
-      const r = await engine.generate(norm.prompt, genOpts);
+      const { box, opts } = thinkingCollector(genOpts);
+      const r = await engine.generate(norm.prompt, opts);
       const u = usageOf(trace);
+      const output = [];
+      if (box.t) output.push({ type: 'reasoning', id: `rs_${rid.slice(5)}`, summary: [{ type: 'summary_text', text: box.t }] });
+      output.push({ type: 'message', id: `msg_${rid.slice(5)}`, status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: String(r).replace(MARKER, ''), annotations: [] }] });
       return reply.send({
         id: rid, object: 'response', created_at: Math.floor(t0 / 1000), status: 'completed', model,
         instructions: norm.system || null,
-        output: [{ type: 'message', id: `msg_${rid.slice(5)}`, status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: String(r).replace(MARKER, ''), annotations: [] }] }],
+        output,
         usage: { input_tokens: u.prompt_tokens, output_tokens: u.completion_tokens, total_tokens: u.prompt_tokens + u.completion_tokens },
       });
     }
@@ -439,9 +461,17 @@ async function engineReply(req, reply, framing, body, effort) {
         }));
         return reply;
       }
-      const r = await engine.generate(norm.prompt, genOpts);
+      const { box, opts } = thinkingCollector(genOpts);
+      const r = await engine.generate(norm.prompt, opts);
       const u = usageOf(trace);
-      return reply.send({ model, response: String(r).replace(MARKER, ''), done: true, done_reason: 'stop', total_duration: Date.now() - t0, prompt_eval_count: u.prompt_tokens, eval_count: u.completion_tokens });
+      return reply.send({
+        model,
+        response: String(r).replace(MARKER, ''),
+        ...(box.t ? { thinking: box.t } : {}),
+        done: true, done_reason: 'stop',
+        total_duration: Date.now() - t0,
+        prompt_eval_count: u.prompt_tokens, eval_count: u.completion_tokens,
+      });
     }
     if (wantStream) {
       const content = { text: '', thinking: '' };
@@ -461,9 +491,14 @@ async function engineReply(req, reply, framing, body, effort) {
       }));
       return reply;
     }
-    const r = await engine.generate(norm.prompt, genOpts);
+    const { box, opts } = thinkingCollector(genOpts);
+    const r = await engine.generate(norm.prompt, opts);
     const content = String(r).replace(MARKER, '');
-    return reply.send({ model, message: { role: 'assistant', content }, done: true, done_reason: 'stop' });
+    return reply.send({
+      model,
+      message: { role: 'assistant', content, ...(box.t ? { thinking: box.t } : {}) },
+      done: true, done_reason: 'stop',
+    });
   } catch (e) {
     if (!reply.raw.headersSent) return reply.code(500).send({ error: { message: e.message } });
     if (!reply.raw.writableEnded) reply.raw.end();

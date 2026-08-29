@@ -26,6 +26,7 @@ const post = async (path, payload, timeoutMs) => {
   const body = await r.json().catch(() => ({}));
   ok('think:"low" -> ollama framing (message + done)', body?.done === true && body?.message?.role === 'assistant', JSON.stringify(body).slice(0, 120));
   ok('engine effort header present', r.headers.get('x-deepthink-effort') === 'low', String(r.headers.get('x-deepthink-effort')));
+  ok('pipeline reasoning retained in message.thinking', typeof body?.message?.thinking === 'string' && body.message.thinking.length > 10, JSON.stringify(body?.message?.thinking || '').slice(0, 100));
 }
 // 2. no effort -> passthrough (daemon answers, no x-deepthink header)
 {

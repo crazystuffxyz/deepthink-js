@@ -901,6 +901,20 @@ Tier → engine mapping: `minimal` d0/c0 · `low` d1/c0 · `medium` d2/c1 ·
 `high` d2/c2 · `xhigh` d3/c2 · `max` d3/c3, all with MCTS + sandboxed
 verification.
 
+**Streaming keeps all the thinking, and the pipeline's own reasoning rides it
+by default.** Every stage the engine runs — probe analyses, consensus, sandbox
+results — is dumped into the thinking channel as it lands (`[pipeline]`,
+`[analysis]`… markers), then the final answer streams as content. On ollama
+shapes that's the `message.thinking` field (done-lines carry the full dump too);
+Anthropic clients get real `thinking_delta` blocks; OpenAI clients get
+`reasoning_content`; codex clients get the reasoning output item. Non-stream
+replies keep the same thinking (Anthropic thinking block / OpenAI
+`reasoning_content` / ollama `thinking` field). Disable with
+`deepthink: { pipelineThinking: false }`, or emit the raw think blocks as
+content with `deepthink: { ollamaOutput: true }`. Models without native think
+tokens (like gemma4:31b-cloud) stream content only on the final call — the
+pipeline dump still shows everything the engine itself reasoned.
+
 **Seeing the effort payloads** — every request body lands in a ring buffer;
 open `http://127.0.0.1:11436/_capture` and each entry shows `effortFields`
 (every field the client parked an effort in and what it parsed to) plus the

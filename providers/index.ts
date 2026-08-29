@@ -62,7 +62,7 @@ function buildOllamaClient(opts: ProviderOpts, apiKey: string | null): ProviderC
   const host = (opts.host || process.env.OLLAMA_HOST || def.ollama).replace(/\/api\/?$/, '').replace(/\/+$/, '') || undefined;
   const hdrs: Record<string, string> = { ...(opts.headers || {}) };
   if (apiKey) hdrs.Authorization = `Bearer ${apiKey}`;
-  const ck = `${host}|${apiKey || ''}|${Object.keys(hdrs).join(',')}`;
+  const ck = `${host}|${apiKey || ''}|${Object.entries(hdrs).map(([k, v]) => k + '=' + v).join(',')}`;
   const hit = _ollamaClientCache.get(ck);
   if (hit) return hit;
   const cfg: Record<string, unknown> = {};

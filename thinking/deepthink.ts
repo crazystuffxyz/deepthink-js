@@ -810,7 +810,10 @@ export class Deepthink extends EventEmitter {
 
     const shown = claimed ? `<claimed answer>\n${claimed}\n</claimed answer>` : response;
 
-    const results = await Promise.allSettled(personasFinal.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${p.full ? response : shown}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify', _phase: 'checks', _depth: 3, options: { ...(opts.options || {}), num_predict: 150 } })));
+    // full-response checkers just audit (150 is plenty); claimed-only checkers
+    // must re-derive the answer, and a 150-token cap was truncating them
+    // mid-derivation → guaranteed spurious NO verdicts → revision churn
+    const results = await Promise.allSettled(personasFinal.map(p => this.callChat([...sandboxPrefix, { role: 'system', content: p.system }, { role: 'user', content: `<input>\n${inputText}\n</input>\n\n<response>\n${p.full ? response : shown}\n</response>\n\nVerdict:` }], false, null, { ...opts, think: false, model: p.model || this.auditModel, samplingProfile: 'verify', _phase: 'checks', _depth: 3, options: { ...(opts.options || {}), num_predict: p.full ? 150 : 1000 } })));
 
     return results.map((r, i) => {
       const p = personasFinal[i];
@@ -1028,6 +1031,7 @@ export class Deepthink extends EventEmitter {
     // old code let a wrong consensus both anchor the final call AND skip the
     // consistency sample — double blind spot.
     let probeConsensusTrusted = true;
+    let codeRes: { codeExec: any; sandboxPrefix: ChatMessage[]; failInsert: string | null } | null = null;
     if (depth > 0) {
       // the trained prompt ALSO rides into the probes themselves: they are
       // the deep-think engine, and the evolved techniques (poincare-incubate,
@@ -1042,76 +1046,55 @@ export class Deepthink extends EventEmitter {
       // guess probe is redundant (and its text is the longest in the dump).
       thinkOpts.codeProbe = looksComputational(inputText) && (depth >= 3);
       thinkOpts.hard = estimateDifficulty(inputText, depth);
-      const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, thinkOpts);
-      probeConsensus = thinkResults.consensus ?? null;
-      probeAgreement = thinkResults.agreement ?? 0;
-      // external step-grader on the consensus (cheap PRM): the probes self-
-      // report confidence, and confident probes can share ONE error. a fast
-      // grader scores the winner's actual reasoning; a flawed winner gets
-      // red-flagged so the final call re-derives instead of rubber-stamping.
-      // sound winner → trust it, and keep skipping the redundant consistency
-      // call. only the consensus path grades — the synthesis path already
-      // re-examined every probe.
-      probeConsensusTrusted = !!probeConsensus;
-      if (probeConsensus && thinkResults.consensusText) {
-        try {
-          const verdict = await this.callChat(
-            [
-              { role: 'system', content: 'You are a step-level math grader. Score each step of the reasoning 0.0-1.0 and judge whether the conclusion follows from the steps. Output ONLY JSON: {"total": 0.0-1.0, "flaw": "specific error, or empty string", "verdict": "SOUND"|"FLAWED"}' },
-              { role: 'user', content: `Problem:\n${inputText}\n\nSolution attempt:\n${compressProbeDump(thinkResults.consensusText)}\n\n` }
-            ],
-            false, null,
-            { ...mergedOpts, think: false, autoSystemPrompt: false, samplingProfile: 'verify', _phase: 'probe_verdict', _depth: 1, options: { ...(mergedOpts.options || {}), temperature: 0.2, num_predict: 250 } }
-          );
-          const vj = extractJSON(verdict.content || '') as Record<string, unknown>;
-          const total = Number(vj?.total ?? NaN);
-          const flaw = String(vj?.flaw || '').trim();
-          const sound = isFinite(total) && total >= 0.6 && String(vj?.verdict).toUpperCase() !== 'FLAWED';
-          probeConsensusTrusted = sound;
-          this._log('info', 'probe_verdict', `consensus [${probeConsensus}] → ${sound ? `SOUND (${total.toFixed(2)})` : `FLAWED (${total.toFixed(2)})${flaw ? ' — ' + flaw : ''}`}`);
-          if (brain) brain.add('probe_verdict', `${sound ? 'SOUND' : 'FLAWED'} ${total.toFixed(2)}`, 8);
-        } catch (e) {
-          // grader error = no evidence of a flaw → keep trusting the consensus
-          this._log('warn', 'probe_verdict', `grader failed: ${(e as Error).message}`);
+      // probe wave and sandbox chain are fully independent — run them
+      // concurrently (runThink fires 3-10 probe calls while detectComputeNeeds
+      // + codegen fire 2-8 more; the old code ran all of those serially).
+      const thinkTask = (async () => {
+        const thinkResults = await runThink(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, inputText, depth, thinkOpts);
+        probeConsensus = thinkResults.consensus ?? null;
+        probeAgreement = thinkResults.agreement ?? 0;
+        // external step-grader on the consensus (cheap PRM): the probes self-
+        // report confidence, and confident probes can share ONE error. a fast
+        // grader scores the winner's actual reasoning; a flawed winner gets
+        // red-flagged so the final call re-derives instead of rubber-stamping.
+        // sound winner → trust it, and keep skipping the redundant consistency
+        // call. only the consensus path grades — the synthesis path already
+        // re-examined every probe.
+        probeConsensusTrusted = !!probeConsensus;
+        if (probeConsensus && thinkResults.consensusText) {
+          try {
+            const verdict = await this.callChat(
+              [
+                { role: 'system', content: 'You are a step-level math grader. Score each step of the reasoning 0.0-1.0 and judge whether the conclusion follows from the steps. Output ONLY JSON: {"total": 0.0-1.0, "flaw": "specific error, or empty string", "verdict": "SOUND"|"FLAWED"}' },
+                { role: 'user', content: `Problem:\n${inputText}\n\nSolution attempt:\n${compressProbeDump(thinkResults.consensusText)}\n\n` }
+              ],
+              false, null,
+              { ...mergedOpts, think: false, autoSystemPrompt: false, samplingProfile: 'verify', _phase: 'probe_verdict', _depth: 1, options: { ...(mergedOpts.options || {}), temperature: 0.2, num_predict: 250 } }
+            );
+            const vj = extractJSON(verdict.content || '') as Record<string, unknown>;
+            const total = Number(vj?.total ?? NaN);
+            const flaw = String(vj?.flaw || '').trim();
+            const sound = isFinite(total) && total >= 0.6 && String(vj?.verdict).toUpperCase() !== 'FLAWED';
+            probeConsensusTrusted = sound;
+            this._log('info', 'probe_verdict', `consensus [${probeConsensus}] → ${sound ? `SOUND (${total.toFixed(2)})` : `FLAWED (${total.toFixed(2)})${flaw ? ' — ' + flaw : ''}`}`);
+            if (brain) brain.add('probe_verdict', `${sound ? 'SOUND' : 'FLAWED'} ${total.toFixed(2)}`, 8);
+          } catch (e) {
+            // grader error = no evidence of a flaw → keep trusting the consensus
+            this._log('warn', 'probe_verdict', `grader failed: ${(e as Error).message}`);
+          }
         }
-      }
-      if (brain) brain.add('think_stages', Object.keys(thinkResults).join(', '), 6);
-      let thinkCtx = 'BACKGROUND THINKING PROCESS (do not repeat this in your answer):\n';
-      for (const [k, v] of Object.entries(thinkResults)) {
-        if (v && typeof v === 'string') thinkCtx += `\n[${k.toUpperCase()}]\n${compressProbeDump(v)}\n`;
-      }
-      // probe consensus: N independent passes landed on the same value —
-      // the strongest self-consistency signal the pipeline has. the final
-      // call must treat it as the leading candidate, not ignore it — UNLESS
-      // the external step-grader found a flaw in the winner's reasoning, in
-      // which case the probes likely share one error and re-derivation is
-      // the only honest move.
-      if (probeConsensus) {
-        thinkCtx += probeConsensusTrusted
-          ? `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of independent probes arrived at [${probeConsensus}], and an external step-level grader confirmed their reasoning is sound. Treat this as the leading candidate — verify it, do not ignore it.\n`
-          : `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of probes arrived at [${probeConsensus}], BUT external step-scoring found a flaw in their shared reasoning. The probes may repeat ONE error. Re-derive from scratch — do NOT assume [${probeConsensus}].\n`;
-      }
-      if (brain) {
-        await this.consolidateBrainMemory(brain, mergedOpts);
-        const bc = brain.getContextBlock();
-        if (bc) thinkCtx = bc + '\n\n' + thinkCtx;
-      }
-      thinkCtxMsg = { role: 'system', content: thinkCtx };
-      finalMessages = insertSystemPrompt(finalMessages, thinkCtx);
-    }
-    // evolved guidance sits AFTER thinkCtx in the stack but consolidates
-    // BEFORE it (consolidateSystemMessages merges system msgs in array
-    // order), so the merged system message ends up:
-    //   [pin] [evolved] [thinkCtx] [persona...]
-    if (evolvedGuide) finalMessages = insertSystemPrompt(finalMessages, evolvedGuide);
-    let codeExec: { result: string; sandboxValidated?: boolean; disagreement?: { js: string; py: string } | null } | null = null;
-    let sandboxPrefix: ChatMessage[] = [];
-    if (depth > 0 && mergedOpts.enableCode !== false) {
-      // skip the compute-detection LLM call for inputs with no arithmetic
-      // or computation vocabulary — pure reasoning stays pure.
-      if (!looksComputational(inputText)) {
-        this._log('info', 'compute', 'input has no computational markers — skipping compute detection');
-      } else {
+        if (brain) brain.add('think_stages', Object.keys(thinkResults).join(', '), 6);
+        return thinkResults;
+      })();
+
+      const codeTask = (async (): Promise<{ codeExec: typeof codeExec; sandboxPrefix: ChatMessage[]; failInsert: string | null } | null> => {
+        if (mergedOpts.enableCode === false) return null;
+        // skip the compute-detection LLM call for inputs with no arithmetic
+        // or computation vocabulary — pure reasoning stays pure.
+        if (!looksComputational(inputText)) {
+          this._log('info', 'compute', 'input has no computational markers — skipping compute detection');
+          return null;
+        }
         const needs = await this.detectComputeNeeds(input, mergedOpts);
         const codeOpts = { ...mergedOpts, _phase: 'codegen' };
         const callCode = (task: string) => generateAndRunCode(this.callChat.bind(this) as (...a: unknown[]) => Promise<{ content: string }>, task, inputText, codeOpts);
@@ -1126,14 +1109,18 @@ export class Deepthink extends EventEmitter {
             // a parallel batch is validated only if EVERY subtask was
             // independently cross-validated; one weak link poisons the lot.
             const allValidated = results.every(r => r.sandboxValidated);
-            codeExec = { result: results.map(r => r.result).join(' | '), sandboxValidated: allValidated };
-            sandboxPrefix = [{ role: 'system', content: (allValidated ? sandbox : '<<<SANDBOX_CANDIDATE>>>\n') + `PARALLEL SANDBOX RESULTS${combined}\n\n${allValidated ? 'These values are cross-validated. Do NOT contradict them.' : 'Treat these as candidate results — verify before finalizing.'}` }];
+            return {
+              codeExec: { result: results.map(r => r.result).join(' | '), sandboxValidated: allValidated },
+              sandboxPrefix: [{ role: 'system', content: (allValidated ? sandbox : '<<<SANDBOX_CANDIDATE>>>\n') + `PARALLEL SANDBOX RESULTS${combined}\n\n${allValidated ? 'These values are cross-validated. Do NOT contradict them.' : 'Treat these as candidate results — verify before finalizing.'}` }],
+              failInsert: null
+            };
           } catch (e: unknown) {
-            finalMessages = insertSystemPrompt(finalMessages, `PARALLEL CODE FAILED: ${(e as Error).message}. Use reasoning.`);
+            return { codeExec: null, sandboxPrefix: [], failInsert: `PARALLEL CODE FAILED: ${(e as Error).message}. Use reasoning.` };
           }
-        } else if (needs.mode === 'single' && needs.task) {
+        }
+        if (needs.mode === 'single' && needs.task) {
           try {
-            codeExec = await callCode(needs.task);
+            const codeExec = await callCode(needs.task);
             if (brain) brain.add('code_result', `${needs.task} = ${codeExec.result}`, 10);
             const validated = !!codeExec.sandboxValidated;
             const mcts = codeExec.mctsConsensus as { count?: number } | null | undefined;
@@ -1162,15 +1149,60 @@ export class Deepthink extends EventEmitter {
             if (!/^-?\d+$/.test(res) && /find (the )?(number|sum|value|integer|smallest|largest)|m ?\+ ?n|how many|√|sqrt|find the number of ways/i.test(inputText)) {
               trustLine += ` The sandbox result [${res}] is NOT an integer, but this problem asks for an integer — the code is likely wrong. Re-derive the answer yourself.`;
             }
-            sandboxPrefix = [{
-              role: 'system',
-              content: (validated ? sandbox : '<<<SANDBOX_CANDIDATE>>>\n') + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\n` + trustLine,
-            }];
+            return {
+              codeExec,
+              sandboxPrefix: [{
+                role: 'system',
+                content: (validated ? sandbox : '<<<SANDBOX_CANDIDATE>>>\n') + `SANDBOX RESULT\nTask:${needs.task}\nResult: ${codeExec.result}\n\n` + trustLine,
+              }],
+              failInsert: null
+            };
           } catch (e: unknown) {
-            finalMessages = insertSystemPrompt(finalMessages, `CODE FAILED: ${(e as Error).message}. Use reasoning.`);
+            return { codeExec: null, sandboxPrefix: [], failInsert: `CODE FAILED: ${(e as Error).message}. Use reasoning.` };
           }
         }
+        return null;
+      })();
+
+      const [thinkResults, codeResolved] = await Promise.all([thinkTask, codeTask]);
+      codeRes = codeResolved;
+      let thinkCtx = 'BACKGROUND THINKING PROCESS (do not repeat this in your answer):\n';
+      for (const [k, v] of Object.entries(thinkResults)) {
+        // consensusText duplicates the winning probe already in analysis —
+        // sending both is pure token waste
+        if (k === 'consensusText') continue;
+        if (v && typeof v === 'string') thinkCtx += `\n[${k.toUpperCase()}]\n${compressProbeDump(v)}\n`;
       }
+      // probe consensus: N independent passes landed on the same value —
+      // the strongest self-consistency signal the pipeline has. the final
+      // call must treat it as the leading candidate, not ignore it — UNLESS
+      // the external step-grader found a flaw in the winner's reasoning, in
+      // which case the probes likely share one error and re-derivation is
+      // the only honest move.
+      if (probeConsensus) {
+        thinkCtx += probeConsensusTrusted
+          ? `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of independent probes arrived at [${probeConsensus}], and an external step-level grader confirmed their reasoning is sound. Treat this as the leading candidate — verify it, do not ignore it.\n`
+          : `\nPROBE CONSENSUS: ${Math.round(probeAgreement * 100)}% of probes arrived at [${probeConsensus}], BUT external step-scoring found a flaw in their shared reasoning. The probes may repeat ONE error. Re-derive from scratch — do NOT assume [${probeConsensus}].\n`;
+      }
+      if (brain) {
+        await this.consolidateBrainMemory(brain, mergedOpts);
+        const bc = brain.getContextBlock();
+        if (bc) thinkCtx = bc + '\n\n' + thinkCtx;
+      }
+      thinkCtxMsg = { role: 'system', content: thinkCtx };
+      finalMessages = insertSystemPrompt(finalMessages, thinkCtx);
+    }
+    // evolved guidance sits AFTER thinkCtx in the stack but consolidates
+    // BEFORE it (consolidateSystemMessages merges system msgs in array
+    // order), so the merged system message ends up:
+    //   [pin] [evolved] [thinkCtx] [persona...]
+    if (evolvedGuide) finalMessages = insertSystemPrompt(finalMessages, evolvedGuide);
+    let codeExec: { result: string; sandboxValidated?: boolean; disagreement?: { js: string; py: string } | null } | null = null;
+    let sandboxPrefix: ChatMessage[] = [];
+    if (codeRes) {
+      codeExec = codeRes.codeExec;
+      sandboxPrefix = codeRes.sandboxPrefix;
+      if (codeRes.failInsert) finalMessages = insertSystemPrompt(finalMessages, codeRes.failInsert);
     }
     // answerFormat: 'bracket' / "ANSWER: X" — the final answer must land in
     // the requested shape. rides in the system messages so every revision

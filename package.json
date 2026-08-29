@@ -1,6 +1,6 @@
 {
   "name": "deepthink-js",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "SOTA NPM module for agentic processes using local or cloud LLMs.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

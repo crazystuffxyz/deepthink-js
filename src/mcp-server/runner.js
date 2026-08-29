@@ -300,32 +300,55 @@ function fetchUrl(url, redirects = 0) {
   });
 }
 
+async function searchViaDuckDuckGo(query, maxResults) {
+  const encoded = encodeURIComponent(query);
+  const html = await fetchUrl(`https://html.duckduckgo.com/html/?q=${encoded}`);
+
+  const urlRegex = /<a class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
+  const snippetRegex = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  const results = [];
+  const urls = [];
+  let m;
+  while ((m = urlRegex.exec(html)) && urls.length < maxResults * 2) {
+    const raw = m[1].replace(/\/\/duckduckgo\.com\/l\/\?uddg=/, '').replace(/&rut=.*/, '');
+    const url = decodeURIComponent(raw);
+    const title = m[2].replace(/<[^>]*>/g, '').trim();
+    if (url.startsWith('http')) urls.push({ url, title });
+  }
+  const snippets = [];
+  while ((m = snippetRegex.exec(html))) snippets.push(m[1].replace(/<[^>]*>/g, '').trim());
+  urls.forEach((u, i) => results.push({ ...u, snippet: snippets[i] || '', rating: scoreUrl(u.url) }));
+  results.sort((a, b) => b.rating - a.rating);
+  return results.slice(0, maxResults);
+}
+
+// layered: deepthink's search engine (device daemon → ollama.com → SearXNG →
+// reformulated retry), then raw DDG html as the keyless last resort.
 async function deepthink_web_search(args) {
   const { query, maxResults = 8 } = args;
   if (!query) return { ok: false, error: 'web_search: "query" is required' };
+  const cap = Math.min(Math.max(1, maxResults), 10);
+  let results = [];
   try {
-    const encoded = encodeURIComponent(query);
-    const html = await fetchUrl(`https://html.duckduckgo.com/html/?q=${encoded}`);
-
-    const urlRegex = /<a class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
-    const snippetRegex = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-    const results = [];
-    const urls = [];
-    let m;
-    while ((m = urlRegex.exec(html)) && urls.length < maxResults * 2) {
-      const raw = m[1].replace(/\/\/duckduckgo\.com\/l\/\?uddg=/, '').replace(/&rut=.*/, '');
-      const url = decodeURIComponent(raw);
-      const title = m[2].replace(/<[^>]*>/g, '').trim();
-      if (url.startsWith('http')) urls.push({ url, title });
-    }
-    const snippets = [];
-    while ((m = snippetRegex.exec(html))) snippets.push(m[1].replace(/<[^>]*>/g, '').trim());
-    urls.forEach((u, i) => results.push({ ...u, snippet: snippets[i] || '', rating: scoreUrl(u.url) }));
-    results.sort((a, b) => b.rating - a.rating);
-    return { ok: true, results: results.slice(0, maxResults), query };
+    const { getSearchResults } = await import('../../dist/internet/interactWithInternet.js');
+    const r = await getSearchResults(String(query), { maxResults: cap, reformulate: true });
+    results = (r || []).map((x) => ({
+      title: x.title || '',
+      url: x.link,
+      snippet: x.snippet || '',
+      rating: scoreUrl(x.link),
+    }));
   } catch (e) {
-    return { ok: false, error: e.message };
+    console.error(`[web_search] engine tier failed: ${e.message}`);
   }
+  if (!results.length) {
+    try {
+      results = await searchViaDuckDuckGo(query, cap);
+    } catch (e) {
+      return { ok: false, error: e.message, results: [] };
+    }
+  }
+  return { ok: true, results: results.slice(0, cap), query };
 }
 
 async function deepthink_web_fetch(args) {

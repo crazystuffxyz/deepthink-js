@@ -1,10 +1,24 @@
 // internet/ollamaSearch.ts
-// Ollama Web Search (api-key tier + JS-client tier).
+// Ollama-native web search, layered:
+//   1. device daemon  POST $OLLAMA_HOST/api/experimental/web_search — no key
+//      needed when the machine is signed in (`ollama signin`); the daemon
+//      signs the forward with the local identity key.
+//   2. ollama.com     POST https://ollama.com/api/web_search — needs
+//      OLLAMA_API_KEY (Bearer).
+//   3. JS SDK         same ollama.com endpoint; kept last because it wants a
+//      key too and a stale SDK can silently drop max_results.
+// A tier that can't authenticate is skipped with one log line — a missing
+// API key is never a fatal "no API key" dead end.
 import axios from './axios.js';
 import { Ollama } from 'ollama';
 
-const ollama = 'https://ollama.com/api/web_search';
-const ollama1 = 3;
+const WEB_SEARCH_URL = 'https://ollama.com/api/web_search';
+
+function host(): string {
+  const h = (process.env.OLLAMA_HOST || '').trim() || 'http://127.0.0.1:11434';
+  return h.replace(/\/+$/, '');
+}
+
 // same timeout-fetch trick as providers/index.ts — a hung search must die
 function makeTimeoutFetch(timeoutMs: number): typeof fetch {
   return ((input: any, init: any) => {
@@ -18,7 +32,6 @@ function makeTimeoutFetch(timeoutMs: number): typeof fetch {
     return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
   }) as typeof fetch;
 }
-const _ollamaClient = new Ollama({ fetch: makeTimeoutFetch(Number(process.env.OLLAMA_TIMEOUT_MS) || 60_000) });
 
 class Concurrency {
   _limit: number;
@@ -44,115 +57,160 @@ class Concurrency {
     });
   }
 }
+const _clientQueue = new Concurrency(3);
 
-const _clientQueue = new Concurrency(ollama1);
-let _webSearchSignature: string | null = null;
-// probe once: the local ollama server often has no web_search endpoint (404)
-// or needs auth (401) — paying that failure on EVERY query is wasted latency.
-// after the first probe we know whether the client tier is worth trying.
-let _clientTierUsable: boolean | null = null;
+export type WebSearchResult = { title: string; link: string; snippet: string; cite: string };
+const say = (m: string) => { if (process.stdout?.write) process.stdout.write(m); };
 
-async function probeClientTier(): Promise<boolean> {
-  if (_clientTierUsable !== null) return _clientTierUsable;
+// --- device daemon tier -------------------------------------------------
+
+type DaemonState = 'unknown' | 'ok' | 'signed-out' | 'no-endpoint' | 'down';
+let _daemonState: DaemonState = 'unknown';
+let _notifiedNoKey = false;
+
+function daemonVerdict(err: unknown): DaemonState {
+  const e = err as { message?: string; code?: string; response?: { status?: number } };
+  const code = String((e as any)?.code || '');
+  if (e?.response?.status === 401 || e?.response?.status === 403) return 'signed-out';
+  if (e?.response?.status === 404) return 'no-endpoint';
+  if (code === 'ECONNREFUSED' || /ENOTFOUND|ECONNRESET|socket|network/i.test(String(e?.message))) return 'down';
+  return 'down';
+}
+
+const daemonHint: Record<string, string> = {
+  'signed-out': 'not signed in — run `ollama signin`, falling through',
+  'no-endpoint': 'daemon lacks /api/experimental/web_search (update ollama), falling through',
+  down: 'daemon unreachable, falling through'
+};
+
+async function probeDaemon(): Promise<boolean> {
+  if (_daemonState === 'ok') return true;
+  if (_daemonState !== 'unknown') return false;
   try {
-    const r = await searchViaClient('probe');
-    _clientTierUsable = true;
-    if (process.stdout?.write) process.stdout.write('[ollamaSearch] client tier probe OK\n');
+    // /api/me is free and tells us the machine is signed in (plan, name)
+    await axios.post(`${host()}/api/me`, {}, { timeout: 4000 });
+    _daemonState = 'ok';
     return true;
   } catch (err) {
-    _clientTierUsable = false;
-    // err can be undefined (a rejected promise with no value) — never let
-    // the probe's own error handling crash the search chain
-    const why = String((err as Error)?.message ?? err ?? 'unknown').slice(0, 60);
-    if (process.stdout?.write) process.stdout.write(`[ollamaSearch] client tier probe FAILED (${why}) — skipping client tier this session\n`);
+    _daemonState = daemonVerdict(err);
+    if (_daemonState === 'signed-out') say(`[ollamaSearch/daemon] ${daemonHint['signed-out']}\n`);
+    else say(`[ollamaSearch/daemon] no device search (${_daemonState})\n`);
     return false;
   }
 }
 
-async function callWebSearch(query: string): Promise<unknown> {
-  if (typeof (_ollamaClient as any).webSearch !== 'function') {
-    throw new Error('ollama package does not expose webSearch(). Run: npm install ollama@latest');
-  }
-  if (_webSearchSignature === 'object') return (_ollamaClient as any).webSearch({ query });
-  if (_webSearchSignature === 'string') return (_ollamaClient as any).webSearch(query);
-  try {
-    const result = await (_ollamaClient as any).webSearch({ query });
-    _webSearchSignature = 'object';
-    if (process.stdout?.write) process.stdout.write('[ollamaSearch/client] signature detected: { query } object form\n');
-    return result;
-  } catch (objErr) {
-    const isSignatureErr = /query.*(required|missing)|missing.*query|invalid.*param/i.test((objErr as Error).message);
-    if (!isSignatureErr) throw objErr;
-    try {
-      const result = await (_ollamaClient as any).webSearch(query);
-      _webSearchSignature = 'string';
-      if (process.stdout?.write) process.stdout.write('[ollamaSearch/client] signature detected: plain string form\n');
-      return result;
-    } catch (strErr) {
-      throw new Error(`webSearch() failed both signatures. object err: "${(objErr as Error).message}" | string err: "${(strErr as Error).message}"`);
-    }
+async function searchViaDaemon(query: string, maxResults: number): Promise<WebSearchResult[]> {
+  const t0 = Date.now();
+  const response = await axios.post(`${host()}/api/experimental/web_search`,
+    { query, max_results: maxResults },
+    { headers: { 'Content-Type': 'application/json' }, timeout: 12_000 });
+  const results = normalise((response as any).data?.results);
+  say(`[ollamaSearch/daemon] ${results.length} results in ${Date.now() - t0}ms\n`);
+  return results;
+}
+
+// --- ollama.com tiers (need OLLAMA_API_KEY) -----------------------------
+
+// 429 → one spaced retry, then let the tier fail (the next engine takes over)
+async function with429Retry<T>(run: () => Promise<T>): Promise<T> {
+  try { return await run(); }
+  catch (err: any) {
+    if (err?.response?.status !== 429) throw err;
+    await new Promise(r => setTimeout(r, 900));
+    return await run();
   }
 }
 
-function normalise(rawResults: unknown): Array<{ title: string; link: string; snippet: string; cite: string }> {
+async function searchViaApiKey(query: string, maxResults: number, apiKey: string): Promise<WebSearchResult[]> {
+  const t0 = Date.now();
+  const response = await with429Retry(() => axios.post(WEB_SEARCH_URL,
+    { query, max_results: maxResults },
+    {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'deepthink-research-agent/1.0'
+      },
+      timeout: 12_000
+    }));
+  const results = normalise((response as any).data?.results);
+  say(`[ollamaSearch/api-key] ${results.length} results in ${Date.now() - t0}ms\n`);
+  return results;
+}
+
+// SDK 0.6.x: webSearch() takes { query } only (string form throws), hardcodes
+// ollama.com, and needs the key via client headers — auth it here or skip.
+async function searchViaClient(query: string, apiKey: string): Promise<WebSearchResult[]> {
+  const t0 = Date.now();
+  const client = new Ollama({
+    fetch: makeTimeoutFetch(15_000),
+    headers: { Authorization: `Bearer ${apiKey}` }
+  } as any);
+  if (typeof (client as any).webSearch !== 'function') {
+    throw new Error('ollama package does not expose webSearch(). Run: npm install ollama@latest');
+  }
+  const response = await _clientQueue.run(() => (client as any).webSearch({ query }));
+  const results = normalise((response as any)?.results);
+  say(`[ollamaSearch/client] ${results.length} results in ${Date.now() - t0}ms\n`);
+  return results;
+}
+
+function normalise(rawResults: unknown): WebSearchResult[] {
   if (!Array.isArray(rawResults)) return [];
   return rawResults.map(r => {
+    const rr = r as any;
     let hostname = '';
-    try { hostname = new URL((r as any).url || '').hostname; } catch { /* ignore */ }
+    const link = String(rr.url || rr.link || '').trim();
+    try { hostname = new URL(link).hostname; } catch { /* ignore */ }
     return {
-      title: ((r as any).title || '').trim(),
-      link: ((r as any).url || '').trim(),
-      snippet: ((r as any).content || '').trim(),
+      title: String(rr.title || '').trim(),
+      link,
+      snippet: String(rr.content || rr.snippet || '').trim(),
       cite: hostname
     };
   }).filter(r => r.link);
 }
 
-async function searchViaApiKey(query: string, maxResults: number, apiKey: string): Promise<Array<{ title: string; link: string; snippet: string; cite: string }>> {
-  const clampedMax = Math.min(Math.max(1, maxResults), 10);
-  const t0 = Date.now();
-  if (process.stdout?.write) process.stdout.write(`[ollamaSearch/api-key] query="${query.slice(0, 60)}" max=${clampedMax}\n`);
-  const response = await axios.post(ollama, { query, max_results: clampedMax }, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'User-Agent': 'deepthink-research-agent/1.0'
-    },
-    timeout: 20_000
-  });
-  const results = normalise((response as any).data?.results);
-  if (process.stdout?.write) process.stdout.write(`[ollamaSearch/api-key] ${results.length} results in ${Date.now() - t0}ms\n`);
-  return results;
-}
+// --- public surface -----------------------------------------------------
 
-async function searchViaClient(query: string): Promise<Array<{ title: string; link: string; snippet: string; cite: string }>> {
-  const t0 = Date.now();
-  if (process.stdout?.write) process.stdout.write(`[ollamaSearch/client] queued query="${query.slice(0, 60)}"\n`);
-  const response = await _clientQueue.run(() => callWebSearch(query));
-  const results = normalise((response as any)?.results);
-  if (process.stdout?.write) process.stdout.write(`[ollamaSearch/client] ${results.length} results in ${Date.now() - t0}ms\n`);
-  return results;
-}
-
-export async function getOllamaSearchResults(query: string, maxResults = 5): Promise<Array<{ title: string; link: string; snippet: string; cite: string }>> {
+export async function getOllamaSearchResults(query: string, maxResults = 5): Promise<WebSearchResult[]> {
+  const max = Math.min(Math.max(1, Math.floor(Number(maxResults) || 5)), 10);
   const apiKey = process.env.OLLAMA_API_KEY;
+  const daemonLive = await probeDaemon();
+
+  const tiers: Array<[string, () => Promise<WebSearchResult[]>]> = [];
+  if (daemonLive) tiers.push(['daemon', () => searchViaDaemon(query, max)]);
   if (apiKey) {
+    tiers.push(['api-key', () => searchViaApiKey(query, max, apiKey)]);
+    tiers.push(['client', () => searchViaClient(query, apiKey)]);
+  } else if (!_notifiedNoKey) {
+    _notifiedNoKey = true;
+    say('[ollamaSearch] no OLLAMA_API_KEY — ollama.com tiers skipped; device daemon + SearXNG still in play\n');
+  }
+
+  for (const [name, run] of tiers) {
     try {
-      const results = await searchViaApiKey(query, maxResults, apiKey);
+      const results = await run();
       if (results.length > 0) return results;
-      if (process.stdout?.write) process.stdout.write('[ollamaSearch/api-key] 0 results — trying JS client\n');
+      say(`[ollamaSearch/${name}] 0 results — next tier\n`);
     } catch (err) {
-      if (process.stdout?.write) process.stdout.write(`[ollamaSearch/api-key] ${(err as Error).message} — trying JS client\n`);
-    }
-  } else if (process.stdout?.write) {
-    process.stdout.write('[ollamaSearch] No OLLAMA_API_KEY — checking JS client tier\n');
-  }
-  if (await probeClientTier()) {
-    try {
-      return await searchViaClient(query);
-    } catch (err) {
-      throw new Error(`Ollama client tier failed: ${(err as Error).message}`);
+      if (name === 'daemon') _daemonState = daemonVerdict(err);
+      say(`[ollamaSearch/${name}] ${String((err as Error)?.message ?? err).slice(0, 90)} — next tier\n`);
     }
   }
-  throw new Error('Ollama search unavailable (no API key, client tier unusable)');
+  return [];
+}
+
+// LLM-free degraded-query builder for a last-chance retry in the engine that
+// wraps this module: drop stopwords/punctuation, keep the strongest tokens.
+const STOP = new Set(['the', 'a', 'an', 'of', 'in', 'on', 'for', 'to', 'and', 'or', 'with',
+  'how', 'what', 'whats', 'is', 'are', 'was', 'were', 'do', 'does', 'did', 'best', 'vs',
+  'versus', 'latest', 'news', 'today', 'current', 'about', 'from', 'by', 'at', 'as', 'it',
+  'its', 'that', 'this', 'your', 'me', 'my', 'can', 'you', 'please']);
+
+export function reformulateQuery(q: string): string | null {
+  const toks = String(q || '').toLowerCase().replace(/[^a-z0-9\s.+#-]/g, ' ').split(/\s+/).filter(Boolean);
+  const keep = toks.filter(t => !STOP.has(t));
+  const out = (keep.length >= 2 ? keep : toks).slice(0, 8).join(' ').trim();
+  return out && out !== String(q).toLowerCase() ? out : null;
 }

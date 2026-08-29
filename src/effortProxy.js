@@ -348,7 +348,9 @@ async function engineReply(req, reply, framing, body, effort) {
         await engine.generate(norm.prompt, { ...genOpts, onChunk: (c2, meta) => {
           const text = String(c2 || '').replace(MARKER, '');
           if (!text || reply.raw.destroyed) return;
-          if (meta.kind === 'thinking') chunk({ reasoning_content: text });
+          // native ollama /v1/chat/completions parks thinking in delta.reasoning;
+          // reasoning_content stays too — it's the deepseek-family convention
+          if (meta.kind === 'thinking') chunk({ content: '', reasoning: text, reasoning_content: text });
           else chunk({ content: text });
         } });
         chunk({}, 'stop');
@@ -422,8 +424,13 @@ async function engineReply(req, reply, framing, body, effort) {
       });
     }
     if (framing === 'gemini') {
-      const r = await engine.generate(norm.prompt, genOpts);
-      const candidate = { candidates: [{ content: { parts: [{ text: String(r).replace(MARKER, '') }], role: 'model' }, finishReason: 'STOP' }] };
+      const { box, opts } = thinkingCollector(genOpts);
+      const r = await engine.generate(norm.prompt, opts);
+      // native gemini marks thought summaries with a `thought: true` part
+      const parts = [];
+      if (String(box.t || '').trim()) parts.push({ text: box.t, thought: true });
+      parts.push({ text: String(r).replace(MARKER, '') });
+      const candidate = { candidates: [{ content: { parts, role: 'model' }, finishReason: 'STOP' }] };
       if (String(req.url).includes('streamGenerateContent')) {
         if (String(req.url).includes('alt=sse')) {
           reply.hijack();
@@ -447,7 +454,7 @@ async function engineReply(req, reply, framing, body, effort) {
         await engine.generate(norm.prompt, { ...genOpts, onChunk: (c2, meta) => {
           const text = String(c2 || '').replace(MARKER, '');
           if (!text || reply.raw.destroyed) return;
-          if (meta.kind === 'thinking') { out.thinking += text; reply.raw.write(NDJSON({ model, thinking: text })); }
+          if (meta.kind === 'thinking') { out.thinking += text; reply.raw.write(NDJSON({ model, created_at: new Date().toISOString(), response: '', thinking: text, done: false })); }
           else { out.response += text; reply.raw.write(NDJSON({ model, response: text })); }
         } });
         const u = usageOf(trace);
@@ -478,7 +485,7 @@ async function engineReply(req, reply, framing, body, effort) {
       await engine.generate(norm.prompt, { ...genOpts, onChunk: (c2, meta) => {
         const text = String(c2 || '').replace(MARKER, '');
         if (!text || reply.raw.destroyed) return;
-        if (meta.kind === 'thinking') { content.thinking += text; reply.raw.write(NDJSON({ model, message: { role: 'assistant', thinking: text } })); }
+        if (meta.kind === 'thinking') { content.thinking += text; reply.raw.write(NDJSON({ model, created_at: new Date().toISOString(), message: { role: 'assistant', content: '', thinking: text } })); }
         else { content.text += text; reply.raw.write(NDJSON({ model, message: { role: 'assistant', content: text } })); }
       } });
       const u = usageOf(trace);
@@ -535,8 +542,12 @@ app.post('/v1/chat/completions', async (req, reply) => gate(req, reply, 'openai'
 app.post('/v1/messages', async (req, reply) => gate(req, reply, 'anthropic'));
 app.post('/v1/responses', async (req, reply) => gate(req, reply, 'responses'));
 app.post('/v1/completions', async (req, reply) => gate(req, reply, 'completions'));
-app.post('/v1beta/models/:model/:action', async (req, reply) => {
-  if (!String(req.params.action || '').includes('generate')) return passthrough(req, reply);
+// gemini's real URL is single-segment: /v1beta/models/{model}:generateContent
+app.post('/v1beta/models/:seg', async (req, reply) => {
+  const seg = String(req.params.seg || '');
+  const ci = seg.lastIndexOf(':');
+  const action = ci >= 0 ? seg.slice(ci + 1) : '';
+  if (!action.includes('generate')) return passthrough(req, reply);
   return gate(req, reply, 'gemini');
 });
 app.get('/v1/models', async () => {

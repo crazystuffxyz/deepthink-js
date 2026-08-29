@@ -31,7 +31,7 @@ const post = async (path, payload, timeoutMs) => {
 {
   const r = await post('/api/chat', { model: 'gemma4:31b-cloud', messages: [{ role: 'user', content: 'Say OK' }], stream: false }, 60_000);
   const body = await r.json().catch(() => ({}));
-  ok('no-effort -> daemon passthrough', r.headers.get('x-deepthink-effort') === undefined && body?.done !== undefined, JSON.stringify(body).slice(0, 120));
+  ok('no-effort -> daemon passthrough', !r.headers.get('x-deepthink-effort') && body?.done !== undefined, JSON.stringify(body).slice(0, 120));
 }
 // 3. anthropic thinking budget -> SSE with valid event chain
 // budget 8000 maps to the medium tier — cheap call, still exercises the

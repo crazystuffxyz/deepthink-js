@@ -263,6 +263,7 @@ async function engineReply(req, reply, framing, body, effort) {
       const u = usageOf(trace);
       emit({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: u.completion_tokens } });
       emit({ type: 'message_stop' });
+      reply.raw.end(); // without this the client's body read never completes
       return reply;
     }
     if (framing === 'openai') {

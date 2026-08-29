@@ -39,7 +39,7 @@ Deepthink wraps any LLM provider with a stack of reasoning infrastructure:
 - **Multi-provider support** — Ollama, OpenAI, Claude (Anthropic), Gemini (Google), Perplexity, Grok (xAI), LM Studio, or any OpenAI-compatible endpoint
 - **Multi-depth thinking** — up to 3 staged internal reasoning passes (analysis → planning → sanity check) before the final response
 - **Typed output parsing** — returns `string`, `integer`, `double`, or `boolean` directly from free-form model output
-- **Self-verification loops** — adversarial and numerical checker agents review responses and drive iterative repair
+- **Self-verification loops** — adversarial and numerical checkers audit each draft and force repairs until they pass
 - **Sandboxed code execution** — generates and runs JavaScript in an `isolated-vm` isolate (32 MB cap, 5 s timeout) and Python in a guarded subprocess to verify numeric answers
 - **MCTS consensus** — runs multiple algorithmic approaches in parallel and votes on the most consistent result
 - **9-step deep research pipeline** — query planning → crawling → credibility scoring → MMR diversity → fact verification → report writing → critique loops
@@ -56,6 +56,16 @@ Deepthink wraps any LLM provider with a stack of reasoning infrastructure:
 - **Smart context compression** — when token budget overflows, summarize the middle, keep the head and tail
 - **Persistent memory** — JSON-file-backed store at `~/.deepthink-js/memory.json` for cross-session state
 - **Confidence calibration** — track per-type wins/losses; blend with a 0.5 prior at low N
+
+---
+
+## What's new in v2.0.1
+
+- **Layered web search** — SearXNG → signed-in device daemon (`/api/experimental/web_search`, no key needed) → ollama.com API key tier → JS SDK → keyword-reformulated retry. A missing `OLLAMA_API_KEY` is a one-line notice, never an error. Query results cached 10 min; page extraction memoized per URL.
+- **Effort proxy** (`npm run proxy:effort`, `:11436`) — ollama-compatible passthrough that hijacks thinking-effort payloads (OpenAI `reasoning_effort`, Anthropic `thinking.budget_tokens`, Gemini `thinkingBudget`, ollama `think` levels) and runs them through the deepthink engine in the caller's wire format.
+- **Faster pipeline** — probe wave and sandbox codegen run concurrently; MCTS approach generation parallelized with pre-assigned domains; Ollama clients pooled per host; 30-minute model keep-alive on local daemons; blind checkers get 1000 tokens to actually re-derive.
+- **RL loop** (`npm run rl`) — light-budget prompt evolution with an OOD probe, persistent state, a regression-guard that protects the deployed champion, and automatic promotion into `data/evolved/rl-best`.
+- **Latency harness** (`npm run bench:latency`) — p50/p90 wall clock + token accounting for plain vs deepthink presets.
 
 ---
 
@@ -260,7 +270,7 @@ const result = await dt.generate(input, opts);
 | `input`    | `string \| Message[] \| object`                          | The prompt — plain string, messages array, or any object |
 | `opts`     | `object`                                                 | Named options — see full table below |
 
-All options are passed as a single named object. This makes call sites self-documenting:
+All options go in as a single named object, which keeps call sites readable:
 
 ```js
 // Simple call — all defaults
@@ -449,7 +459,7 @@ node scripts/evolve.js 10 6        # 10 candidates, 6 generations
 node scripts/applyBest.js <runId> "your hard problem"
 ```
 
-The seed population includes a `fableMetaPrompt` variant that forces a visible `<thinking>` block, a 4-stage classify → restate → attack → verify workflow, and explicit "actually…" / "wait…" self-correction markers — modeled on the thinking format used by the strongest public reasoning models. Scoring rewards candidates that actually produce visible reasoning, so the loop converges on prompts that elicit thinking, not just on prompts that produce lucky answers. Operators include `fableThinkFormat`, `fableClassify`, `fableInternalCritic`, `fableCalibrate`, and `fableHighIntensity` to push the population toward the Fable-style format.
+The seed population includes a `fableMetaPrompt` variant that forces a visible `<thinking>` block, a 4-stage classify → restate → attack → verify workflow, and explicit "actually..." / "wait..." self-correction markers — modeled on the thinking format used by the strongest public reasoning models. Scoring rewards candidates that actually produce visible reasoning, so the loop converges on prompts that elicit thinking, not just on prompts that produce lucky answers. Operators include `fableThinkFormat`, `fableClassify`, `fableInternalCritic`, `fableCalibrate`, and `fableHighIntensity` to push the population toward the Fable-style format.
 
 All new modes respect the existing `type`, `depth`, `checks`, `onChunk`, and `model` options. They short-circuit before the main flow and never call the legacy paths unless you set the option to `false`.
 
@@ -471,6 +481,27 @@ node scripts/probeGeneralize.js <runId>
 The OOD probe uses 5 held-out items (`ood-01-fair-share`, `ood-02-subset-sum`, `ood-03-monty-extended`, `ood-04-anagram-check`, `ood-05-orbit`) that the evolution loop never sees. If the in-distribution score is high but the OOD score is much lower, the prompt is gaming the bench — discard it and re-run with a wider `BENCH` distribution or fewer generations.
 
 **Interpreting the gap:** in practice on `gemma4:31b-cloud`, the in-distribution BENCH runs at ~0.7 while the OOD bench runs at ~0.3. That gap is mostly *bench hardness* (the OOD items include multi-number and algorithmic problems that even strong models get wrong) rather than prompt overfit. The real signal is `probeGeneralize` — if the winner still produces a coherent, structured answer on the 3 hand-picked hard problems, the prompt has generalized even if its numeric OOD score is low.
+
+### The RL loop (`npm run rl`)
+
+Prompt evolution as a permanent background loop, one command:
+
+```bash
+node scripts/rlLoop.js              # one light cycle: evolve (pop 4, gens 2,
+                                    # 5-item mini-batch) → full-bank re-score
+                                    # → OOD probe → regression guard → record
+node scripts/rlLoop.js --loop 5     # five cycles back-to-back
+node scripts/rlLoop.js --pop 8 --gens 3 --eval-sample 10 --no-promote
+```
+
+Each cycle lands in `data/evolved/rl-state.json` (fitness history, OOD gaps,
+all-time best) and the current champion prompt is mirrored to
+`data/evolved/rl-best` in the exact shape `loadBest()` / `evolvedApply`
+consume — so the loop's training results flow straight back into
+`generate({ evolvedApply: 'data/evolved/rl-best' })`. The regression
+guard refuses to promote a challenger that scores worse than the standing
+champion, so a noisy mini-batch cycle can never silently degrade the deployed
+prompt.
 
 ---
 
@@ -502,7 +533,7 @@ if (result.success) {
 
 ## Research Agent
 
-The `researchAgent` implements a high-fidelity, 9-step verification pipeline that transforms a simple query into a peer-reviewed academic report.
+The `researchAgent` runs a query through a 9-step verification pipeline and comes back with a fully cited, critiqued report.
 
 ```js
 import Deepthink from 'deepthink-js';
@@ -613,12 +644,42 @@ Uses `impit` to mimic Chrome's TLS fingerprint, bypassing most bot-detection mid
 
 ### Ollama Web Search
 
+A layered search engine with no dead ends — a missing API key never kills a
+query, it just slides down to the next tier:
+
 ```js
 import { getOllamaSearchResults } from 'deepthink-js/internet/ollamaSearch.js';
+import { getSearchResults } from 'deepthink-js/internet/interactWithInternet.js';
 
 const results = await getOllamaSearchResults('Riemann hypothesis latest research', 5);
 // results: [{ title, link, snippet, cite }, ...]
+
+// or the full layered engine (recommended):
+const hits = await getSearchResults('Riemann hypothesis latest research', { maxResults: 5 });
 ```
+
+How `getSearchResults` decides where to look:
+
+1. **SearXNG** (meta-search over public instances) leads by default; pass
+   `useOllamaSearch: true` and the ollama tiers lead instead.
+2. **Device daemon** — `POST $OLLAMA_HOST/api/experimental/web_search`. When
+   the machine is signed in to ollama (`ollama signin`), the daemon signs the
+   forward with the local identity key and no API key is needed at all. A
+   free `POST /api/me` probe decides whether the tier is live (cached, so one
+   4-second check per process, not per query).
+3. **ollama.com REST** — used when `OLLAMA_API_KEY` is set. `429` gets one
+   spaced retry before falling through.
+4. **JS SDK** — same endpoint, authenticated via client headers, last of the
+   ollama tiers.
+5. **Reformulated retry** — if every tier returned zero results, the query is
+   keyword-normalized (stopwords and punctuation stripped) and the chain runs
+   once more.
+
+Everything is cached per normalized query for 10 minutes and logged with one
+line per tier, so a silent degradation (`ollamaSearch/daemon: 0 results —
+next tier`) is visible instead of swallowed. Page extraction is memoized too:
+the research pipeline and the citation generator read the same URL from
+memory instead of fetching it twice.
 
 ---
 
@@ -660,6 +721,7 @@ Tests default to `gemma4:31b-cloud`. Override with `DEEPTHINK_TEST_MODEL=... npm
 | `test_consistency.js` | vote, keyFor, findRelevant, makeCalibrator | no |
 | `test_toolUse.js` | parseToolCall, describeTools | no |
 | `test_providers.js` | client construction across all 8 providers | no |
+| `test_effortProxy.js` | 11436 proxy: passthrough, effort→engine on all 4 wire formats | yes (gemma4:31b-cloud) |
 | `test_sandbox.js` | JS sandbox, Python sandbox, compareResults | no (Python needs `python3` in PATH) |
 | `test_integration.js` | every new public option against the configured model | yes |
 
@@ -686,6 +748,19 @@ node scripts/iqTrain.js --pop 8 --gens 6         # IQ training loop (80% train /
 
 Raw per-row output (CSV, resume-safe) is in
 [`benchmarks/results/`](benchmarks/results/).
+
+**Latency** (`npm run bench:latency`, resumable set of 6 short-answer questions,
+`gemma4:31b-cloud` via the local daemon — streaming, keep-alive, pooled clients):
+
+| mode | p50 | p90 | mean |
+|---|---:|---:|---:|
+| plain chat | 258 ms | 371 ms | 267 ms |
+| deepthink d1/c0 | 4.47 s | 6.81 s | 4.15 s |
+| deepthink d2/c1 | 4.49 s | 6.80 s | 4.61 s |
+
+Search fallbacks are exercised by `test_mullvad.js` plus the live layered
+engine; the AIME/proof sets above are graded strictly against official answer
+keys, never by asking a model to solve them.
 
 **Fresh untrained sets** (`benchmarks/data/`): `freshSet` (35 IQ-style),
 `freshHard` / `freshHard2` (novel computation), `freshMulti` (20 novel
@@ -796,6 +871,43 @@ runDeepResearch()
 
 Deepthink ships as a local server too: an OpenAI/Anthropic-compatible HTTP proxy and a Model Context Protocol (MCP) server. Any tool that speaks OpenAI or Anthropic wire formats — Cursor, Aider, Claude Code, ChatGPT UI, custom scripts — can use deepthink-js as a drop-in backend, and any MCP client (Claude Desktop, Cursor, Claude Code) can call `deepthink_reason` as a tool.
 
+### Effort proxy (`npm run proxy:effort`)
+
+A second proxy on **:11436** (one above your local daemon's 11434) that
+behaves like ollama itself — every path to `$OLLAMA_HOST` byte-for-byte —
+except when the request payload carries a *thinking effort*. Then the request
+is executed by the deepthink engine and re-framed into the caller's wire
+format. Supports the effort conventions of every major client in one place:
+
+| Wire format | Where effort hides | Tier |
+|---|---|---|
+| OpenAI / xAI | `reasoning_effort: "low" \| "medium" \| "high"`, or `reasoning.effort` | as-is (minimal→off) |
+| Anthropic / Claude Code | `thinking: { type: "enabled", budget_tokens: N }` | budget <4k→low, <12k→medium, <24k→high, ≥24k→xhigh |
+| Ollama | `think: "low" \| "medium" \| "high"` (string only; boolean `think` passes through untouched) | as-is |
+| Gemini | `generationConfig.thinkingConfig.thinkingBudget` | same budget thresholds |
+| Any | `body.deepthink.effort` or `x-deepthink-effort` header | as-is |
+
+Tier → engine mapping: `minimal` d0/c0 · `low` d1/c0 · `medium` d2/c1 ·
+`high` d2/c2 · `xhigh` d3/c2, all with MCTS + sandboxed verification.
+
+```bash
+npm run proxy:effort                        # :11436 → localhost:11434
+# watch what a client actually sends (finds where effort lives):
+DEEPTHINK_CAPTURE=capture.log npm run proxy:effort
+# point any client at it: base URL http://127.0.0.1:11436
+```
+
+Both transports stream correctly: ollama NDJSON goes back as NDJSON,
+Anthropic `message_start → content_block_delta → message_stop` goes back as
+Anthropic SSE (thinking deltas included), OpenAI chunks as `chat.completion.chunk`
+with `reasoning_content`. Everything without an effort parameter — `/api/tags`,
+`/api/pull`, plain `/api/chat`, the OpenAI-compat endpoints — lands on the
+daemon untouched.
+
+> Note: recent Claude Code builds pin their gateway via managed settings, so
+> shell-environment `ANTHROPIC_BASE_URL` overrides do not apply. Use the
+> `--settings <file>` route with an `env` block, or point Cursor/Aider instead.
+
 ### HTTP proxy
 
 ```bash
@@ -896,7 +1008,7 @@ npm run mcp          # or: node src/mcp.js
 }
 ```
 
-Fully restart Claude Desktop after editing. Logs land in `%APPDATA%\Claude\logs\`.
+Restart Claude Desktop completely after editing. Logs land in `%APPDATA%\Claude\logs\`.
 
 **Cursor** — `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
 
@@ -1005,22 +1117,22 @@ Node.js ≥ 18 is required for native `fetch`, `ReadableStream`, and top-level `
 ## Troubleshooting
 
 ### ❌ Python Sandbox Errors
-If you see "Python not installed", ensure `python3` is in your system PATH. For complex math, `pip install sympy` is highly recommended.
+If you see "Python not installed", `python3` isn't on your system PATH. For math-heavy work, `pip install sympy` — the numeric verification leans on it.
 
 ### ❌ API Key Rotation Failures
-Deepthink rotates keys automatically. If all keys in an array fail, the engine will throw a terminal error. Check your `.env` or constructor `apiKeys` array.
+Deepthink rotates keys on its own. If every key in the array fails, the engine throws and stops. Check your `.env` or the `apiKeys` array you passed the constructor.
 
 ### ❌ Gemini Cookie Authentication
-Gemini Web requires specific cookies (`__Secure-1PSID`, `__Secure-1PSIDTS`). If authentication fails, ensure you are logged in via a Chromium-based browser and that your cookies haven't expired.
+Gemini Web needs specific cookies (`__Secure-1PSID`, `__Secure-1PSIDTS`). If auth fails, make sure you're logged in from a Chromium-based browser and the cookies haven't expired.
 
 ### ❌ Memory/OOM in Code Generation
-For extremely large projects, the LLM may time out or hit context limits. Try breaking the task into smaller, more specific requests or increasing the `thinkingDepth`.
+Really big projects can time out or blow the context window. Break the task into smaller, more specific asks, or bump `thinkingDepth`.
 
 ---
 
 ## Contributing
 
-We welcome contributions to make Deepthink more powerful.
+Contributions welcome.
 
 ### Adding a New Provider
 1. Create a new file in `providers/` (e.g., `providers/mistral.js`).
@@ -1028,7 +1140,7 @@ We welcome contributions to make Deepthink more powerful.
 3. Register the provider in `providers/index.js`.
 
 ### Improving Agents
-Modify files in the `thinking/` directory. Most agents follow a pattern of `Analysis → Execution → Verification`. When updating prompts, always test with both a "small" (Flash) and "large" (Opus/Pro) model to ensure robust parsing.
+Modify files in the `thinking/` directory. Most agents follow `Analysis → Execution → Verification`. After a prompt change, test against both a small (Flash) and a large (Opus/Pro) model — a prompt that parses fine on one often breaks on the other.
 
 ---
 

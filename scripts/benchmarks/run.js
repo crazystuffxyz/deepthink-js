@@ -16,7 +16,7 @@ import Deepthink from '../../dist/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.resolve(__dirname, '..', '..', 'benchmarks', 'data');
-const MODEL = 'gemma4:31b-cloud';
+const MODEL = process.env.BENCH_MODEL || 'gemma4:31b-cloud';
 
 const want = (k, isBool = false) => {
   for (let i = 0; i < process.argv.length; i++) {

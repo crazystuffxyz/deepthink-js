@@ -22,11 +22,14 @@
     "test": "node tests/runAll.js",
     "test:fast": "node tests/test_dataTypes.js && node tests/test_memory.js && node tests/test_compression.js && node tests/test_consistency.js && node tests/test_toolUse.js && node tests/test_providers.js && node tests/test_sandbox.js && node tests/test_thinkingPatterns.js && node tests/test_evolvedScoring.js && node tests/test_evolvedMutate.js && node tests/test_evolvedThinking.js",
     "test:ts": "npm run build && npm test",
+    "bench:latency": "node scripts/benchmarks/latency.js --write",
     "evolve": "node scripts/evolve.js",
+    "rl": "node scripts/rlLoop.js",
     "apply-best": "node scripts/applyBest.js",
     "probe": "node scripts/probeGeneralize.js",
     "probe-ood": "node scripts/probeOOD.js",
     "proxy": "node src/proxy.js",
+    "proxy:effort": "node src/effortProxy.js",
     "mcp": "node src/mcp.js"
   },
   "dependencies": {

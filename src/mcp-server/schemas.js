@@ -45,6 +45,10 @@ const deepResearch = {
   maxConcurrency: optNum('Max concurrent fetches'),
   files: optArr('Local files to inject as high-credibility sources'),
   academicFilter: optBool('Prefer academic sources'),
+  useOllamaSearch: optBool('Prefer Ollama web search (device daemon / API key) with SearXNG fallback'),
+  credibilityThreshold: optNum('Minimum source credibility 0-100'),
+  maxSummaries: optNum('Max sources after diversity filter'),
+  enableCritique: optBool('Run the critique-and-repair loop'),
   mode: optStr('research mode (e.g. stock)'),
   maxSteps: optNum('Max sub-steps'),
 };

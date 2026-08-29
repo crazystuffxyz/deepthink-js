@@ -22,11 +22,21 @@ function makeTimeoutFetch(timeoutMs) {
         return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
     });
 }
+// one client per host|key — the old code rebuilt new Ollama(...) on every
+// retry attempt, which drops keep-alive/agent pooling each time
+const _ollamaClientCache = new Map();
+// every non-ollama adapter calls raw fetch — give it the same hang-guard the
+// ollama wrapper has (HTTP_TIMEOUT_MS, 5 min default)
+const httpFetch = makeTimeoutFetch(Number(process.env.HTTP_TIMEOUT_MS) || 300_000);
 function buildOllamaClient(opts, apiKey) {
     const host = (opts.host || process.env.OLLAMA_HOST || def.ollama).replace(/\/api\/?$/, '').replace(/\/+$/, '') || undefined;
     const hdrs = { ...(opts.headers || {}) };
     if (apiKey)
         hdrs.Authorization = `Bearer ${apiKey}`;
+    const ck = `${host}|${apiKey || ''}|${Object.entries(hdrs).map(([k, v]) => k + '=' + v).join(',')}`;
+    const hit = _ollamaClientCache.get(ck);
+    if (hit)
+        return hit;
     const cfg = {};
     if (host)
         cfg.host = host;
@@ -34,7 +44,7 @@ function buildOllamaClient(opts, apiKey) {
         cfg.headers = hdrs;
     cfg.fetch = makeTimeoutFetch(Number(process.env.OLLAMA_TIMEOUT_MS) || 900_000);
     const ollamaClient = new Ollama(cfg);
-    return {
+    const client = {
         async chat(params) {
             const { model, messages, stream, options, think, format, keep_alive: keep, onChunk, ollamaOutput } = params;
             // ollama's API wants raw base64 in images[], not data URIs — strip the
@@ -52,8 +62,11 @@ function buildOllamaClient(opts, apiKey) {
                 options: options || {},
                 ...(think !== undefined && { think }),
                 ...(format !== undefined && { format }),
-                ...(keep !== undefined && { keep_alive: keep })
+                // default keep_alive holds the model resident between the probe /
+                // check / revision rounds — cloud models ignore it, so only locals
+                keep_alive: keep ?? (/-cloud$/i.test(String(model)) ? undefined : '30m')
             };
+            _stripUndefined(chatOpts);
             if (stream && typeof onChunk === 'function') {
                 const response = await ollamaClient.chat({ ...chatOpts, stream: true });
                 let text = '', thinking = '';
@@ -121,6 +134,8 @@ function buildOllamaClient(opts, apiKey) {
             }
         }
     };
+    _ollamaClientCache.set(ck, client);
+    return client;
 }
 function buildOpenAICompatClient(opts, apiKey) {
     const baseUrl = (opts.baseUrl || opts.host || 'https://api.openai.com/v1').replace(/\/+$/, '');
@@ -140,13 +155,13 @@ function buildOpenAICompatClient(opts, apiKey) {
             _stripUndefined(body);
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, ...(opts.headers || {}) };
             if (stream && typeof onChunk === 'function') {
-                const response = await fetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) });
+                const response = await httpFetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) });
                 if (!response.ok)
                     throw new Error(`${response.status} ${response.statusText}`);
                 return _readOpenAIStream(response, onChunk);
             }
             else {
-                const response = await fetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: false }) });
+                const response = await httpFetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: false }) });
                 if (!response.ok) {
                     const txt = await response.text();
                     throw new Error(`${response.status} ${response.statusText}: ${txt}`);
@@ -178,13 +193,13 @@ function buildCustomClient(opts, apiKey) {
             _stripUndefined(body);
             const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}`, ...(opts.headers || {}) };
             if (stream && typeof onChunk === 'function') {
-                const response = await fetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) });
+                const response = await httpFetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) });
                 if (!response.ok)
                     throw new Error(`${response.status} ${response.statusText}`);
                 return _readCustomStream(response, onChunk);
             }
             else {
-                const response = await fetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: false }) });
+                const response = await httpFetch(`${baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: false }) });
                 if (!response.ok) {
                     const txt = await response.text();
                     throw new Error(`${response.status} ${response.statusText}: ${txt}`);
@@ -220,13 +235,13 @@ function buildClaudeClient(opts, apiKey) {
             _stripUndefined(body);
             const headers = { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': version, ...(opts.headers || {}) };
             if (stream && typeof onChunk === 'function') {
-                const response = await fetch(`${baseUrl}/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) });
+                const response = await httpFetch(`${baseUrl}/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) });
                 if (!response.ok)
                     throw new Error(`${response.status} ${response.statusText}`);
                 return _readClaudeStream(response, onChunk);
             }
             else {
-                const response = await fetch(`${baseUrl}/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: false }) });
+                const response = await httpFetch(`${baseUrl}/v1/messages`, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: false }) });
                 if (!response.ok) {
                     const txt = await response.text();
                     throw new Error(`${response.status} ${response.statusText}: ${txt}`);

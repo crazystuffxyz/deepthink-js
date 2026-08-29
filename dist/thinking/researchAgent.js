@@ -1,6 +1,7 @@
 // thinking/researchAgent.ts
 import { marked } from 'marked';
 import { getSearchResults, getFetchResults } from '../internet/interactWithInternet.js';
+import { reformulateQuery } from '../internet/ollamaSearch.js';
 import { extractLocalFile } from '../internet/extractFromUrl.js';
 import { generateCitation } from '../internet/extractCitation.js';
 import path from 'node:path';
@@ -1369,6 +1370,21 @@ export default async function runDeepResearch(callChat, topic, opts = {}) {
             const retryResults = await crawlerAgent(retryQueries, Math.max(2, opts.maxConcurrency ?? 5), opts);
             verifiedSources = verificationAgent(retryResults, opts.credibilityThreshold ?? 35, opts);
             stepSummary.step3 = { urlsAfterFilter: verifiedSources.length, retried: true };
+        }
+        // 0-raw-results retry: search returned NOTHING at all (tier down or
+        // over-specified queries). the old gate `rawResults.length > 0` skipped
+        // this path entirely and the run died here. one broadened retry with
+        // keyword-normalised queries gives the layered engine a second shot.
+        if (verifiedSources.length === 0 && rawResults.length === 0) {
+            const broadened = queries.map((q) => {
+                const raw = typeof q === 'string' ? q : (q?.query || '');
+                const rf = reformulateQuery(raw) || String(raw).replace(/["']/g, '').trim();
+                return (typeof q === 'string') ? rf : { ...q, query: rf };
+            });
+            log({ level: 'info', msg: `[STEP 3] Search returned 0 raw results — retrying crawl with broadened queries`, source: 'researchAgent', ts: Date.now() });
+            const retryResults = await crawlerAgent(broadened, Math.max(2, opts.maxConcurrency ?? 5), opts);
+            verifiedSources = verificationAgent(retryResults, opts.credibilityThreshold ?? 35, opts);
+            stepSummary.step3 = { urlsAfterFilter: verifiedSources.length, retried: true, broadened: true };
         }
         if (verifiedSources.length === 0)
             return { report: `No credible sources found for: "${topic}". Try lowering credibilityThreshold or broadening queries.`, references: [], claimCount: 0, stepSummary, success: false };

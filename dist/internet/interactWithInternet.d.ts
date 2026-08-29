@@ -7,6 +7,8 @@ type SearchResult = {
 export declare function getFetchResults(url: string): Promise<string>;
 export declare function getSearchResults(query: string, opts?: {
     useOllamaSearch?: boolean;
+    maxResults?: number;
+    reformulate?: boolean;
     [k: string]: unknown;
 }): Promise<SearchResult[] | null>;
 export {};

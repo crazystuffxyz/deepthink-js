@@ -24,7 +24,7 @@ async function getWorkingSearxngInstances() {
             process.stdout.write('[mullvad] Fetching SearXNG instance list from searx.space...\n');
         const t0 = Date.now();
         try {
-            const { data } = await axios.get('https://searx.space/data/instances.json');
+            const { data } = await axios.get('https://searx.space/data/instances.json', { timeout: 3000 });
             const elapsed = Date.now() - t0;
             const workingUrls = Object.keys(data.instances).filter(url => {
                 const instance = data.instances[url];

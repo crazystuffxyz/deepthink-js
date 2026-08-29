@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.1
+
+### Added
+- **Layered web search** — `getSearchResults` now walks SearXNG → device daemon (`$OLLAMA_HOST/api/experimental/web_search`, keyless when the machine is signed in — probed once via free `POST /api/me`) → ollama.com REST with `OLLAMA_API_KEY` (429 gets one spaced retry) → authenticated JS SDK, and if every tier comes back empty, one keyword-reformulated retry. The old "Ollama search unavailable (no API key, client tier unusable)" dead end is gone; a missing key is a one-line notice.
+- **Effort proxy** (`npm run proxy:effort`, `:11436`) — ollama-faithful passthrough that detects a thinking effort in the payload (OpenAI/xAI `reasoning_effort`, Anthropic `thinking.budget_tokens`, Gemini `thinkingBudget`, ollama `think` string levels, or `deepthink.effort`/`x-deepthink-effort`) and reruns the request through the deepthink engine, re-framed as ollama NDJSON, OpenAI chunks, Anthropic SSE, or Gemini candidates. `DEEPTHINK_CAPTURE` logs inbound bodies for payload archaeology.
+- **RL loop** (`npm run rl`) — `scripts/rlLoop.js` runs light-budget prompt-evolution cycles (configurable pop/gens/mini-batch), re-scores winners on the full bank + OOD holdout, guards against regression before promoting, and mirrors the champion to `data/evolved/rl-best.json` for `evolvedApply`.
+- **Latency harness** (`npm run bench:latency`) — plain vs `dt:d1c0` vs `dt:d2c1` wall clock (p50/p90/mean, failures excluded) on a fixed question set; writes `benchmarks/results/latency.summary.json`.
+- **MCP `deep_research` knobs** — `useOllamaSearch`, `credibilityThreshold`, `maxSummaries`, `enableCritique` are now accepted by the tool schema (they existed in the engine but zod stripped them before forwarding).
+
+### Changed
+- **Search tiers** — `ollamaSearch.ts` rewritten around the daemon tier; the SDK's dead string-signature shim removed (0.6.x is object-only); the SDK tier now carries `Authorization` headers so it can actually authenticate; `max_results` threading fixed for the daemon/api-key tiers.
+- **Engine speed** — the think-probe wave and the sandbox codegen chain run concurrently instead of serially (7–10 fewer LLM round-trips on the critical path); MCTS approach generation runs all candidates in parallel with pre-assigned distinct domains; Ollama clients are pooled per host|key instead of rebuilt per retry; local models get a default `keep_alive: '30m'` (cloud models excluded); blind checkers get `num_predict: 1000` (was 150 — truncated re-derivations produced spurious NO verdicts and revision churn); all non-ollama provider adapters use a hang-guarded fetch.
+- **Research pipeline** — extracted pages are memoized so extraction and citation-fetch stop double-fetching every URL; a crawl that returns **zero** raw results now gets a broadened-query retry instead of dying; the SearXNG instance-list fetch is capped at 3 s.
+- **`deepthink_web_search` (MCP)** — now routes through the layered engine (device daemon → key tier → SearXNG → reformulated retry) with raw DuckDuckGo scraping demoted to last-resort fallback.
+- **Benchmark model override** — `run.js` honors `BENCH_MODEL` like the other runners.
+
 ## v2.0.0
 
 ### Added
@@ -168,7 +184,7 @@ Same scores as the old prompt on both sets — no regression — and the new pro
 ## v1.8.4
 
 ### Fixed
-- **P/E multiples never harvested as price** — run 11: "trades at 27 times forward earnings" is a valuation multiple, but the `trades at` anchor captured 27.00 as the current price and the whole model computed against it. `harvestAll` gains a post-match banned check (25 chars after the capture): `x` directly after the number, `times` (word-bounded), `forward earnings`, `multiple`, `p/e`, `pe ratio` all disqualify. `scanPriceForwardAll` gets the same guard, and the conformance sweep's price rules reject a trailing `x` and ban `times`/`multiple`.
+- **P/E multiples never harvested as price** — run 11: "trades at 27 times forward earnings" is a valuation multiple, but the `trades at` anchor captured 27.00 as the current price and the whole model computed against it. `harvestAll` now checks the 25 chars after each capture for banned tokens: `x` directly after the number, `times` (word-bounded), `forward earnings`, `multiple`, `p/e`, `pe ratio` all disqualify. `scanPriceForwardAll` runs the same guard, and the conformance sweep's price rules reject a trailing `x` and ban `times`/`multiple`.
 
 ## v1.8.3
 

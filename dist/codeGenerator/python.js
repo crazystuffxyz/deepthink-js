@@ -95,26 +95,23 @@ export async function runMCTSApproaches(callChat, task, inputText, opts = {}) {
     const isSimpleMath = /calculate|multiply|add|subtract|sum/i.test(task) && task.length < 50;
     if (isSimpleMath)
         return null;
-    const NUM = opts.mctsNumApproaches ?? 4;
+    const NUM = Math.min(opts.mctsNumApproaches ?? 4, MATH_DOMAINS.length);
     const THRESHOLD = opts.mctsConsensusThreshold ?? 3;
-    const approaches = [];
-    const usedDomains = [];
-    for (let i = 0; i < NUM; i++) {
-        const priorNote = approaches.length
-            ? `\nAlready used: ${approaches.map(a => `[${a.domain}]`).join(', ')}. Use a different domain from: ${MATH_DOMAINS.filter(d => !usedDomains.includes(d)).join(', ')}`
-            : `\nAvailable domains: ${MATH_DOMAINS.join(', ')}`;
+    // domains are pre-assigned so all approach generations run in parallel —
+    // uniqueness is guaranteed by construction, not by serial "already used"
+    const domains = MATH_DOMAINS.slice(0, NUM);
+    const plans = await Promise.allSettled(domains.map(async (domain, i) => {
         const r = await callChat([{
                 role: 'system',
-                content: 'Generate ONE unique algorithmic approach using a specific mathematical domain.\nOutput ONLY valid JSON: {"name":"...","domain":"...","algorithm":"..."}\nNo prose, no markdown fences.',
-            }, { role: 'user', content: `Task: ${task}\nProblem: ${inputText}${priorNote}\nApproach ${i + 1}:` }], false, null, { ...opts, think: false, samplingProfile: 'json' });
-        try {
-            const p = JSON.parse(stripCodeFences(r.content || '{}'));
-            if (p.algorithm && p.domain) {
-                approaches.push(p);
-                usedDomains.push(p.domain);
-            }
-        }
-        catch { /* ignore */ }
+                content: 'Generate ONE unique algorithmic approach using the GIVEN mathematical domain.\nOutput ONLY valid JSON: {"name":"...","domain":"...","algorithm":"..."}\nNo prose, no markdown fences.',
+            }, { role: 'user', content: `Task: ${task}\nProblem: ${inputText}\nDomain to use (required): ${domain}\nApproach ${i + 1}:` }], false, null, { ...opts, think: false, samplingProfile: 'json' });
+        const p = JSON.parse(stripCodeFences(r.content || '{}'));
+        return { name: p.name || domain, domain: p.domain || domain, algorithm: p.algorithm || '' };
+    }));
+    const approaches = [];
+    for (const s of plans) {
+        if (s.status === 'fulfilled' && s.value.algorithm)
+            approaches.push(s.value);
     }
     if (new Set(approaches.map(a => a.domain)).size < 2)
         return null;

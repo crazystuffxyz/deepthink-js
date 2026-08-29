@@ -788,7 +788,7 @@ quality, self-correction, token efficiency) and worsen none. The current
 pipeline lands +1 on AIME 2024-I (5/5 vs 4/5), matches everywhere else,
 and self-corrects 11 problems — while the check-loop escapes cut IMO
 token burn from 173–253k/problem (v1.4, escape bug) to ~22k with ≤2
-revisions. Full per-run logs land in `benchmarks/results/`.
+revisions. Full per-run logs land in the local `benchmarks/results/` (gitignored).
 
 ---
 

@@ -20,9 +20,17 @@ Session goal: ship the deepthink-js speed/search/proxy/bench/RL upgrade, tested 
 - gemma4 smoke: `17*23 → 391` (d2+c1+mcts, 11.3s); full suite 19/19; test:fast 100%.
 - Search smoke: layered engine 5 results in 624ms via device tier (no key set); cached rerun 0ms; reformulate path live.
 
+## Post-review round (2026-08-29 late)
+
+- Proxy path parity completed: full `/api/*` ollama surface listed verbatim + `/v1/responses` (codex Responses API, full SSE event chain) + `/v1/completions` (legacy). `max` is its own tier now (d3/c3), `ultracode` aliases xhigh, Claude budget thresholds extend to ≥48k→max.
+- `GET /_capture` ring inspector: last 50 bodies with `effortFields` (where effort hides per client) + resolved tier.
+- **Verified live**: codex 0.150 `codex exec` → proxy → deepthink at `reasoning.effort=xhigh` completed a full agent turn (17,765 tokens). Codex default model resolves to gpt-5.6-sol — pass `-c model="gemma4:31b-cloud"` to run on the local daemon's lineup.
+- Claude Code gateway is pinned by `~/.claude/settings.json` env (`http://localhost:11435` today) — shell/`--settings` overrides lose. To route Claude Code through this proxy: edit that one line to `http://localhost:11436`, then `/effort max` + prompt, then read `/_capture`.
+- Proxy suite: 13/13 pass (adds Responses + capture-ring cases); README rewired.
+
 ## Notes for the operator
 
-- Claude Code on this machine pins its gateway via managed settings; `--settings <file>` env blocks pass the model name through but still hit first-party (observed ~$0.18 per hello-world). Point Cursor/Aider at the proxy instead, or proxy via `DEEPTHINK_CAPTURE` to log payload shapes.
+- Claude Code's gateway lives in the `env` block of `~/.claude/settings.json` (was `http://localhost:11435`); shell and `--settings` overrides lose to it. Flip that one line to `http://localhost:11436` to route Claude Code through this proxy (see `/_capture`).
 - Kill spawned test servers by exact PID / TaskStop only — never `taskkill /T` (can kill the Claude Code host itself). Logged to `~/.claude/feedback/corrections.log`.
 
 ## Resume

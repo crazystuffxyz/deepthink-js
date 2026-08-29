@@ -873,40 +873,70 @@ Deepthink ships as a local server too: an OpenAI/Anthropic-compatible HTTP proxy
 
 ### Effort proxy (`npm run proxy:effort`)
 
-A second proxy on **:11436** (one above your local daemon's 11434) that
-behaves like ollama itself — every path to `$OLLAMA_HOST` byte-for-byte —
-except when the request payload carries a *thinking effort*. Then the request
-is executed by the deepthink engine and re-framed into the caller's wire
-format. Supports the effort conventions of every major client in one place:
+A second proxy on **:11436** (one above your local daemon's 11434) with the
+**exact same path surface as ollama**, plus the OpenAI, Anthropic, Responses
+(codex), legacy-completions and Gemini wire formats:
 
-| Wire format | Where effort hides | Tier |
+```
+/api/version  /api/tags  /api/ps  /api/show  /api/pull  /api/push  /api/copy
+/api/delete   /api/create  /api/embed  /api/embeddings  /api/me  /api/blobs/*
+/api/chat     /api/generate          /api/web_search  /api/web_fetch  /api/experimental/*
+/v1/models    /v1/chat/completions   /v1/responses (codex)  /v1/completions
+/v1/messages  /v1beta/models/{model}:generateContent[|streamGenerateContent]
+```
+
+Every request proxies straight through to `$OLLAMA_HOST` byte-for-byte unless
+the payload carries a *thinking effort* — then the deepthink engine runs it
+and re-frames the response into the caller's wire format:
+
+| Wire format | Where effort hides | Tiers seen |
 |---|---|---|
-| OpenAI / xAI | `reasoning_effort: "low" \| "medium" \| "high"`, or `reasoning.effort` | as-is (minimal→off) |
-| Anthropic / Claude Code | `thinking: { type: "enabled", budget_tokens: N }` | budget <4k→low, <12k→medium, <24k→high, ≥24k→xhigh |
-| Ollama | `think: "low" \| "medium" \| "high"` (string only; boolean `think` passes through untouched) | as-is |
+| OpenAI / xAI | `reasoning_effort`, `reasoning.effort`, `output_config.effort` | minimal/low/medium/high/xhigh, `ultracode`→xhigh |
+| Anthropic / Claude Code | `thinking: { type: "enabled", budget_tokens: N }` | <4k low, <12k medium, <24k high, <48k xhigh, ≥48k max |
+| Ollama | `think: "low" \| "medium" \| "high"` (boolean `think` passes through untouched) | as-is |
 | Gemini | `generationConfig.thinkingConfig.thinkingBudget` | same budget thresholds |
-| Any | `body.deepthink.effort` or `x-deepthink-effort` header | as-is |
+| Any | `body.deepthink.effort`, `body.effort`, `x-deepthink-effort` header | as-is (low/medium/high/xhigh/max) |
 
 Tier → engine mapping: `minimal` d0/c0 · `low` d1/c0 · `medium` d2/c1 ·
-`high` d2/c2 · `xhigh` d3/c2, all with MCTS + sandboxed verification.
+`high` d2/c2 · `xhigh` d3/c2 · `max` d3/c3, all with MCTS + sandboxed
+verification.
+
+**Seeing the effort payloads** — every request body lands in a ring buffer;
+open `http://127.0.0.1:11436/_capture` and each entry shows `effortFields`
+(every field the client parked an effort in and what it parsed to) plus the
+resolved tier. To log to disk too, start with `DEEPTHINK_CAPTURE=capture.log`.
 
 ```bash
 npm run proxy:effort                        # :11436 → localhost:11434
-# watch what a client actually sends (finds where effort lives):
-DEEPTHINK_CAPTURE=capture.log npm run proxy:effort
-# point any client at it: base URL http://127.0.0.1:11436
+curl -s localhost:11436/_capture | node -e "..."   # read where effort hides
 ```
 
-Both transports stream correctly: ollama NDJSON goes back as NDJSON,
-Anthropic `message_start → content_block_delta → message_stop` goes back as
-Anthropic SSE (thinking deltas included), OpenAI chunks as `chat.completion.chunk`
-with `reasoning_content`. Everything without an effort parameter — `/api/tags`,
-`/api/pull`, plain `/api/chat`, the OpenAI-compat endpoints — lands on the
-daemon untouched.
+Client wiring that actually sticks:
 
-> Note: recent Claude Code builds pin their gateway via managed settings, so
-> shell-environment `ANTHROPIC_BASE_URL` overrides do not apply. Use the
-> `--settings <file>` route with an `env` block, or point Cursor/Aider instead.
+```bash
+# codex CLI — per-run overrides, nothing persisted:
+codex exec -c model_provider=deepthink \
+  -c 'model_providers.deepthink.name="deepthink"' \
+  -c 'model_providers.deepthink.base_url="http://127.0.0.1:11436/v1"' \
+  -c 'model_providers.deepthink.env_key="OPENAI_API_KEY"' \
+  -c 'model_reasoning_effort="high"' 'hello world'
+# (env OPENAI_API_KEY=dummy is enough; add wire_api="chat" to skip /v1/responses)
+
+# Claude Code — env/shell overrides lose to ~/.claude/settings.json env, so
+# edit that file's env block: ANTHROPIC_BASE_URL: http://localhost:11436
+# (one line, done once). Then /effort max + a prompt, and inspect /_capture.
+```
+
+Both transports stream correctly in every framing: ollama NDJSON as NDJSON
+(never SSE comments), Anthropic `message_start → content_block_delta →
+message_stop`, OpenAI `chat.completion.chunk` with `reasoning_content`,
+Responses `response.created → ..._text.delta → response.completed`. Anything
+without an effort parameter — `/api/tags`, `/api/pull`, plain `/api/chat` —
+lands on the daemon untouched.
+
+> Note: recent Claude Code builds resolve `ANTHROPIC_BASE_URL` from the
+> `env` block of `~/.claude/settings.json`, which beats shell environment
+> and `--settings` overrides. Edit that block to re-point it.
 
 ### HTTP proxy
 

@@ -53,9 +53,28 @@ if (process.env.DEEPTHINK_CAPTURE) {
   capStream = fs.createWriteStream(p, { flags: 'a' });
   console.error(`[effortProxy] capturing request bodies to ${p}`);
 }
+// always-on ring (last 50) so GET /_capture can show where effort lives
+// even without DEEPTHINK_CAPTURE
+const CAP_RING_MAX = 50;
+const capRing = [];
 function capture(req, body) {
-  if (!capStream) return;
-  capStream.write(JSON.stringify({ ts: new Date().toISOString(), method: req.method, url: req.url, headers: req.headers, body }) + '\n');
+  const entry = { ts: new Date().toISOString(), method: req.method, url: req.url, body };
+  const seen = [];
+  const deep = body?.deepthink?.effort; if (typeof deep === 'string') seen.push(['deepthink.effort', deep]);
+  const hh = req.headers?.['x-deepthink-effort']; if (typeof hh === 'string') seen.push(['x-deepthink-effort', hh]);
+  if (typeof body?.reasoning_effort === 'string') seen.push(['reasoning_effort', body.reasoning_effort]);
+  if (typeof body?.reasoning?.effort === 'string') seen.push(['reasoning.effort', body.reasoning.effort]);
+  if (typeof body?.think === 'string') seen.push(['think', body.think]);
+  if (body?.thinking?.budget_tokens) seen.push(['thinking.budget_tokens', body.thinking.budget_tokens]);
+  if (typeof body?.output_config?.effort === 'string') seen.push(['output_config.effort', body.output_config.effort]);
+  if (typeof body?.effort === 'string') seen.push(['effort', body.effort]);
+  const g = body?.generationConfig || body?.generation_config || {};
+  const tb = g?.thinkingConfig?.thinkingBudget; if (tb) seen.push(['thinkingConfig.thinkingBudget', tb]);
+  entry.effortFields = seen;
+  entry.effort = extractEffort(body, req.headers);
+  capRing.push(entry);
+  if (capRing.length > CAP_RING_MAX) capRing.shift();
+  if (capStream) capStream.write(JSON.stringify({ ...entry, headers: req.headers }) + '\n');
 }
 
 const app = Fastify({ logger: false });
@@ -82,7 +101,8 @@ const TIERS = {
   medium: { depth: 2, checks: 1, mcts: true },
   high: { depth: 2, checks: 2, mcts: true },
   xhigh: { depth: 3, checks: 2, mcts: true },
-  max: { depth: 3, checks: 2, mcts: true },
+  ultracode: { depth: 3, checks: 2, mcts: true },
+  max: { depth: 3, checks: 3, mcts: true },
 };
 
 function budgetToTier(b) {
@@ -90,27 +110,31 @@ function budgetToTier(b) {
   if (b < 4096) return 'low';
   if (b < 12288) return 'medium';
   if (b < 24576) return 'high';
-  return 'xhigh';
+  if (b < 49152) return 'xhigh';
+  return 'max';
 }
 
 // scan every place a client might park an effort parameter
 function extractEffort(body, headers) {
   if (!body || typeof body !== 'object') return null;
-  const explicit = body.deepthink?.effort;
-  if (typeof explicit === 'string') return explicit.toLowerCase();
+  const deep = body.deepthink?.effort;
+  if (typeof deep === 'string') return deep.toLowerCase();
   const h = headers?.['x-deepthink-effort'];
   if (typeof h === 'string') return h.toLowerCase();
   if (typeof body.reasoning_effort === 'string') return body.reasoning_effort.toLowerCase(); // OpenAI / xAI
-  if (typeof body.reasoning?.effort === 'string') return body.reasoning.effort.toLowerCase();
+  const re = body.reasoning?.effort;
+  if (typeof re === 'string') return re.toLowerCase(); // Responses API (codex)
   if (typeof body.think === 'string') return body.think.toLowerCase(); // ollama think levels
   if (body.thinking && typeof body.thinking === 'object'
     && (body.thinking.type === 'enabled' || body.thinking.budget_tokens)) {
-    return budgetToTier(Number(body.thinking.budget_tokens || 0)) || 'medium'; // Anthropic
+    // Anthropic budget → deepthink tier; max (≥48k) is its own seat
+    return budgetToTier(Number(body.thinking.budget_tokens || 0)) || 'medium';
   }
+  if (typeof body.output_config?.effort === 'string') return body.output_config.effort.toLowerCase(); // newer OpenAI-style
+  if (typeof body.effort === 'string') return body.effort.toLowerCase(); // generic
   const g = body.generationConfig || body.generation_config || {};
   const tb = g.thinkingConfig?.thinkingBudget ?? g.thinking_config?.thinking_budget ?? body.thinkingConfig?.thinkingBudget;
   if (Number(tb) > 0) return budgetToTier(Number(tb)) || 'medium'; // Gemini
-  if (typeof body.effort === 'string') return body.effort.toLowerCase();
   return null;
 }
 
@@ -133,6 +157,16 @@ function normalizeRequest(body) {
     });
     return { prompt: parts.join('\n\n'), system, model: body.model, stream: body.stream === true };
   }
+  if (body.input !== undefined) { // OpenAI Responses API (codex)
+    const toTxt = (c) => typeof c === 'string' ? c
+      : (Array.isArray(c) ? c.map((p) => p?.text ?? p?.content ?? '').join('\n') : String(c?.text ?? ''));
+    const items = Array.isArray(body.input) ? body.input : [{ role: 'user', content: body.input }];
+    const parts = items.map((m) => {
+      const role = m?.role === 'assistant' ? 'assistant' : (m?.role || 'user');
+      return `<${role}>\n${toTxt(m?.content)}\n</${role}>`;
+    });
+    return { prompt: parts.join('\n\n'), system: body.instructions || '', model: body.model, stream: body.stream === true };
+  }
   if (Array.isArray(body.contents)) { // gemini
     const sys = body.systemInstruction?.parts?.map((p) => p.text).join('\n')
       || body.system_instruction?.parts?.map((p) => p.text).join('\n') || '';
@@ -153,6 +187,7 @@ function usageOf(trace) {
   for (const e of trace.toJSON()) { if (e.promptTokens) p += e.promptTokens; if (e.responseTokens) c += e.responseTokens; }
   return { prompt_tokens: p, completion_tokens: c, total_tokens: p + c };
 }
+const usageOf2 = (u) => u;
 
 // ---------- passthrough ----------
 
@@ -289,6 +324,58 @@ async function engineReply(req, reply, framing, body, effort) {
         usage: usageOf(trace),
       });
     }
+    if (framing === 'responses') {
+      const rid = `resp_${randomUUID()}`;
+      if (wantStream) {
+        let seq = 0;
+        const emit = (obj) => { if (!reply.raw.destroyed) reply.raw.write(`event: ${obj.type}\ndata: ${JSON.stringify(obj)}\n\n`); };
+        const base = { id: rid, object: 'response', created_at: Math.floor(t0 / 1000), model, usage: null };
+        emit({ type: 'response.created', sequence_number: seq++, response: { ...base, status: 'in_progress', output: [] } });
+        emit({ type: 'response.in_progress', sequence_number: seq++, response: { ...base, status: 'in_progress', output: [] } });
+        let reasoningAdded = false, messageAdded = false, reasoningTxt = '', text = '';
+        const rItem = () => ({ type: 'reasoning', id: `rs_${rid.slice(5)}`, summary: [] });
+        const mItem = () => ({ type: 'message', id: `msg_${rid.slice(5)}`, status: 'in_progress', role: 'assistant', content: [] });
+        await engine.generate(norm.prompt, { ...genOpts, onChunk: (c2, meta) => {
+          const text2 = String(c2 || '').replace(MARKER, '');
+          if (!text2 || reply.raw.destroyed) return;
+          if (meta.kind === 'thinking') {
+            if (!reasoningAdded) { reasoningAdded = true; emit({ type: 'response.output_item.added', sequence_number: seq++, output_index: 0, item: rItem() }); }
+            reasoningTxt += text2;
+            emit({ type: 'response.reasoning_summary_text.delta', sequence_number: seq++, item_id: `rs_${rid.slice(5)}`, output_index: 0, delta: text2 });
+          } else {
+            if (!messageAdded) { messageAdded = true; emit({ type: 'response.output_item.added', sequence_number: seq++, output_index: 1, item: mItem() }); }
+            text += text2;
+            emit({ type: 'response.output_text.delta', sequence_number: seq++, item_id: `msg_${rid.slice(5)}`, output_index: 1, content_index: 0, delta: text2 });
+          }
+        } });
+        const u = usageOf(trace);
+        const output = [];
+        if (reasoningAdded) output.push({ type: 'reasoning', id: `rs_${rid.slice(5)}`, summary: [{ type: 'summary_text', text: reasoningTxt }] });
+        if (messageAdded) output.push({ type: 'message', id: `msg_${rid.slice(5)}`, status: 'completed', role: 'assistant', content: [{ type: 'output_text', text, annotations: [] }] });
+        emit({ type: 'response.completed', sequence_number: seq++,
+          response: { id: rid, object: 'response', created_at: Math.floor(t0 / 1000), status: 'completed', model, output,
+            usage: { input_tokens: u.prompt_tokens, output_tokens: u.completion_tokens, total_tokens: u.prompt_tokens + u.completion_tokens } } });
+        reply.raw.end();
+        return reply;
+      }
+      const r = await engine.generate(norm.prompt, genOpts);
+      const u = usageOf(trace);
+      return reply.send({
+        id: rid, object: 'response', created_at: Math.floor(t0 / 1000), status: 'completed', model,
+        instructions: norm.system || null,
+        output: [{ type: 'message', id: `msg_${rid.slice(5)}`, status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: String(r).replace(MARKER, ''), annotations: [] }] }],
+        usage: { input_tokens: u.prompt_tokens, output_tokens: u.completion_tokens, total_tokens: u.prompt_tokens + u.completion_tokens },
+      });
+    }
+    if (framing === 'completions') { // legacy OpenAI text completions
+      const r = await engine.generate(norm.prompt, genOpts);
+      const u = usageOf(trace);
+      return reply.send({
+        id: `cmpl-${randomUUID()}`, object: 'text_completion', created: Math.floor(t0 / 1000), model,
+        choices: [{ text: String(r).replace(MARKER, ''), index: 0, finish_reason: 'stop' }],
+        usage: usageOf2(u),
+      });
+    }
     if (framing === 'gemini') {
       const r = await engine.generate(norm.prompt, genOpts);
       const candidate = { candidates: [{ content: { parts: [{ text: String(r).replace(MARKER, '') }], role: 'model' }, finishReason: 'STOP' }] };
@@ -371,6 +458,7 @@ app.get('/health', async () => ({ ok: true, inflight, upstream: OLLAMA_HOST, cap
 async function gate(req, reply, framing) {
   const body = req.body;
   if (req.method !== 'POST' || body === undefined || Buffer.isBuffer(body)) return passthrough(req, reply);
+  capture(req, body); // ring + optional disk capture: see where effort hides
   const effort = extractEffort(body, req.headers);
   if (!effort) return passthrough(req, reply);
   reply.header('x-deepthink-effort', String(effort));
@@ -387,6 +475,8 @@ app.post('/api/chat', async (req, reply) => gate(req, reply, 'chat'));
 app.post('/api/generate', async (req, reply) => gate(req, reply, 'generate'));
 app.post('/v1/chat/completions', async (req, reply) => gate(req, reply, 'openai'));
 app.post('/v1/messages', async (req, reply) => gate(req, reply, 'anthropic'));
+app.post('/v1/responses', async (req, reply) => gate(req, reply, 'responses'));
+app.post('/v1/completions', async (req, reply) => gate(req, reply, 'completions'));
 app.post('/v1beta/models/:model/:action', async (req, reply) => {
   if (!String(req.params.action || '').includes('generate')) return passthrough(req, reply);
   return gate(req, reply, 'gemini');
@@ -396,6 +486,24 @@ app.get('/v1/models', async () => {
   const tags = list ? await list.json().catch(() => ({ models: [] })) : { models: [] };
   return { object: 'list', data: (tags.models || []).map((m) => ({ id: m.name, object: 'model', created: 0, owned_by: 'ollama' })) };
 });
+
+// full ollama path parity — every documented daemon route forwards verbatim
+// (effort-gated methods are registered above; these are pure passthrough)
+for (const r of [
+  '/api/version', '/api/tags', '/api/ps', '/api/show', '/api/pull', '/api/push',
+  '/api/copy', '/api/delete', '/api/create', '/api/embed', '/api/embeddings',
+  '/api/me', '/api/web_search', '/api/web_fetch', '/api/openai/*', '/api/openai',
+  '/api/experimental/*', '/api/blobs/*',
+]) {
+  app.all(r, async (req, reply) => passthrough(req, reply));
+}
+
+// capture inspector: shows exactly where each client parks its effort
+app.get('/_capture', async () => ({
+  count: capRing.length,
+  note: 'ring holds the last 50 request bodies; effortFields lists where the effort parameter was found and what it parsed to',
+  entries: capRing,
+}));
 
 // everything else rides untouched to the daemon
 app.all('/*', async (req, reply) => passthrough(req, reply));

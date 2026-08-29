@@ -62,6 +62,19 @@ const post = async (path, payload, timeoutMs) => {
   ok('generate stream returns generate-shaped NDJSON + done', lines.length > 0 && last?.done === true && typeof last.response === 'string', `last=${JSON.stringify(last).slice(0, 100)}`);
   ok('no SSE comment lines inside NDJSON stream', lines.every((l) => typeof l === 'object'));
 }
+// 7. codex wire: /v1/responses with reasoning.effort -> engine, Responses events
+{
+  const r = await post('/v1/responses', { model: 'gemma4:31b-cloud', instructions: 'Answer tersely.', input: [{ role: 'user', content: [{ type: 'input_text', text: 'What is 2+2? one word' }] }], stream: true, reasoning: { effort: 'low' }, store: false }, 150_000);
+  const text = await r.text();
+  ok('responses created+completed events', text.includes('"type":"response.created"') && text.includes('"type":"response.completed"'), text.slice(0, 120));
+  ok('responses output_text.delta present', text.includes('response.output_text.delta'));
+}
+// 8. /_capture shows where effort was found
+{
+  const r = await fetch(base + '/_capture');
+  const j = await r.json();
+  ok('/_capture ring exposes effort fields', j.count >= 5 && typeof j.entries[0].effort === 'string', `count=${j.count}`);
+}
 
 console.log(`\n  ${pass} pass, ${fail} fail`);
 await app.close();

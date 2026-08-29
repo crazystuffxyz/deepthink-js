@@ -28,8 +28,9 @@
     "apply-best": "node scripts/applyBest.js",
     "probe": "node scripts/probeGeneralize.js",
     "probe-ood": "node scripts/probeOOD.js",
-    "proxy": "node src/proxy.js",
+    "proxy": "node src/effortProxy.js",
     "proxy:effort": "node src/effortProxy.js",
+    "proxy:engine": "node src/proxy.js",
     "mcp": "node src/mcp.js"
   },
   "dependencies": {

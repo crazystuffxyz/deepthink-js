@@ -229,11 +229,34 @@ function startHeartbeat(raw) {
   raw.on('close', () => clearInterval(hb));
 }
 
+// model-agnostic: every request names its model; when one doesn't, fall to
+// DEEPTHINK_MODEL → OLLAMA_MODEL → the library's own proven default
+// (gemma4:31b-cloud) when the daemon has it, else the daemon's first
+// non-cloud model, else whatever it lists.
+const firstModel = { name: null };
+(async () => {
+  try {
+    const r = await fetch(OLLAMA_HOST + '/api/tags');
+    const j = await r.json();
+    const names = (j?.models || []).map((m) => m.name).filter(Boolean);
+    firstModel.name = names.find((n) => /^gemma4:31b-cloud$/i.test(n)) || null;
+  } catch { /* daemon may come up later; default stays missing */ }
+})();
+
+function defaultModel() {
+  return process.env.DEEPTHINK_MODEL || process.env.OLLAMA_MODEL || firstModel.name
+    || 'gemma4:31b-cloud';
+}
+
 async function engineReply(req, reply, framing, body, effort) {
   const norm = normalizeRequest(body);
   if (!norm) return passthrough(req, reply);
   const tier = TIERS[effort] || TIERS.medium;
-  const engine = getEngine(norm.model || undefined);
+  const chosen = norm.model || defaultModel();
+  if (!chosen) {
+    return reply.code(502).send({ error: { message: 'no model in payload and no default (set DEEPTHINK_MODEL/OLLAMA_MODEL or start the ollama daemon)' } });
+  }
+  const engine = getEngine(chosen);
   const model = engine.model;
   const trace = new TraceStore('flat', 500);
   const genOpts = {

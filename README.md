@@ -62,7 +62,7 @@ Deepthink wraps any LLM provider with a stack of reasoning infrastructure:
 ## What's new in v2.0.1
 
 - **Layered web search** — SearXNG → signed-in device daemon (`/api/experimental/web_search`, no key needed) → ollama.com API key tier → JS SDK → keyword-reformulated retry. A missing `OLLAMA_API_KEY` is a one-line notice, never an error. Query results cached 10 min; page extraction memoized per URL.
-- **Effort proxy** (`npm run proxy:effort`, `:11436`) — ollama-compatible passthrough that hijacks thinking-effort payloads (OpenAI `reasoning_effort`, Anthropic `thinking.budget_tokens`, Gemini `thinkingBudget`, ollama `think` levels) and runs them through the deepthink engine in the caller's wire format.
+- **Effort proxy** (`npm run proxy`, `:11436`) — ollama-compatible passthrough that hijacks thinking-effort payloads (OpenAI `reasoning_effort`, Anthropic `thinking.budget_tokens`, Gemini `thinkingBudget`, ollama `think` levels) and runs them through the deepthink engine in the caller's wire format.
 - **Faster pipeline** — probe wave and sandbox codegen run concurrently; MCTS approach generation parallelized with pre-assigned domains; Ollama clients pooled per host; 30-minute model keep-alive on local daemons; blind checkers get 1000 tokens to actually re-derive.
 - **RL loop** (`npm run rl`) — light-budget prompt evolution with an OOD probe, persistent state, a regression-guard that protects the deployed champion, and automatic promotion into `data/evolved/rl-best`.
 - **Latency harness** (`npm run bench:latency`) — p50/p90 wall clock + token accounting for plain vs deepthink presets.
@@ -871,7 +871,7 @@ runDeepResearch()
 
 Deepthink ships as a local server too: an OpenAI/Anthropic-compatible HTTP proxy and a Model Context Protocol (MCP) server. Any tool that speaks OpenAI or Anthropic wire formats — Cursor, Aider, Claude Code, ChatGPT UI, custom scripts — can use deepthink-js as a drop-in backend, and any MCP client (Claude Desktop, Cursor, Claude Code) can call `deepthink_reason` as a tool.
 
-### Effort proxy (`npm run proxy:effort`)
+### Effort proxy (the default `npm run proxy`)
 
 A second proxy on **:11436** (one above your local daemon's 11434) with the
 **exact same path surface as ollama**, plus the OpenAI, Anthropic, Responses
@@ -907,9 +907,17 @@ open `http://127.0.0.1:11436/_capture` and each entry shows `effortFields`
 resolved tier. To log to disk too, start with `DEEPTHINK_CAPTURE=capture.log`.
 
 ```bash
-npm run proxy:effort                        # :11436 → localhost:11434
+npm run proxy                        # :11436 → localhost:11434
 curl -s localhost:11436/_capture | node -e "..."   # read where effort hides
 ```
+
+**No model configuration needed.** The proxy is model-agnostic: whatever
+`model` the request payload carries is the model that runs (pooled per model,
+so mixed-model traffic is fine), and when a payload names none the proxy falls
+back to `DEEPTHINK_MODEL` → `OLLAMA_MODEL` → the daemon's first *local*
+(non-`-cloud`) model → the daemon's first model. The old always-through-the-
+engine proxy on :8000 still exists as `npm run proxy:engine` for anyone who
+liked that mode.
 
 Client wiring that actually sticks:
 

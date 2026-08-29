@@ -1,6 +1,6 @@
 # STATUS
 
-Last updated: 2026-08-29 ~14:10 UTC && Last updated: 2026-08-29 ~14:10 UTC
+Last updated: 2026-08-29 ~14:10 UTC
 Session goal: ship the deepthink-js speed/search/proxy/bench/RL upgrade, tested on gemma4:31b-cloud.
 
 ## FINISHED
@@ -39,6 +39,7 @@ Session goal: ship the deepthink-js speed/search/proxy/bench/RL upgrade, tested 
 - One RL cycle: `node scripts/rlLoop.js`. Long runs: `node scripts/rlLoop.js --loop 5`.
 - Proxy: `npm run proxy:effort` then `DEEPTHINK_CAPTURE=1` for payload archaeology.
 - AIME-style bench still the reference: plain 23/29 vs deepthink 24/29 (d2c2), pre-existing baseline intact.
+
 ## npm run proxy round (2026-08-29 final)
 - `npm run proxy` is now the effort proxy on :11436 (`proxy:engine` keeps the :8000 always-engine mode).
 - Model-agnostic: payload model wins (pooled per model, all 36 daemon models usable); no model in payload → DEEPTHINK_MODEL → OLLAMA_MODEL → gemma4:31b-cloud (when the daemon lists it).
